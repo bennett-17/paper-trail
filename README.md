@@ -98,12 +98,13 @@ of the formatted console view.
 ## Architecture
 
 ```
-cmd/paper-trail/        # CLI entrypoint (lookup, filings, graph subcommands)
-cmd/smoketest/          # manual live-API validation tool (see Testing below)
-internal/edgar/         # SEC EDGAR client + data models
-internal/envfile/       # minimal .env loader (stdlib only, see Setup below)
-internal/graph/         # builds a node/edge relationship graph, exports JSON
-testdata/               # fixtures used by the offline test suite
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext subcommands)
+cmd/smoketest/               # manual live-API validation tool (see Testing below)
+internal/edgar/              # SEC EDGAR client + data models
+internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
+internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
+internal/graph/              # builds a node/edge relationship graph, exports JSON
+testdata/                    # fixtures used by the offline test suite
 ```
 
 No scraping — everything goes through SEC's documented JSON/Atom APIs:
