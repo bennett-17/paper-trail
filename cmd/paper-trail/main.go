@@ -44,12 +44,30 @@ func printUsage() {
 
 Usage:
   paper-trail lookup <query> [--json]
+  paper-trail lookup --cik <cik> [--json]
   paper-trail filings --cik <cik> [--form <form>] [--limit <n>] [--json]
   paper-trail graph <query> [--output <path>] [--include-insiders=false]
+  paper-trail graph --cik <cik> [--output <path>] [--include-insiders=false]
+
+--cik looks up an exact CIK directly, bypassing name/ticker resolution.
+Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
+former identity surfaced by lookup's "Related CIKs" check.
 
 Environment:
   EDGAR_USER_AGENT   required, e.g. "Your Name your.email@example.com"
                      (can also be set via a .env file in the working dir)`)
+}
+
+// resolveTargetCIK returns cikFlag directly if set -- bypassing name/
+// ticker resolution entirely, since some CIKs (subsidiaries, former
+// identities after a corporate restructuring) never have a ticker and
+// so can never be found by ResolveCIK -- otherwise resolves query the
+// normal way.
+func resolveTargetCIK(client *edgar.Client, query, cikFlag string) (string, error) {
+	if cikFlag != "" {
+		return cikFlag, nil
+	}
+	return client.ResolveCIK(query)
 }
 
 // splitPositional separates args into flag arguments (recognized by fs)
@@ -99,17 +117,25 @@ func newClientOrExit() *edgar.Client {
 func runLookup(args []string) {
 	fs := flag.NewFlagSet("lookup", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "print raw JSON")
+	cikFlag := fs.String("cik", "", "look up by exact CIK, bypassing name/ticker resolution")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	if len(positional) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: paper-trail lookup <query> [--json]")
+	const usage = "usage: paper-trail lookup <query> [--json]  (or: paper-trail lookup --cik <cik> [--json])"
+	var query string
+	if *cikFlag == "" {
+		if len(positional) != 1 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(1)
+		}
+		query = positional[0]
+	} else if len(positional) != 0 {
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
 	}
-	query := positional[0]
 
 	client := newClientOrExit()
-	cik, err := client.ResolveCIK(query)
+	cik, err := resolveTargetCIK(client, query, *cikFlag)
 	exitOnErr(err)
 	company, err := client.GetCompany(cik)
 	exitOnErr(err)
@@ -203,17 +229,25 @@ func runGraph(args []string) {
 	fs := flag.NewFlagSet("graph", flag.ExitOnError)
 	output := fs.String("output", "", "write graph JSON to this path instead of stdout")
 	includeInsiders := fs.Bool("include-insiders", true, "include Form 3/4/5 insider-filer relationships")
+	cikFlag := fs.String("cik", "", "look up by exact CIK, bypassing name/ticker resolution")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	if len(positional) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: paper-trail graph <query> [--output <path>] [--include-insiders=false]")
+	const usage = "usage: paper-trail graph <query> [--output <path>] [--include-insiders=false]  (or: paper-trail graph --cik <cik> ...)"
+	var query string
+	if *cikFlag == "" {
+		if len(positional) != 1 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(1)
+		}
+		query = positional[0]
+	} else if len(positional) != 0 {
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
 	}
-	query := positional[0]
 
 	client := newClientOrExit()
-	cik, err := client.ResolveCIK(query)
+	cik, err := resolveTargetCIK(client, query, *cikFlag)
 	exitOnErr(err)
 	company, err := client.GetCompany(cik)
 	exitOnErr(err)

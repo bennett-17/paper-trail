@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -58,6 +60,7 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	c.TickersURL = srv.URL + "/tickers.json"
 	c.SubmissionsURL = srv.URL + "/submissions/CIK%s.json"
 	c.BrowseEdgarURL = srv.URL + "/browse-edgar"
+	c.CacheDir = t.TempDir() // isolate from the real OS cache dir
 	return c
 }
 
@@ -375,6 +378,73 @@ func TestNormalizeEntityNameUnifiesPunctuationAndStateSuffix(t *testing.T) {
 		if got := normalizeEntityName(input); got != want {
 			t.Errorf("normalizeEntityName(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+// TestFetchReportingOwnersCachesAcrossClients verifies the on-disk owner
+// cache actually avoids re-fetching a filing's XML document -- both
+// within one client (after saveOwnerCache persists it) and, more
+// importantly, across a brand-new *Client pointed at the same CacheDir,
+// which is what real separate `paper-trail graph` invocations look like.
+func TestFetchReportingOwnersCachesAcrossClients(t *testing.T) {
+	var indexHits, xmlHits int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Archives/edgar/data/320193/000114036126025622/index.json", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&indexHits, 1)
+		fmt.Fprint(w, `{"directory":{"item":[{"name":"form4.xml"}]}}`)
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000114036126025622/form4.xml", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&xmlHits, 1)
+		fmt.Fprint(w, mustReadFixture(t, "form4_cook.xml"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cacheDir := t.TempDir()
+	filingHref := srv.URL + "/Archives/edgar/data/320193/000114036126025622/0001140361-26-025622-index.htm"
+
+	c1 := newTestClient(t, srv)
+	c1.CacheDir = cacheDir
+	owners1, err := c1.fetchReportingOwners(filingHref)
+	if err != nil {
+		t.Fatalf("fetchReportingOwners (client 1): %v", err)
+	}
+	if len(owners1) != 1 || owners1[0].Name != "COOK TIMOTHY D" {
+		t.Fatalf("client 1 got %+v, want [COOK TIMOTHY D]", owners1)
+	}
+	if indexHits != 1 || xmlHits != 1 {
+		t.Fatalf("after client 1: indexHits=%d xmlHits=%d, want 1/1", indexHits, xmlHits)
+	}
+
+	// Not yet persisted to disk -- a second call on the SAME client should
+	// still be an in-memory cache hit, not a second round of requests.
+	if _, err := c1.fetchReportingOwners(filingHref); err != nil {
+		t.Fatalf("fetchReportingOwners (client 1, repeat): %v", err)
+	}
+	if indexHits != 1 || xmlHits != 1 {
+		t.Fatalf("after client 1 repeat call: indexHits=%d xmlHits=%d, want still 1/1", indexHits, xmlHits)
+	}
+
+	// This is what a real run does at the end of GetInsiderRelationships.
+	c1.saveOwnerCache()
+	if _, err := os.Stat(filepath.Join(cacheDir, "insider-owners-cache.json")); err != nil {
+		t.Fatalf("expected cache file on disk after saveOwnerCache: %v", err)
+	}
+
+	// A brand-new *Client pointed at the same CacheDir -- simulating a
+	// separate `paper-trail graph` invocation -- should load the
+	// persisted cache and make zero further requests.
+	c2 := newTestClient(t, srv)
+	c2.CacheDir = cacheDir
+	owners2, err := c2.fetchReportingOwners(filingHref)
+	if err != nil {
+		t.Fatalf("fetchReportingOwners (client 2): %v", err)
+	}
+	if len(owners2) != 1 || owners2[0].Name != "COOK TIMOTHY D" {
+		t.Fatalf("client 2 got %+v, want [COOK TIMOTHY D]", owners2)
+	}
+	if indexHits != 1 || xmlHits != 1 {
+		t.Errorf("after client 2 (should be a disk cache hit): indexHits=%d xmlHits=%d, want still 1/1", indexHits, xmlHits)
 	}
 }
 

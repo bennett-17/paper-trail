@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -51,10 +52,19 @@ type Client struct {
 	SubmissionsURL string // format string with a single %s for the 10-digit CIK
 	BrowseEdgarURL string
 
+	// CacheDir holds the on-disk cache of insider-filing reporting-owner
+	// lookups (see fetchReportingOwners). Defaults to
+	// os.UserCacheDir()/paper-trail; set to "" to disable caching.
+	CacheDir string
+
 	mu            sync.Mutex
 	lastRequestAt time.Time
 	tickerByCode  map[string]string // uppercase ticker -> 10-digit CIK
 	tickerByName  map[string]string // lowercase name -> 10-digit CIK
+
+	ownerCacheMu    sync.Mutex
+	ownerCache      map[string][]reportingOwner // filingHref -> owners; nil until loadOwnerCache runs
+	ownerCacheDirty bool
 }
 
 // NewClient builds a Client. If userAgent is empty, it falls back to the
@@ -72,6 +82,10 @@ func NewClient(userAgent string) (*Client, error) {
 				"See https://www.sec.gov/os/accessing-edgar-data",
 		)
 	}
+	cacheDir := ""
+	if dir, err := os.UserCacheDir(); err == nil {
+		cacheDir = filepath.Join(dir, "paper-trail")
+	}
 	return &Client{
 		UserAgent:      userAgent,
 		MinInterval:    150 * time.Millisecond,
@@ -79,6 +93,7 @@ func NewClient(userAgent string) (*Client, error) {
 		TickersURL:     DefaultTickersURL,
 		SubmissionsURL: DefaultSubmissionsURL,
 		BrowseEdgarURL: DefaultBrowseEdgarURL,
+		CacheDir:       cacheDir,
 	}, nil
 }
 
@@ -514,9 +529,11 @@ type ownershipDocument struct {
 	} `xml:"reportingOwner"`
 }
 
+// reportingOwner is exported-field so it can round-trip through the
+// on-disk owner cache (see ownerCacheFile) via encoding/json.
 type reportingOwner struct {
-	cik  string
-	name string
+	CIK  string `json:"cik"`
+	Name string `json:"name"`
 }
 
 // GetInsiderRelationships derives relationship edges from Form 3/4/5
@@ -576,7 +593,7 @@ func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]
 				form = formType
 			}
 			for _, owner := range owners {
-				key := owner.cik + "|" + owner.name
+				key := owner.CIK + "|" + owner.Name
 				if seen[key] {
 					continue // already recorded via an earlier (higher-priority) filing
 				}
@@ -584,8 +601,8 @@ func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]
 				edges = append(edges, Relationship{
 					SourceCIK:               cik10,
 					SourceName:              companyName,
-					TargetCIK:               owner.cik,
-					TargetName:              owner.name,
+					TargetCIK:               owner.CIK,
+					TargetName:              owner.Name,
 					RelationshipType:        "insider_filer",
 					EvidenceForm:            form,
 					EvidenceAccessionNumber: entry.Content.AccessionNumber,
@@ -593,13 +610,25 @@ func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]
 			}
 		}
 	}
+	c.saveOwnerCache()
 	return edges, nil
 }
 
 // fetchReportingOwners looks up the reporting owner(s) named in the Form
 // 3/4/5 filing at filingHref (an absolute URL to that filing's -index.htm
-// page, as given in SEC's Atom feed).
+// page, as given in SEC's Atom feed). Results are cached on disk keyed by
+// filingHref: a filing's content is permanent once EDGAR accepts it (an
+// amendment gets its own new accession number/URL rather than editing the
+// original), so a cache hit here never goes stale and needs no expiry.
 func (c *Client) fetchReportingOwners(filingHref string) ([]reportingOwner, error) {
+	c.loadOwnerCache()
+	c.ownerCacheMu.Lock()
+	if owners, ok := c.ownerCache[filingHref]; ok {
+		c.ownerCacheMu.Unlock()
+		return owners, nil
+	}
+	c.ownerCacheMu.Unlock()
+
 	i := strings.LastIndex(filingHref, "/")
 	if i < 0 {
 		return nil, newClientError("malformed filing href %q", filingHref)
@@ -644,9 +673,87 @@ func (c *Client) fetchReportingOwners(filingHref string) ([]reportingOwner, erro
 		if name == "" || cikVal == "" {
 			continue
 		}
-		owners = append(owners, reportingOwner{cik: zeroPadCIK(cikVal), name: name})
+		owners = append(owners, reportingOwner{CIK: zeroPadCIK(cikVal), Name: name})
 	}
+
+	c.ownerCacheMu.Lock()
+	c.ownerCache[filingHref] = owners
+	c.ownerCacheDirty = true
+	c.ownerCacheMu.Unlock()
+
 	return owners, nil
+}
+
+// ownerCacheVersion guards against loading a cache file written by an
+// incompatible future format; bump it if the value shape ever changes.
+const ownerCacheVersion = 1
+
+type ownerCacheFile struct {
+	Version int                         `json:"version"`
+	Owners  map[string][]reportingOwner `json:"owners"` // filingHref -> reporting owners
+}
+
+func (c *Client) ownerCachePath() string {
+	if c.CacheDir == "" {
+		return ""
+	}
+	return filepath.Join(c.CacheDir, "insider-owners-cache.json")
+}
+
+// loadOwnerCache lazily loads the on-disk cache into memory on first use.
+// A missing, unreadable, or unrecognized-version cache file is treated as
+// an empty cache rather than an error -- this is a pure optimization, so
+// anything short of a successful load just means starting fresh.
+func (c *Client) loadOwnerCache() {
+	c.ownerCacheMu.Lock()
+	defer c.ownerCacheMu.Unlock()
+	if c.ownerCache != nil {
+		return
+	}
+	c.ownerCache = map[string][]reportingOwner{}
+
+	path := c.ownerCachePath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var file ownerCacheFile
+	if err := json.Unmarshal(data, &file); err != nil || file.Version != ownerCacheVersion {
+		return
+	}
+	c.ownerCache = file.Owners
+}
+
+// saveOwnerCache persists the in-memory owner cache once, at the end of
+// a GetInsiderRelationships call, rather than after every individual
+// cache miss -- avoids re-serializing the whole (potentially large,
+// long-lived) cache file on every single filing fetched. A failed write
+// is non-fatal: caching is an optimization, not a correctness
+// requirement, so it shouldn't break the command that triggered it.
+func (c *Client) saveOwnerCache() {
+	path := c.ownerCachePath()
+	if path == "" {
+		return
+	}
+	c.ownerCacheMu.Lock()
+	defer c.ownerCacheMu.Unlock()
+	if !c.ownerCacheDirty {
+		return
+	}
+	data, err := json.Marshal(ownerCacheFile{Version: ownerCacheVersion, Owners: c.ownerCache})
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return
+	}
+	c.ownerCacheDirty = false
 }
 
 func zeroPadCIK(cik string) string {
