@@ -2,30 +2,36 @@
 <feed xmlns="http://www.w3.org/2005/Atom">
   <title>SEC EDGAR Filings</title>
   <entry>
-    <title>4 - COOK TIMOTHY D (0001214156) (Reporting)</title>
-    <updated>2024-08-01T18:30:00-04:00</updated>
-    <id>urn:tag:sec.gov,2008:accession-number=0000320193-24-000123</id>
-    <content type="text">
+    <content type="text/xml">
+      <accession-number>0001140361-26-025622</accession-number>
+      <filing-date>2026-06-17</filing-date>
+      <filing-href>{{BASE}}/Archives/edgar/data/320193/000114036126025622/0001140361-26-025622-index.htm</filing-href>
       <filing-type>4</filing-type>
-      <filing-date>2024-08-01</filing-date>
+      <form-name>Statement of changes in beneficial ownership of securities</form-name>
     </content>
+    <title>4  - Statement of changes in beneficial ownership of securities</title>
+    <updated>2026-06-17T18:40:43-04:00</updated>
   </entry>
   <entry>
-    <title>4 - MAESTRI LUCA (0001513142) (Reporting)</title>
-    <updated>2024-07-15T18:30:00-04:00</updated>
-    <id>urn:tag:sec.gov,2008:accession-number=0000320193-24-000110</id>
-    <content type="text">
+    <content type="text/xml">
+      <accession-number>0001140361-26-025620</accession-number>
+      <filing-date>2026-06-17</filing-date>
+      <filing-href>{{BASE}}/Archives/edgar/data/320193/000114036126025620/0001140361-26-025620-index.htm</filing-href>
       <filing-type>4</filing-type>
-      <filing-date>2024-07-15</filing-date>
+      <form-name>Statement of changes in beneficial ownership of securities</form-name>
     </content>
+    <title>4  - Statement of changes in beneficial ownership of securities</title>
+    <updated>2026-06-17T18:30:15-04:00</updated>
   </entry>
   <entry>
-    <title>malformed entry title with no parens</title>
-    <updated>2024-07-01T18:30:00-04:00</updated>
-    <id>urn:tag:sec.gov,2008:accession-number=0000320193-24-000099</id>
-    <content type="text">
+    <content type="text/xml">
+      <accession-number>0000320193-26-000099</accession-number>
+      <filing-date>2026-06-01</filing-date>
+      <filing-href>{{BASE}}/Archives/edgar/data/320193/000114036126000099/0000320193-26-000099-index.htm</filing-href>
       <filing-type>4</filing-type>
-      <filing-date>2024-07-01</filing-date>
+      <form-name>Statement of changes in beneficial ownership of securities</form-name>
     </content>
+    <title>4  - Statement of changes in beneficial ownership of securities</title>
+    <updated>2026-06-01T18:30:15-04:00</updated>
   </entry>
 </feed>

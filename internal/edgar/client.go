@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +20,6 @@ const (
 	DefaultSubmissionsURL = "https://data.sec.gov/submissions/CIK%s.json"
 	DefaultBrowseEdgarURL = "https://www.sec.gov/cgi-bin/browse-edgar"
 )
-
-// titleRE matches SEC's Atom feed title format for insider filings, e.g.
-// "4 - COOK TIMOTHY D (0001214156) (Reporting)".
-var titleRE = regexp.MustCompile(`^\s*(\S+)\s*-\s*(.+?)\s*\((\d+)\)\s*\(([^)]+)\)\s*$`)
 
 // ClientError wraps errors raised by this package so callers can
 // distinguish them from generic network/parsing failures if needed.
@@ -376,19 +371,52 @@ type atomFeed struct {
 }
 
 type atomEntry struct {
-	Title string `xml:"title"`
+	Content atomEntryContent `xml:"content"`
+}
+
+type atomEntryContent struct {
+	AccessionNumber string `xml:"accession-number"`
+	FilingHref      string `xml:"filing-href"`
+	FilingType      string `xml:"filing-type"`
+}
+
+// filingDirectoryListing mirrors the JSON SEC serves at
+// "<filing-directory>/index.json" for every filing. Filer software names
+// the primary document differently (form4.xml, primary_doc.xml, etc.),
+// so this is used to find it by extension rather than guessing.
+type filingDirectoryListing struct {
+	Directory struct {
+		Item []struct {
+			Name string `json:"name"`
+		} `json:"item"`
+	} `json:"directory"`
+}
+
+// ownershipDocument is the schema of a Form 3/4/5 XML ownership document,
+// trimmed to the fields needed to identify the reporting owner(s).
+type ownershipDocument struct {
+	ReportingOwners []struct {
+		ID struct {
+			CIK  string `xml:"rptOwnerCik"`
+			Name string `xml:"rptOwnerName"`
+		} `xml:"reportingOwnerId"`
+	} `xml:"reportingOwner"`
+}
+
+type reportingOwner struct {
+	cik  string
+	name string
 }
 
 // GetInsiderRelationships derives relationship edges from Form 3/4/5
 // insider filings tied to a CIK.
 //
-// NOTE: this parses SEC's Atom feed title field (e.g.
-// "4 - COOK TIMOTHY D (0001214156) (Reporting)"), which is the most
-// stable public field SEC exposes for this without paging through each
-// filing's XML. It has not been validated against a live response in
-// the environment this was written in — run cmd/smoketest locally to
-// confirm the regex still matches before relying on this for a real
-// investigation.
+// SEC's Atom feed for these filings no longer carries the reporting
+// owner's name in its <title> (just the form's boilerplate description),
+// so for each filing this fetches the filing's own directory listing to
+// find its primary XML document, then reads the reporting owner(s)
+// straight out of that document. That's two extra requests per filing on
+// top of the feed itself, throttled the same as every other request.
 func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]Relationship, error) {
 	cik10 := zeroPadCIK(cik)
 	url := fmt.Sprintf(
@@ -408,22 +436,90 @@ func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]
 	}
 
 	edges := make([]Relationship, 0, len(feed.Entries))
+	seen := make(map[string]bool)
 	for _, entry := range feed.Entries {
-		m := titleRE.FindStringSubmatch(entry.Title)
-		if m == nil {
-			continue // skip entries that don't match the expected title format
+		if entry.Content.FilingHref == "" {
+			continue
 		}
-		form, name, targetCIK := m[1], strings.TrimSpace(m[2]), m[3]
-		edges = append(edges, Relationship{
-			SourceCIK:        cik10,
-			SourceName:       companyName,
-			TargetCIK:        targetCIK,
-			TargetName:       name,
-			RelationshipType: "insider_filer",
-			EvidenceForm:     form,
-		})
+		owners, err := c.fetchReportingOwners(entry.Content.FilingHref)
+		if err != nil {
+			continue // one unreadable filing shouldn't sink the whole graph
+		}
+		form := entry.Content.FilingType
+		if form == "" {
+			form = "4"
+		}
+		for _, owner := range owners {
+			key := owner.cik + "|" + owner.name
+			if seen[key] {
+				continue // same person filed more than one Form 4
+			}
+			seen[key] = true
+			edges = append(edges, Relationship{
+				SourceCIK:               cik10,
+				SourceName:              companyName,
+				TargetCIK:               owner.cik,
+				TargetName:              owner.name,
+				RelationshipType:        "insider_filer",
+				EvidenceForm:            form,
+				EvidenceAccessionNumber: entry.Content.AccessionNumber,
+			})
+		}
 	}
 	return edges, nil
+}
+
+// fetchReportingOwners looks up the reporting owner(s) named in the Form
+// 3/4/5 filing at filingHref (an absolute URL to that filing's -index.htm
+// page, as given in SEC's Atom feed).
+func (c *Client) fetchReportingOwners(filingHref string) ([]reportingOwner, error) {
+	i := strings.LastIndex(filingHref, "/")
+	if i < 0 {
+		return nil, newClientError("malformed filing href %q", filingHref)
+	}
+	dir := filingHref[:i+1]
+
+	listingBody, err := c.get(dir + "index.json")
+	if err != nil {
+		return nil, err
+	}
+	var listing filingDirectoryListing
+	if err := json.Unmarshal(listingBody, &listing); err != nil {
+		return nil, newClientError("parsing filing directory listing: %v", err)
+	}
+
+	var xmlName string
+	for _, item := range listing.Directory.Item {
+		if strings.HasSuffix(strings.ToLower(item.Name), ".xml") {
+			xmlName = item.Name
+			break
+		}
+	}
+	if xmlName == "" {
+		return nil, newClientError("no XML document found in filing directory %s", dir)
+	}
+
+	docBody, err := c.get(dir + xmlName)
+	if err != nil {
+		return nil, err
+	}
+	var doc ownershipDocument
+	dec := xml.NewDecoder(bytes.NewReader(docBody))
+	dec.CharsetReader = charsetReader
+	if err := dec.Decode(&doc); err != nil {
+		return nil, newClientError("parsing ownership document %s: %v", dir+xmlName, err)
+	}
+
+	owners := make([]reportingOwner, 0, len(doc.ReportingOwners))
+	for _, ro := range doc.ReportingOwners {
+		name := strings.TrimSpace(ro.ID.Name)
+		cikVal := strings.TrimSpace(ro.ID.CIK)
+		if name == "" || cikVal == "" {
+			continue
+		}
+		owners = append(owners, reportingOwner{cik: zeroPadCIK(cikVal), name: name})
+	}
+	return owners, nil
 }
 
 func zeroPadCIK(cik string) string {

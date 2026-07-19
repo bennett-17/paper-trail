@@ -183,9 +183,37 @@ func TestGetFilingsFilteredByForm(t *testing.T) {
 	}
 }
 
-func TestGetInsiderRelationshipsParsesAtom(t *testing.T) {
-	atom := mustReadFixture(t, "insider_filings_apple.atom")
-	srv := newTestServer(t, "", "", atom, 0, 0)
+// TestGetInsiderRelationshipsFetchesReportingOwners exercises the full
+// path: an Atom feed entry that only carries a filing-href (no reporting
+// owner name, matching SEC's current live format), a directory listing
+// at "<filing>/index.json" naming the primary XML document, and that
+// document's own <reportingOwner> block. The third filing's directory
+// listing 404s and should be skipped rather than failing the whole call.
+func TestGetInsiderRelationshipsFetchesReportingOwners(t *testing.T) {
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/browse-edgar", func(w http.ResponseWriter, r *http.Request) {
+		tmpl := mustReadFixture(t, "insider_filings_apple.atom")
+		fmt.Fprint(w, strings.ReplaceAll(tmpl, "{{BASE}}", srv.URL))
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000114036126025622/index.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"directory":{"item":[{"name":"form4.xml"}]}}`)
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000114036126025622/form4.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "form4_cook.xml"))
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000114036126025620/index.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"directory":{"item":[{"name":"form4.xml"}]}}`)
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000114036126025620/form4.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "form4_maestri.xml"))
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000114036126000099/index.json", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	srv = httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
@@ -193,19 +221,35 @@ func TestGetInsiderRelationshipsParsesAtom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInsiderRelationships: %v", err)
 	}
-	// Third entry is malformed and should be skipped, not raise.
 	if len(rels) != 2 {
-		t.Fatalf("got %d relationships, want 2", len(rels))
+		t.Fatalf("got %d relationships, want 2: %+v", len(rels), rels)
 	}
-	names := map[string]bool{}
+	byName := map[string]Relationship{}
 	for _, r := range rels {
-		names[r.TargetName] = true
+		byName[r.TargetName] = r
 		if r.RelationshipType != "insider_filer" {
 			t.Errorf("got relationship type %q", r.RelationshipType)
 		}
+		if r.SourceCIK != "0000320193" || r.SourceName != "Apple Inc." {
+			t.Errorf("got source %s/%s, want issuer identity", r.SourceCIK, r.SourceName)
+		}
 	}
-	if !names["COOK TIMOTHY D"] || !names["MAESTRI LUCA"] {
-		t.Errorf("got names %v", names)
+	cook, ok := byName["COOK TIMOTHY D"]
+	if !ok {
+		t.Fatalf("got names %v, missing COOK TIMOTHY D", byName)
+	}
+	if cook.TargetCIK != "0001214156" {
+		t.Errorf("Cook TargetCIK = %q, want 0001214156", cook.TargetCIK)
+	}
+	if cook.EvidenceAccessionNumber != "0001140361-26-025622" {
+		t.Errorf("Cook EvidenceAccessionNumber = %q", cook.EvidenceAccessionNumber)
+	}
+	maestri, ok := byName["MAESTRI LUCA"]
+	if !ok {
+		t.Fatalf("got names %v, missing MAESTRI LUCA", byName)
+	}
+	if maestri.TargetCIK != "0001513142" {
+		t.Errorf("Maestri TargetCIK = %q, want 0001513142", maestri.TargetCIK)
 	}
 }
 
