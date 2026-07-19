@@ -1,0 +1,37 @@
+{
+  "cik": "320193",
+  "name": "Apple Inc.",
+  "entityType": "operating",
+  "sic": "3571",
+  "sicDescription": "Electronic Computers",
+  "tickers": ["AAPL"],
+  "fiscalYearEnd": "0928",
+  "formerNames": [
+    {"name": "APPLE COMPUTER INC", "from": "1994-01-01T00:00:00Z", "to": "2007-01-09T00:00:00Z"}
+  ],
+  "addresses": {
+    "mailing": {
+      "street1": "ONE APPLE PARK WAY",
+      "street2": null,
+      "city": "CUPERTINO",
+      "stateOrCountry": "CA",
+      "zipCode": "95014"
+    },
+    "business": {
+      "street1": "ONE APPLE PARK WAY",
+      "street2": null,
+      "city": "CUPERTINO",
+      "stateOrCountry": "CA",
+      "zipCode": "95014"
+    }
+  },
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0000320193-24-000123", "0000320193-24-000045"],
+      "filingDate": ["2024-08-01", "2024-05-03"],
+      "reportDate": ["2024-06-29", "2024-03-30"],
+      "form": ["10-Q", "10-Q"],
+      "primaryDocument": ["aapl-20240629.htm", "aapl-20240330.htm"]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>SEC EDGAR Filings</title>
+  <entry>
+    <title>4 - COOK TIMOTHY D (0001214156) (Reporting)</title>
+    <updated>2024-08-01T18:30:00-04:00</updated>
+    <id>urn:tag:sec.gov,2008:accession-number=0000320193-24-000123</id>
+    <content type="text">
+      <filing-type>4</filing-type>
+      <filing-date>2024-08-01</filing-date>
+    </content>
+  </entry>
+  <entry>
+    <title>4 - MAESTRI LUCA (0001513142) (Reporting)</title>
+    <updated>2024-07-15T18:30:00-04:00</updated>
+    <id>urn:tag:sec.gov,2008:accession-number=0000320193-24-000110</id>
+    <content type="text">
+      <filing-type>4</filing-type>
+      <filing-date>2024-07-15</filing-date>
+    </content>
+  </entry>
+  <entry>
+    <title>malformed entry title with no parens</title>
+    <updated>2024-07-01T18:30:00-04:00</updated>
+    <id>urn:tag:sec.gov,2008:accession-number=0000320193-24-000099</id>
+    <content type="text">
+      <filing-type>4</filing-type>
+      <filing-date>2024-07-01</filing-date>
+    </content>
+  </entry>
+</feed>

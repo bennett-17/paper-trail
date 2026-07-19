@@ -1,0 +1,7 @@
+/paper-trail
+/smoketest
+*.exe
+*.test
+*.out
+*.json.local
+.DS_Store
