@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/bennett-17/paper-trail/internal/edgar"
@@ -44,11 +45,46 @@ func printUsage() {
 Usage:
   paper-trail lookup <query> [--json]
   paper-trail filings --cik <cik> [--form <form>] [--limit <n>] [--json]
-  paper-trail graph <query> [--output <path>] [--no-include-insiders]
+  paper-trail graph <query> [--output <path>] [--include-insiders=false]
 
 Environment:
   EDGAR_USER_AGENT   required, e.g. "Your Name your.email@example.com"
                      (can also be set via a .env file in the working dir)`)
+}
+
+// splitPositional separates args into flag arguments (recognized by fs)
+// and positional arguments, so a subcommand's single positional argument
+// can appear before, after, or between flags — the stdlib flag package
+// otherwise stops parsing flags at the first non-flag argument.
+func splitPositional(fs *flag.FlagSet, args []string) (flagArgs, positional []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			positional = append(positional, a)
+			continue
+		}
+		flagArgs = append(flagArgs, a)
+		name := strings.TrimLeft(a, "-")
+		if strings.Contains(name, "=") {
+			continue // value embedded, e.g. --output=x
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue // unknown flag; let fs.Parse report the error
+		}
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			continue // bool flags don't consume the next arg
+		}
+		if i+1 < len(args) {
+			i++
+			flagArgs = append(flagArgs, args[i])
+		}
+	}
+	return flagArgs, positional
 }
 
 func newClientOrExit() *edgar.Client {
@@ -63,13 +99,14 @@ func newClientOrExit() *edgar.Client {
 func runLookup(args []string) {
 	fs := flag.NewFlagSet("lookup", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "print raw JSON")
-	fs.Parse(args)
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
 
-	if fs.NArg() != 1 {
+	if len(positional) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: paper-trail lookup <query> [--json]")
 		os.Exit(1)
 	}
-	query := fs.Arg(0)
+	query := positional[0]
 
 	client := newClientOrExit()
 	cik, err := client.ResolveCIK(query)
@@ -145,13 +182,14 @@ func runGraph(args []string) {
 	fs := flag.NewFlagSet("graph", flag.ExitOnError)
 	output := fs.String("output", "", "write graph JSON to this path instead of stdout")
 	includeInsiders := fs.Bool("include-insiders", true, "include Form 3/4/5 insider-filer relationships")
-	fs.Parse(args)
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
 
-	if fs.NArg() != 1 {
+	if len(positional) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: paper-trail graph <query> [--output <path>] [--include-insiders=false]")
 		os.Exit(1)
 	}
-	query := fs.Arg(0)
+	query := positional[0]
 
 	client := newClientOrExit()
 	cik, err := client.ResolveCIK(query)
