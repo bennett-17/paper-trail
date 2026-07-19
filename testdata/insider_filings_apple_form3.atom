@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>SEC EDGAR Filings</title>
+  <entry>
+    <content type="text/xml">
+      <accession-number>0001780525-26-000003</accession-number>
+      <filing-date>2026-03-06</filing-date>
+      <filing-href>{{BASE}}/Archives/edgar/data/320193/000178052526000003/0001780525-26-000003-index.htm</filing-href>
+      <filing-type>3</filing-type>
+      <form-name>Initial statement of beneficial ownership of securities</form-name>
+    </content>
+    <title>3  - Initial statement of beneficial ownership of securities</title>
+    <updated>2026-03-06T18:30:51-05:00</updated>
+  </entry>
+  <entry>
+    <content type="text/xml">
+      <accession-number>0001214156-18-000001</accession-number>
+      <filing-date>2018-08-01</filing-date>
+      <filing-href>{{BASE}}/Archives/edgar/data/320193/000121415618000001/0001214156-18-000001-index.htm</filing-href>
+      <filing-type>3</filing-type>
+      <form-name>Initial statement of beneficial ownership of securities</form-name>
+    </content>
+    <title>3  - Initial statement of beneficial ownership of securities</title>
+    <updated>2018-08-01T18:30:51-04:00</updated>
+  </entry>
+</feed>

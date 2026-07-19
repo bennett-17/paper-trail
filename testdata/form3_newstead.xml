@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<ownershipDocument>
+    <schemaVersion>X0206</schemaVersion>
+    <documentType>3</documentType>
+    <periodOfReport>2026-03-01</periodOfReport>
+    <noSecuritiesOwned>0</noSecuritiesOwned>
+    <issuer>
+        <issuerCik>0000320193</issuerCik>
+        <issuerName>Apple Inc.</issuerName>
+        <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0001780525</rptOwnerCik>
+            <rptOwnerName>Newstead Jennifer</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerRelationship>
+            <isDirector>0</isDirector>
+            <isOfficer>1</isOfficer>
+            <isTenPercentOwner>0</isTenPercentOwner>
+            <officerTitle>SVP, GC and Secretary</officerTitle>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+</ownershipDocument>

@@ -184,17 +184,29 @@ func TestGetFilingsFilteredByForm(t *testing.T) {
 }
 
 // TestGetInsiderRelationshipsFetchesReportingOwners exercises the full
-// path: an Atom feed entry that only carries a filing-href (no reporting
-// owner name, matching SEC's current live format), a directory listing
-// at "<filing>/index.json" naming the primary XML document, and that
-// document's own <reportingOwner> block. The third filing's directory
-// listing 404s and should be skipped rather than failing the whole call.
+// path against both the Form 4 and Form 3 feeds: entries that only carry
+// a filing-href (no reporting owner name, matching SEC's current live
+// format), a directory listing at "<filing>/index.json" naming the
+// primary XML document, and that document's own <reportingOwner> block.
+//
+//   - Form 4 feed: Cook and Maestri. The third entry's directory listing
+//     404s and should be skipped rather than failing the whole call.
+//   - Form 3 feed: Newstead (not present in the Form 4 feed at all — this
+//     is the case the full-roster fix exists for, e.g. a director who
+//     hasn't traded recently) and a years-old Form 3 for Cook, which
+//     should be deduped away in favor of the Form 4 entry already
+//     recorded (Form 4 is queried first and wins the single evidence
+//     slot on Relationship).
 func TestGetInsiderRelationshipsFetchesReportingOwners(t *testing.T) {
 	var srv *httptest.Server
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/browse-edgar", func(w http.ResponseWriter, r *http.Request) {
-		tmpl := mustReadFixture(t, "insider_filings_apple.atom")
+		fixture := "insider_filings_apple.atom"
+		if r.URL.Query().Get("type") == "3" {
+			fixture = "insider_filings_apple_form3.atom"
+		}
+		tmpl := mustReadFixture(t, fixture)
 		fmt.Fprint(w, strings.ReplaceAll(tmpl, "{{BASE}}", srv.URL))
 	})
 	mux.HandleFunc("/Archives/edgar/data/320193/000114036126025622/index.json", func(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +224,18 @@ func TestGetInsiderRelationshipsFetchesReportingOwners(t *testing.T) {
 	mux.HandleFunc("/Archives/edgar/data/320193/000114036126000099/index.json", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000178052526000003/index.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"directory":{"item":[{"name":"wk-form3_1.xml"}]}}`)
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000178052526000003/wk-form3_1.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "form3_newstead.xml"))
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000121415618000001/index.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"directory":{"item":[{"name":"wk-form3_2.xml"}]}}`)
+	})
+	mux.HandleFunc("/Archives/edgar/data/320193/000121415618000001/wk-form3_2.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "form3_cook.xml"))
+	})
 
 	srv = httptest.NewServer(mux)
 	defer srv.Close()
@@ -221,8 +245,8 @@ func TestGetInsiderRelationshipsFetchesReportingOwners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInsiderRelationships: %v", err)
 	}
-	if len(rels) != 2 {
-		t.Fatalf("got %d relationships, want 2: %+v", len(rels), rels)
+	if len(rels) != 3 {
+		t.Fatalf("got %d relationships, want 3: %+v", len(rels), rels)
 	}
 	byName := map[string]Relationship{}
 	for _, r := range rels {
@@ -241,8 +265,8 @@ func TestGetInsiderRelationshipsFetchesReportingOwners(t *testing.T) {
 	if cook.TargetCIK != "0001214156" {
 		t.Errorf("Cook TargetCIK = %q, want 0001214156", cook.TargetCIK)
 	}
-	if cook.EvidenceAccessionNumber != "0001140361-26-025622" {
-		t.Errorf("Cook EvidenceAccessionNumber = %q", cook.EvidenceAccessionNumber)
+	if cook.EvidenceForm != "4" || cook.EvidenceAccessionNumber != "0001140361-26-025622" {
+		t.Errorf("Cook evidence = form %q accession %q, want the Form 4 entry (Form 4 should win over the older Form 3)", cook.EvidenceForm, cook.EvidenceAccessionNumber)
 	}
 	maestri, ok := byName["MAESTRI LUCA"]
 	if !ok {
@@ -250,6 +274,16 @@ func TestGetInsiderRelationshipsFetchesReportingOwners(t *testing.T) {
 	}
 	if maestri.TargetCIK != "0001513142" {
 		t.Errorf("Maestri TargetCIK = %q, want 0001513142", maestri.TargetCIK)
+	}
+	newstead, ok := byName["Newstead Jennifer"]
+	if !ok {
+		t.Fatalf("got names %v, missing Newstead Jennifer (Form-3-only insider)", byName)
+	}
+	if newstead.TargetCIK != "0001780525" {
+		t.Errorf("Newstead TargetCIK = %q, want 0001780525", newstead.TargetCIK)
+	}
+	if newstead.EvidenceForm != "3" {
+		t.Errorf("Newstead EvidenceForm = %q, want 3", newstead.EvidenceForm)
 	}
 }
 

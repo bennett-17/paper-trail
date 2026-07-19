@@ -411,59 +411,73 @@ type reportingOwner struct {
 // GetInsiderRelationships derives relationship edges from Form 3/4/5
 // insider filings tied to a CIK.
 //
+// insiderFormTypes controls both which filings count as evidence of an
+// insider relationship and the priority order edges are recorded in when
+// the same person shows up more than once (an earlier type "wins" the
+// single evidence slot on Relationship). Form 4s (trading activity) come
+// first since they're the most current signal; Form 3s (one-time initial
+// ownership statements, filed once on appointment) come second so a
+// long-tenured officer or director who simply hasn't traded recently
+// still shows up instead of being invisible to a Form-4-only query.
+var insiderFormTypes = []string{"4", "3"}
+
 // SEC's Atom feed for these filings no longer carries the reporting
 // owner's name in its <title> (just the form's boilerplate description),
 // so for each filing this fetches the filing's own directory listing to
 // find its primary XML document, then reads the reporting owner(s)
 // straight out of that document. That's two extra requests per filing on
-// top of the feed itself, throttled the same as every other request.
+// top of each feed fetch, throttled the same as every other request —
+// querying both Form 3 and Form 4 roughly doubles total request count.
 func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]Relationship, error) {
 	cik10 := zeroPadCIK(cik)
-	url := fmt.Sprintf(
-		"%s?action=getcompany&CIK=%s&type=4&dateb=&owner=include&count=%d&output=atom",
-		c.BrowseEdgarURL, cik10, limit,
-	)
-	body, err := c.get(url)
-	if err != nil {
-		return nil, err
-	}
-
-	var feed atomFeed
-	dec := xml.NewDecoder(bytes.NewReader(body))
-	dec.CharsetReader = charsetReader
-	if err := dec.Decode(&feed); err != nil {
-		return nil, newClientError("parsing insider filings atom feed: %v", err)
-	}
-
-	edges := make([]Relationship, 0, len(feed.Entries))
+	edges := make([]Relationship, 0, limit)
 	seen := make(map[string]bool)
-	for _, entry := range feed.Entries {
-		if entry.Content.FilingHref == "" {
-			continue
-		}
-		owners, err := c.fetchReportingOwners(entry.Content.FilingHref)
+
+	for _, formType := range insiderFormTypes {
+		url := fmt.Sprintf(
+			"%s?action=getcompany&CIK=%s&type=%s&dateb=&owner=include&count=%d&output=atom",
+			c.BrowseEdgarURL, cik10, formType, limit,
+		)
+		body, err := c.get(url)
 		if err != nil {
-			continue // one unreadable filing shouldn't sink the whole graph
+			return nil, err
 		}
-		form := entry.Content.FilingType
-		if form == "" {
-			form = "4"
+
+		var feed atomFeed
+		dec := xml.NewDecoder(bytes.NewReader(body))
+		dec.CharsetReader = charsetReader
+		if err := dec.Decode(&feed); err != nil {
+			return nil, newClientError("parsing insider filings (type %s) atom feed: %v", formType, err)
 		}
-		for _, owner := range owners {
-			key := owner.cik + "|" + owner.name
-			if seen[key] {
-				continue // same person filed more than one Form 4
+
+		for _, entry := range feed.Entries {
+			if entry.Content.FilingHref == "" {
+				continue
 			}
-			seen[key] = true
-			edges = append(edges, Relationship{
-				SourceCIK:               cik10,
-				SourceName:              companyName,
-				TargetCIK:               owner.cik,
-				TargetName:              owner.name,
-				RelationshipType:        "insider_filer",
-				EvidenceForm:            form,
-				EvidenceAccessionNumber: entry.Content.AccessionNumber,
-			})
+			owners, err := c.fetchReportingOwners(entry.Content.FilingHref)
+			if err != nil {
+				continue // one unreadable filing shouldn't sink the whole graph
+			}
+			form := entry.Content.FilingType
+			if form == "" {
+				form = formType
+			}
+			for _, owner := range owners {
+				key := owner.cik + "|" + owner.name
+				if seen[key] {
+					continue // already recorded via an earlier (higher-priority) filing
+				}
+				seen[key] = true
+				edges = append(edges, Relationship{
+					SourceCIK:               cik10,
+					SourceName:              companyName,
+					TargetCIK:               owner.cik,
+					TargetName:              owner.name,
+					RelationshipType:        "insider_filer",
+					EvidenceForm:            form,
+					EvidenceAccessionNumber: entry.Content.AccessionNumber,
+				})
+			}
 		}
 	}
 	return edges, nil
