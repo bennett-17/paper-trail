@@ -1,0 +1,28 @@
+{
+  "total_results": 108,
+  "num_pages": 5,
+  "cur_page": 1,
+  "page_offset": 25,
+  "per_page": 25,
+  "search_query": "Church of Scientology",
+  "organizations": [
+    {
+      "ein": 432050079,
+      "strein": "43-2050079",
+      "name": "Church Of Scientology",
+      "sub_name": "Church Of Scientology Mission Of Albany",
+      "city": "Greenwich",
+      "state": "NY",
+      "ntee_code": null
+    },
+    {
+      "ein": 592143308,
+      "strein": "59-2143308",
+      "name": "Church Of Scientology Flag Service Organization Inc",
+      "sub_name": "Church Of Scientology Flag Service Organization Inc",
+      "city": "Clearwater",
+      "state": "FL",
+      "ntee_code": null
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "organization": {
+    "id": 530196605,
+    "ein": 530196605,
+    "name": "American National Red Cross",
+    "address": "431 18TH ST NW",
+    "city": "Washington",
+    "state": "DC",
+    "zipcode": "20006-5310",
+    "ntee_code": "M20"
+  },
+  "filings_with_data": [
+    {
+      "tax_prd": 202306,
+      "tax_prd_yr": 2023,
+      "formtype": 0,
+      "pdf_url": "https://projects.propublica.org/nonprofits/download-filing?path=download990pdf.pdf",
+      "totrevenue": 3217077611,
+      "totfuncexpns": 2971106889,
+      "totassetsend": 4028321133
+    }
+  ],
+  "filings_without_data": [
+    {
+      "tax_prd": 201006,
+      "tax_prd_yr": 2010,
+      "formtype": 0,
+      "formtype_str": "990",
+      "pdf_url": "https://projects.propublica.org/nonprofits/download-filing?path=old990.pdf"
+    }
+  ]
+}

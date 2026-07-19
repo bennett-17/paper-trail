@@ -1,11 +1,13 @@
 # Paper Trail
 
 An open-source OSINT tool for mapping corporate entity relationships using
-public financial filings. This is Phase 1 of an ongoing project: a
-SEC EDGAR-only entity lookup and relationship-mapping tool. A future phase
+public financial filings. This is Phase 1 of an ongoing project: SEC EDGAR
+for public companies, plus IRS Form 990 data (via ProPublica's Nonprofit
+Explorer) for entities EDGAR can't see at all -- churches, charities, and
+other 501(c) organizations that never file with the SEC. A future phase
 will add [OpenCorporates](https://opencorporates.com) data to extend
-coverage beyond US public companies (private companies, non-US
-jurisdictions, and registered-agent/address-based relationship mapping).
+coverage further (private companies, non-US jurisdictions, and
+registered-agent/address-based relationship mapping).
 
 ## What it does (Phase 1)
 
@@ -18,8 +20,16 @@ Given a company name or ticker, Paper Trail:
 - Extracts insider relationships from Form 3/4/5 filings (officers,
   directors, and 10%+ owners who filed on behalf of the company) to begin
   building an entity relationship graph
+- Searches filing *content* (not just company names) via SEC's full-text
+  search, and cross-references related CIKs after a corporate restructuring
 - Outputs everything as structured JSON, and a relationship graph
   (nodes/edges) for later visualization
+
+Separately, for organizations that don't file with the SEC at all:
+
+- Searches IRS-registered 501(c) organizations by name (churches,
+  charities, foundations) and shows each match's EIN, location, and any
+  available Form 990 filing history with revenue/expense/asset figures
 
 ## Why
 
@@ -43,7 +53,9 @@ go build ./...
 SEC EDGAR requires all automated requests to identify the requester via a
 `User-Agent` header (name + contact email) per their
 [fair access policy](https://www.sec.gov/os/accessing-edgar-data). Set
-this before running anything, either by exporting it:
+this before running `lookup`/`filings`/`graph`/`fulltext` (the `nonprofit`
+command doesn't need it -- ProPublica's API has no such requirement),
+either by exporting it:
 
 ```bash
 export EDGAR_USER_AGENT="Your Name your.email@example.com"
@@ -79,6 +91,14 @@ go run ./cmd/paper-trail fulltext '"Church of Scientology"' --forms 4
 
 # Page past the first ~100 results (SEC's per-request cap) with --offset
 go run ./cmd/paper-trail fulltext '"Church of Scientology"' --offset 100
+
+# Search IRS Form 990 filers -- churches, charities, foundations --
+# entities that never appear in SEC EDGAR at all
+go run ./cmd/paper-trail nonprofit "Church of Scientology"
+
+# Show one organization's registration + filing history (revenue,
+# expenses, assets by year, where the IRS has published extracted figures)
+go run ./cmd/paper-trail nonprofit --ein 53-0196605
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -98,21 +118,23 @@ of the formatted console view.
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
 internal/graph/              # builds a node/edge relationship graph, exports JSON
+internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
 testdata/                    # fixtures used by the offline test suite
 ```
 
-No scraping — everything goes through SEC's documented JSON/Atom APIs:
+No scraping — everything goes through documented public JSON/Atom APIs:
 
 - `https://www.sec.gov/cgi-bin/browse-edgar` (company/ticker search, insider filings)
 - `https://data.sec.gov/submissions/CIK##########.json` (filer profile + filing history)
 - `https://www.sec.gov/files/company_tickers.json` (ticker -> CIK map)
 - `https://efts.sec.gov/LATEST/search-index` (full-text search over filing content, 2001+ only)
+- `https://projects.propublica.org/nonprofits/api/` (IRS Form 990 data for 501(c) organizations, no API key required)
 
 ## Testing
 

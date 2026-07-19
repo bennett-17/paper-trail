@@ -13,6 +13,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/envfile"
 	"github.com/bennett-17/paper-trail/internal/graph"
+	"github.com/bennett-17/paper-trail/internal/nonprofit"
 )
 
 func main() {
@@ -32,6 +33,8 @@ func main() {
 		runGraph(os.Args[2:])
 	case "fulltext":
 		runFullText(os.Args[2:])
+	case "nonprofit":
+		runNonprofit(os.Args[2:])
 	case "-h", "--help", "help":
 		printUsage()
 	default:
@@ -42,7 +45,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `paper-trail: OSINT entity lookup and relationship mapping via SEC EDGAR
+	fmt.Fprintln(os.Stderr, `paper-trail: OSINT entity lookup and relationship mapping via SEC EDGAR and IRS Form 990 data
 
 Usage:
   paper-trail lookup <query> [--json]
@@ -53,6 +56,8 @@ Usage:
   paper-trail fulltext <query> [--forms <f1,f2>] [--ciks <cik1,cik2>]
                                 [--start <date>] [--end <date>]
                                 [--offset <n>] [--limit <n>] [--json]
+  paper-trail nonprofit <query> [--page <n>] [--json]
+  paper-trail nonprofit --ein <ein> [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -63,9 +68,16 @@ EDGAR full-text search -- e.g. finding an organization or person named
 in someone else's disclosure footnote, even if that party has never
 filed anything under its own name. Covers filings from 2001 onward only.
 
+nonprofit searches IRS Form 990 data (via ProPublica's Nonprofit
+Explorer) for 501(c) organizations -- churches, charities, and other
+entities that never appear in SEC EDGAR at all, since they don't file
+with the SEC. --ein fetches a specific organization's registration and
+filing history directly, the same way --cik does for SEC entities.
+
 Environment:
-  EDGAR_USER_AGENT   required, e.g. "Your Name your.email@example.com"
-                     (can also be set via a .env file in the working dir)`)
+  EDGAR_USER_AGENT   required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
+                     (can also be set via a .env file in the working dir)
+                     (not needed for the nonprofit command)`)
 }
 
 // resolveTargetCIK returns cikFlag directly if set -- bypassing name/
@@ -320,6 +332,100 @@ func runFullText(args []string) {
 	} else if next := *offset + len(hits); next < total {
 		fmt.Printf("\n%d more match(es) -- rerun with --offset %d to see the next page.\n", total-next, next)
 	}
+}
+
+func runNonprofit(args []string) {
+	fs := flag.NewFlagSet("nonprofit", flag.ExitOnError)
+	ein := fs.String("ein", "", "look up a specific organization by EIN, e.g. 43-2050079")
+	page := fs.Int("page", 1, "search results page (25 per page)")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail nonprofit <query> [--page <n>] [--json]  (or: paper-trail nonprofit --ein <ein> [--json])"
+	var query string
+	if *ein == "" {
+		if len(positional) != 1 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(1)
+		}
+		query = positional[0]
+	} else if len(positional) != 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+
+	client := nonprofit.NewClient()
+
+	if *ein != "" {
+		profile, err := client.GetOrganization(*ein)
+		exitOnErr(err)
+
+		if *asJSON {
+			printJSON(profile)
+			return
+		}
+
+		org := profile.Organization
+		fmt.Printf("%s  (EIN %s)\n", org.Name, org.EIN)
+		if org.City != "" || org.State != "" {
+			fmt.Printf("Location: %s, %s\n", org.City, org.State)
+		}
+		if org.NTEECode != "" {
+			fmt.Printf("NTEE code: %s\n", org.NTEECode)
+		}
+		if len(profile.Filings) == 0 {
+			fmt.Println("No Form 990 filings on record with ProPublica -- may file on paper, or filings haven't been processed into this dataset yet. That's a real gap in this data source, not necessarily an absence of filings.")
+			return
+		}
+		fmt.Println("Filings (newest first):")
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "YEAR\tFORM\tREVENUE\tEXPENSES\tASSETS")
+		for _, f := range profile.Filings {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
+				f.TaxYear, orDash(f.FormType), moneyOrDash(f.TotalRevenue), moneyOrDash(f.TotalExpenses), moneyOrDash(f.TotalAssets))
+		}
+		w.Flush()
+		return
+	}
+
+	result, err := client.SearchOrganizations(query, *page)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("%d total match(es), page %d of %d:\n\n", result.TotalResults, result.Page, result.NumPages)
+	for _, o := range result.Organizations {
+		fmt.Printf("%s  (EIN %s)\n", o.Name, o.EIN)
+		if o.SubName != "" && o.SubName != o.Name {
+			fmt.Printf("  %s\n", o.SubName)
+		}
+		if o.City != "" || o.State != "" {
+			fmt.Printf("  %s, %s\n", o.City, o.State)
+		}
+	}
+	if result.TotalResults == 0 {
+		fmt.Println("No matches. Note: this searches IRS Form 990 filers only (nonprofits/charities/churches) -- for public companies, use `lookup`.")
+	} else if result.Page < result.NumPages {
+		fmt.Printf("\nMore results available -- rerun with --page %d to see the next page.\n", result.Page+1)
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func moneyOrDash(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	return fmt.Sprintf("$%d", *v)
 }
 
 func exitOnErr(err error) {
