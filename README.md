@@ -76,6 +76,9 @@ go run ./cmd/paper-trail graph "Apple Inc" --output apple_graph.json
 
 # Search filing *content* (not just company names) for a name or phrase
 go run ./cmd/paper-trail fulltext '"Church of Scientology"' --forms 4
+
+# Page past the first ~100 results (SEC's per-request cap) with --offset
+go run ./cmd/paper-trail fulltext '"Church of Scientology"' --offset 100
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
