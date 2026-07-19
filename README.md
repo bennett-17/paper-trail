@@ -2,11 +2,13 @@
 
 An open-source OSINT tool for mapping corporate entity relationships using
 public financial filings. This is Phase 1 of an ongoing project: SEC EDGAR
-for public companies, plus IRS Form 990 data (via ProPublica's Nonprofit
-Explorer) for entities EDGAR can't see at all -- churches, charities, and
-other 501(c) organizations that never file with the SEC. A future phase
-will add [OpenCorporates](https://opencorporates.com) data to extend
-coverage further (private companies, non-US jurisdictions, and
+for US public companies, IRS Form 990 data (via ProPublica's Nonprofit
+Explorer) for US entities EDGAR can't see at all -- churches, charities, and
+other 501(c) organizations that never file with the SEC -- and the
+Australian Charities and Not-for-profits Commission (ACNC) register for
+organizations operating out of Australia. A future phase will add
+[OpenCorporates](https://opencorporates.com) data to extend coverage
+further (private companies, more non-US jurisdictions, and
 registered-agent/address-based relationship mapping).
 
 ## What it does (Phase 1)
@@ -29,7 +31,11 @@ Separately, for organizations that don't file with the SEC at all:
 
 - Searches IRS-registered 501(c) organizations by name (churches,
   charities, foundations) and shows each match's EIN, location, and any
-  available Form 990 filing history with revenue/expense/asset figures
+  available Form 990 filing history with revenue/expense/asset figures --
+  and explains *why* an organization has zero filings when that's the
+  case (e.g. churches are statutorily exempt from filing at all)
+- Searches the Australian ACNC charity register by name or exact ABN, for
+  organizations operating out of Australia
 
 ## Why
 
@@ -54,7 +60,8 @@ SEC EDGAR requires all automated requests to identify the requester via a
 `User-Agent` header (name + contact email) per their
 [fair access policy](https://www.sec.gov/os/accessing-edgar-data). Set
 this before running `lookup`/`filings`/`graph`/`fulltext` (the `nonprofit`
-command doesn't need it -- ProPublica's API has no such requirement),
+and `aucharity` commands don't need it -- neither ProPublica's nor
+data.gov.au's API has any such requirement, or any API key at all),
 either by exporting it:
 
 ```bash
@@ -99,6 +106,13 @@ go run ./cmd/paper-trail nonprofit "Church of Scientology"
 # Show one organization's registration + filing history (revenue,
 # expenses, assets by year, where the IRS has published extracted figures)
 go run ./cmd/paper-trail nonprofit --ein 53-0196605
+
+# Search the Australian ACNC charity register -- entities operating out
+# of Australia, invisible to both SEC EDGAR and IRS Form 990 data
+go run ./cmd/paper-trail aucharity "Church of Scientology"
+
+# Show one charity's registration by exact ABN
+go run ./cmd/paper-trail aucharity --abn 13172090453
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -118,8 +132,9 @@ of the formatted console view.
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
+internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
@@ -135,6 +150,7 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://www.sec.gov/files/company_tickers.json` (ticker -> CIK map)
 - `https://efts.sec.gov/LATEST/search-index` (full-text search over filing content, 2001+ only)
 - `https://projects.propublica.org/nonprofits/api/` (IRS Form 990 data for 501(c) organizations, no API key required)
+- `https://data.gov.au/data/api/3/action/datastore_search` (ACNC Australian charity register, via data.gov.au's CKAN API, no API key required)
 
 ## Testing
 

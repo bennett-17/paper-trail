@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/bennett-17/paper-trail/internal/aucharity"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/envfile"
 	"github.com/bennett-17/paper-trail/internal/graph"
@@ -35,6 +36,8 @@ func main() {
 		runFullText(os.Args[2:])
 	case "nonprofit":
 		runNonprofit(os.Args[2:])
+	case "aucharity":
+		runAUCharity(os.Args[2:])
 	case "-h", "--help", "help":
 		printUsage()
 	default:
@@ -45,7 +48,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `paper-trail: OSINT entity lookup and relationship mapping via SEC EDGAR and IRS Form 990 data
+	fmt.Fprintln(os.Stderr, `paper-trail: OSINT entity lookup and relationship mapping via SEC EDGAR, IRS Form 990, and ACNC (Australia) data
 
 Usage:
   paper-trail lookup <query> [--json]
@@ -58,6 +61,8 @@ Usage:
                                 [--offset <n>] [--limit <n>] [--json]
   paper-trail nonprofit <query> [--page <n>] [--json]
   paper-trail nonprofit --ein <ein> [--json]
+  paper-trail aucharity <query> [--offset <n>] [--limit <n>] [--json]
+  paper-trail aucharity --abn <abn> [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -73,11 +78,21 @@ Explorer) for 501(c) organizations -- churches, charities, and other
 entities that never appear in SEC EDGAR at all, since they don't file
 with the SEC. --ein fetches a specific organization's registration and
 filing history directly, the same way --cik does for SEC entities.
+Note: churches and other religious organizations are statutorily exempt
+from filing Form 990 at all (IRC 6033(a)(3)(A)(i)), regardless of size
+or revenue -- a result with zero filings says so explicitly rather than
+looking like missing data.
+
+aucharity searches the Australian Charities and Not-for-profits
+Commission (ACNC) register for organizations operating out of
+Australia -- entities invisible to both SEC EDGAR and IRS Form 990
+data. --abn fetches a specific charity by its exact Australian Business
+Number.
 
 Environment:
   EDGAR_USER_AGENT   required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
                      (can also be set via a .env file in the working dir)
-                     (not needed for the nonprofit command)`)
+                     (not needed for the nonprofit or aucharity commands)`)
 }
 
 // resolveTargetCIK returns cikFlag directly if set -- bypassing name/
@@ -418,6 +433,80 @@ func runNonprofit(args []string) {
 		fmt.Println("No matches. Note: this searches IRS Form 990 filers only (nonprofits/charities/churches) -- for public companies, use `lookup`.")
 	} else if result.Page < result.NumPages {
 		fmt.Printf("\nMore results available -- rerun with --page %d to see the next page.\n", result.Page+1)
+	}
+}
+
+func runAUCharity(args []string) {
+	fs := flag.NewFlagSet("aucharity", flag.ExitOnError)
+	abn := fs.String("abn", "", "look up a specific charity by exact ABN, e.g. 13172090453")
+	offset := fs.Int("offset", 0, "pagination offset -- skip this many higher-ranked results")
+	limit := fs.Int("limit", 10, "max results to show from this page")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail aucharity <query> [--offset <n>] [--limit <n>] [--json]  (or: paper-trail aucharity --abn <abn> [--json])"
+	var query string
+	if *abn == "" {
+		if len(positional) != 1 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(1)
+		}
+		query = positional[0]
+	} else if len(positional) != 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+
+	client := aucharity.NewClient()
+
+	if *abn != "" {
+		charity, err := client.GetCharityByABN(*abn)
+		exitOnErr(err)
+
+		if *asJSON {
+			printJSON(charity)
+			return
+		}
+
+		fmt.Printf("%s  (ABN %s)\n", charity.LegalName, charity.ABN)
+		if charity.OtherNames != "" {
+			fmt.Printf("Also known as: %s\n", charity.OtherNames)
+		}
+		if charity.City != "" || charity.State != "" {
+			fmt.Printf("Location: %s, %s %s\n", charity.City, charity.State, charity.Postcode)
+		}
+		if charity.RegistrationDate != "" {
+			fmt.Printf("Registered: %s\n", charity.RegistrationDate)
+		}
+		if charity.Size != "" {
+			fmt.Printf("Charity size (ACNC banding): %s\n", charity.Size)
+		}
+		if charity.Website != "" {
+			fmt.Printf("Website: %s\n", charity.Website)
+		}
+		return
+	}
+
+	result, err := client.SearchCharities(query, *offset, *limit)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("%d total match(es), showing %d-%d:\n\n", result.Total, result.Offset+1, result.Offset+len(result.Charities))
+	for _, c := range result.Charities {
+		fmt.Printf("%s  (ABN %s)\n", c.LegalName, c.ABN)
+		if c.City != "" || c.State != "" {
+			fmt.Printf("  %s, %s\n", c.City, c.State)
+		}
+	}
+	if result.Total == 0 {
+		fmt.Println("No matches. Note: this searches the Australian ACNC charity register only -- for US entities, use `lookup` or `nonprofit`.")
+	} else if next := result.Offset + len(result.Charities); next < result.Total {
+		fmt.Printf("\n%d more match(es) -- rerun with --offset %d to see the next page.\n", result.Total-next, next)
 	}
 }
 

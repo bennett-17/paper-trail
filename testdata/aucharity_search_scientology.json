@@ -1,0 +1,33 @@
+{
+  "success": true,
+  "result": {
+    "resource_id": "8fb32972-24e9-4c95-885e-7140be51be8a",
+    "total": 9,
+    "records": [
+      {
+        "ABN": "13172090453",
+        "Charity_Legal_Name": "The Trustee For Church Of Scientology Brisbane Academy Building Fund",
+        "Other_Organisation_Names": null,
+        "Address_Line_1": "126 Greville St",
+        "Town_City": "Chatswood",
+        "State": "NSW",
+        "Postcode": "2067",
+        "Charity_Website": "https://www.scientology-brisbane.org",
+        "Registration_Date": "03/12/2012",
+        "Charity_Size": "Medium"
+      },
+      {
+        "ABN": "71782886938",
+        "Charity_Legal_Name": "The Church Of Scientology Inc",
+        "Other_Organisation_Names": null,
+        "Address_Line_1": "225 Pulteney St",
+        "Town_City": "Adelaide",
+        "State": "SA",
+        "Postcode": "5000",
+        "Charity_Website": "http://www.scientology-adelaide.org",
+        "Registration_Date": "03/12/2012",
+        "Charity_Size": "Small"
+      }
+    ]
+  }
+}
