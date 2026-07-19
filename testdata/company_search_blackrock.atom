@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <content type="text/xml">
+      <company-info>
+        <cik>0001060021</cik>
+      </company-info>
+    </content>
+  </entry>
+  <entry>
+    <content type="text/xml">
+      <company-info>
+        <cik>0001364742</cik>
+      </company-info>
+    </content>
+  </entry>
+  <entry>
+    <content type="text/xml">
+      <company-info>
+        <cik>0009999999</cik>
+      </company-info>
+    </content>
+  </entry>
+  <title>Company Search Feed</title>
+</feed>

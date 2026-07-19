@@ -308,6 +308,76 @@ func TestGetInsiderRelationshipsFetchesReportingOwners(t *testing.T) {
 	}
 }
 
+// TestFindRelatedCIKsMatchesNormalizedNames models BlackRock's real
+// corporate history: the company search returns three candidate CIKs,
+// but only two actually share a name with the queried company after
+// normalization (one via a former name that only matches once
+// punctuation is stripped, matching what's observed live: SEC's search
+// index and stored names use inconsistent punctuation for the same
+// legal identity). The third candidate is a same-industry decoy with a
+// merely-similar name and must be filtered out, not flagged.
+func TestFindRelatedCIKsMatchesNormalizedNames(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse-edgar", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "company_search_blackrock.atom"))
+	})
+	mux.HandleFunc("/submissions/CIK0001060021.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"cik":"0001060021","name":"BlackRock Holdco 2, Inc.","formerNames":[{"name":"BLACKROCK INC /NY","from":"1999-11-12T00:00:00.000Z","to":"2006-09-22T00:00:00.000Z"}]}`)
+	})
+	mux.HandleFunc("/submissions/CIK0001364742.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"cik":"0001364742","name":"BlackRock Finance, Inc.","formerNames":[{"name":"BlackRock Inc.","from":"2006-09-05T00:00:00.000Z","to":"2024-09-26T00:00:00.000Z"}]}`)
+	})
+	mux.HandleFunc("/submissions/CIK0009999999.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"cik":"0009999999","name":"Blackrock Realty Trust","formerNames":[]}`)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	company := Company{
+		CIK:  "0002012383",
+		Name: "BlackRock, Inc.",
+		FormerNames: []FormerName{
+			{Name: "BlackRock Funding, Inc. /DE"},
+		},
+	}
+	related, err := c.FindRelatedCIKs(company)
+	if err != nil {
+		t.Fatalf("FindRelatedCIKs: %v", err)
+	}
+	if len(related) != 2 {
+		t.Fatalf("got %d related CIKs, want 2: %+v", len(related), related)
+	}
+	byCIK := map[string]RelatedEntity{}
+	for _, r := range related {
+		byCIK[r.CIK] = r
+	}
+	if _, ok := byCIK["0001060021"]; !ok {
+		t.Errorf("missing BlackRock Holdco 2 (0001060021): %+v", related)
+	}
+	if _, ok := byCIK["0001364742"]; !ok {
+		t.Errorf("missing BlackRock Finance (0001364742): %+v", related)
+	}
+	if _, ok := byCIK["0009999999"]; ok {
+		t.Errorf("decoy Blackrock Realty Trust (0009999999) should have been filtered out, got %+v", related)
+	}
+}
+
+func TestNormalizeEntityNameUnifiesPunctuationAndStateSuffix(t *testing.T) {
+	cases := map[string]string{
+		"BlackRock, Inc.":     "BLACKROCK INC",
+		"BLACKROCK INC /NY":   "BLACKROCK INC",
+		"  Apple   Inc. ":     "APPLE INC",
+		"New BlackRock, Inc.": "NEW BLACKROCK INC",
+	}
+	for input, want := range cases {
+		if got := normalizeEntityName(input); got != want {
+			t.Errorf("normalizeEntityName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestRateLimitedResponseReturnsError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tickers.json", func(w http.ResponseWriter, r *http.Request) {

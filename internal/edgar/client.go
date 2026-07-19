@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -309,6 +311,115 @@ func (c *Client) GetCompany(cik string) (Company, error) {
 		FiscalYearEnd:   data.FiscalYearEnd,
 		EntityType:      data.EntityType,
 	}, nil
+}
+
+// -- related-CIK / restructuring detection -----------------------------------
+
+var (
+	stateSuffixRE = regexp.MustCompile(`/[A-Z]{2}$`)
+	nonAlnumRE    = regexp.MustCompile(`[^A-Z0-9]+`)
+)
+
+// normalizeEntityName canonicalizes a SEC-registered company name so that
+// names referring to the same legal identity, but differing only in
+// punctuation or SEC's "/XX" state-disambiguator suffix (e.g.
+// "BlackRock, Inc." vs "BLACKROCK INC /NY"), compare equal.
+func normalizeEntityName(name string) string {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	n = stateSuffixRE.ReplaceAllString(n, "")
+	n = nonAlnumRE.ReplaceAllString(n, " ")
+	return strings.Join(strings.Fields(n), " ")
+}
+
+type companySearchFeed struct {
+	Entries []companySearchEntry `xml:"entry"`
+}
+
+type companySearchEntry struct {
+	Content struct {
+		CompanyInfo struct {
+			CIK string `xml:"cik"`
+		} `xml:"company-info"`
+	} `xml:"content"`
+}
+
+// FindRelatedCIKs searches SEC's company database for other CIKs whose
+// current or former legal name exactly matches (after normalization) one
+// of company's own current/former names. This surfaces corporate
+// restructurings -- e.g. a business moving its public ticker to a new
+// holding-company CIK while the original entity survives, renamed, as a
+// subsidiary with its own separate (and often much longer) filing
+// history that a plain lookup on the current ticker would never surface.
+//
+// SEC's company-name search does prefix matching against a punctuation-
+// stripped index (confirmed live: searching "BlackRock, Inc." verbatim
+// misses the match that searching "BlackRock Inc" finds), so the query
+// itself goes through the same normalization, and candidates are only
+// kept if their name *exactly* matches post-normalization -- a fuzzy
+// substring match would flag unrelated companies that merely share a
+// word (e.g. "Apple Hospitality REIT" for a search on "Apple").
+func (c *Client) FindRelatedCIKs(company Company) ([]RelatedEntity, error) {
+	ownNames := map[string]bool{normalizeEntityName(company.Name): true}
+	for _, fn := range company.FormerNames {
+		ownNames[normalizeEntityName(fn.Name)] = true
+	}
+
+	searchURL := fmt.Sprintf(
+		"%s?action=getcompany&company=%s&type=&dateb=&owner=include&count=20&output=atom",
+		c.BrowseEdgarURL, url.QueryEscape(normalizeEntityName(company.Name)),
+	)
+	body, err := c.get(searchURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var feed companySearchFeed
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	dec.CharsetReader = charsetReader
+	if err := dec.Decode(&feed); err != nil {
+		return nil, newClientError("parsing company search results: %v", err)
+	}
+
+	ownCIK := zeroPadCIK(company.CIK)
+	seen := map[string]bool{ownCIK: true}
+	related := make([]RelatedEntity, 0)
+	for _, entry := range feed.Entries {
+		if entry.Content.CompanyInfo.CIK == "" {
+			continue
+		}
+		cik := zeroPadCIK(entry.Content.CompanyInfo.CIK)
+		if seen[cik] {
+			continue
+		}
+		seen[cik] = true
+
+		data, err := c.fetchSubmissions(cik)
+		if err != nil {
+			continue // one bad candidate lookup shouldn't sink the whole check
+		}
+
+		match := ownNames[normalizeEntityName(data.Name)]
+		for _, fn := range data.FormerNames {
+			if match {
+				break
+			}
+			match = ownNames[normalizeEntityName(fn.Name)]
+		}
+		if !match {
+			continue
+		}
+
+		formerNames := data.FormerNames
+		if formerNames == nil {
+			formerNames = []FormerName{}
+		}
+		related = append(related, RelatedEntity{
+			CIK:         cik,
+			Name:        data.Name,
+			FormerNames: formerNames,
+		})
+	}
+	return related, nil
 }
 
 // GetFilings lists recent filings for a CIK, optionally filtered by form

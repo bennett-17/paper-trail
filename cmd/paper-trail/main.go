@@ -114,8 +114,16 @@ func runLookup(args []string) {
 	company, err := client.GetCompany(cik)
 	exitOnErr(err)
 
+	related, err := client.FindRelatedCIKs(company)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not check for related CIKs (corporate restructuring): %v\n", err)
+	}
+
 	if *asJSON {
-		printJSON(company)
+		printJSON(struct {
+			edgar.Company
+			RelatedCIKs []edgar.RelatedEntity `json:"relatedCiks,omitempty"`
+		}{company, related})
 		return
 	}
 
@@ -140,6 +148,19 @@ func runLookup(args []string) {
 				span = fmt.Sprintf(" (%s to %s)", fn.From, fn.To)
 			}
 			fmt.Printf("  - %s%s\n", fn.Name, span)
+		}
+	}
+	if len(related) > 0 {
+		fmt.Println("Related CIKs (possible corporate restructuring — same legal name lineage under a different filer identity):")
+		for _, r := range related {
+			fmt.Printf("  - %s (CIK %s)\n", r.Name, r.CIK)
+			for _, fn := range r.FormerNames {
+				span := ""
+				if fn.From != "" {
+					span = fmt.Sprintf(" (%s to %s)", fn.From, fn.To)
+				}
+				fmt.Printf("      formerly %s%s\n", fn.Name, span)
+			}
 		}
 	}
 }

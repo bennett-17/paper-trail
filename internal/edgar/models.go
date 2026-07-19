@@ -74,6 +74,17 @@ func (f Filing) IndexURL() string {
 	)
 }
 
+// RelatedEntity is another CIK whose current or former legal name
+// exactly matches (after normalization) one of a queried company's own
+// current/former names -- evidence that a single business's SEC filing
+// history has been split across two filer identities by a corporate
+// restructuring (holdco reorganization, ticker migration, spin-off).
+type RelatedEntity struct {
+	CIK         string       `json:"cik"`
+	Name        string       `json:"name"`
+	FormerNames []FormerName `json:"formerNames,omitempty"`
+}
+
 // Relationship is an edge between a company and a related filer
 // (e.g. an insider, or a former name of the same entity).
 type Relationship struct {
