@@ -30,6 +30,8 @@ func main() {
 		runFilings(os.Args[2:])
 	case "graph":
 		runGraph(os.Args[2:])
+	case "fulltext":
+		runFullText(os.Args[2:])
 	case "-h", "--help", "help":
 		printUsage()
 	default:
@@ -48,10 +50,17 @@ Usage:
   paper-trail filings --cik <cik> [--form <form>] [--limit <n>] [--json]
   paper-trail graph <query> [--output <path>] [--include-insiders=false]
   paper-trail graph --cik <cik> [--output <path>] [--include-insiders=false]
+  paper-trail fulltext <query> [--forms <f1,f2>] [--ciks <cik1,cik2>]
+                                [--start <date>] [--end <date>] [--limit <n>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
 former identity surfaced by lookup's "Related CIKs" check.
+
+fulltext searches filing *content* (not just company names) via SEC's
+EDGAR full-text search -- e.g. finding an organization or person named
+in someone else's disclosure footnote, even if that party has never
+filed anything under its own name. Covers filings from 2001 onward only.
 
 Environment:
   EDGAR_USER_AGENT   required, e.g. "Your Name your.email@example.com"
@@ -267,6 +276,45 @@ func runGraph(args []string) {
 		return
 	}
 	printJSON(g)
+}
+
+func runFullText(args []string) {
+	fs := flag.NewFlagSet("fulltext", flag.ExitOnError)
+	forms := fs.String("forms", "", "comma-separated form types to filter by, e.g. 4,8-K")
+	ciks := fs.String("ciks", "", "comma-separated CIKs to scope the search to")
+	start := fs.String("start", "", "only filings on/after this date (YYYY-MM-DD)")
+	end := fs.String("end", "", "only filings on/before this date (YYYY-MM-DD)")
+	limit := fs.Int("limit", 10, "max results to show")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: paper-trail fulltext <query> [--forms <f1,f2>] [--ciks <cik1,cik2>] [--start <date>] [--end <date>] [--limit <n>] [--json]")
+		os.Exit(1)
+	}
+	query := positional[0]
+
+	client := newClientOrExit()
+	hits, total, err := client.SearchFullText(query, *forms, *ciks, *start, *end, *limit)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(struct {
+			Total int                 `json:"total"`
+			Hits  []edgar.FullTextHit `json:"hits"`
+		}{total, hits})
+		return
+	}
+
+	fmt.Printf("%d total match(es) (showing %d):\n\n", total, len(hits))
+	for _, h := range hits {
+		fmt.Printf("%s  %s  %s\n", h.Form, h.FiledDate, strings.Join(h.DisplayNames, "; "))
+		fmt.Printf("  %s\n", h.IndexURL())
+	}
+	if total == 0 {
+		fmt.Println("No matches. Note: EDGAR full-text search covers filing content from 2001 onward only, and searches document text -- not company names (use `lookup` for that).")
+	}
 }
 
 func exitOnErr(err error) {

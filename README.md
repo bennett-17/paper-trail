@@ -73,7 +73,14 @@ go run ./cmd/paper-trail filings --cik 0000320193 --form 4 --limit 20
 
 # Build a relationship graph from Form 3/4/5 filers and export to JSON
 go run ./cmd/paper-trail graph "Apple Inc" --output apple_graph.json
+
+# Search filing *content* (not just company names) for a name or phrase
+go run ./cmd/paper-trail fulltext '"Church of Scientology"' --forms 4
 ```
+
+`--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
+for CIKs with no ticker of their own (e.g. a subsidiary or former
+identity surfaced by `lookup`'s "Related CIKs" check).
 
 Or build a binary and use that directly:
 
@@ -101,6 +108,7 @@ No scraping — everything goes through SEC's documented JSON/Atom APIs:
 - `https://www.sec.gov/cgi-bin/browse-edgar` (company/ticker search, insider filings)
 - `https://data.sec.gov/submissions/CIK##########.json` (filer profile + filing history)
 - `https://www.sec.gov/files/company_tickers.json` (ticker -> CIK map)
+- `https://efts.sec.gov/LATEST/search-index` (full-text search over filing content, 2001+ only)
 
 ## Testing
 

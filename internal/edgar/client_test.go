@@ -60,6 +60,7 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	c.TickersURL = srv.URL + "/tickers.json"
 	c.SubmissionsURL = srv.URL + "/submissions/CIK%s.json"
 	c.BrowseEdgarURL = srv.URL + "/browse-edgar"
+	c.FullTextSearchURL = srv.URL + "/fulltext-search"
 	c.CacheDir = t.TempDir() // isolate from the real OS cache dir
 	return c
 }

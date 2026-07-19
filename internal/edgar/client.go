@@ -19,9 +19,10 @@ import (
 // Default endpoints. Overridable on Client for testing against a local
 // httptest server instead of live SEC infrastructure.
 const (
-	DefaultTickersURL     = "https://www.sec.gov/files/company_tickers.json"
-	DefaultSubmissionsURL = "https://data.sec.gov/submissions/CIK%s.json"
-	DefaultBrowseEdgarURL = "https://www.sec.gov/cgi-bin/browse-edgar"
+	DefaultTickersURL        = "https://www.sec.gov/files/company_tickers.json"
+	DefaultSubmissionsURL    = "https://data.sec.gov/submissions/CIK%s.json"
+	DefaultBrowseEdgarURL    = "https://www.sec.gov/cgi-bin/browse-edgar"
+	DefaultFullTextSearchURL = "https://efts.sec.gov/LATEST/search-index"
 )
 
 // ClientError wraps errors raised by this package so callers can
@@ -48,9 +49,10 @@ type Client struct {
 	MinInterval time.Duration
 	HTTPClient  *http.Client
 
-	TickersURL     string
-	SubmissionsURL string // format string with a single %s for the 10-digit CIK
-	BrowseEdgarURL string
+	TickersURL        string
+	SubmissionsURL    string // format string with a single %s for the 10-digit CIK
+	BrowseEdgarURL    string
+	FullTextSearchURL string
 
 	// CacheDir holds the on-disk cache of insider-filing reporting-owner
 	// lookups (see fetchReportingOwners). Defaults to
@@ -87,13 +89,14 @@ func NewClient(userAgent string) (*Client, error) {
 		cacheDir = filepath.Join(dir, "paper-trail")
 	}
 	return &Client{
-		UserAgent:      userAgent,
-		MinInterval:    150 * time.Millisecond,
-		HTTPClient:     &http.Client{Timeout: 15 * time.Second},
-		TickersURL:     DefaultTickersURL,
-		SubmissionsURL: DefaultSubmissionsURL,
-		BrowseEdgarURL: DefaultBrowseEdgarURL,
-		CacheDir:       cacheDir,
+		UserAgent:         userAgent,
+		MinInterval:       150 * time.Millisecond,
+		HTTPClient:        &http.Client{Timeout: 15 * time.Second},
+		TickersURL:        DefaultTickersURL,
+		SubmissionsURL:    DefaultSubmissionsURL,
+		BrowseEdgarURL:    DefaultBrowseEdgarURL,
+		FullTextSearchURL: DefaultFullTextSearchURL,
+		CacheDir:          cacheDir,
 	}, nil
 }
 

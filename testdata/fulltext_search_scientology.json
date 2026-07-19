@@ -1,0 +1,46 @@
+{
+  "took": 836,
+  "timed_out": false,
+  "hits": {
+    "total": { "value": 193, "relation": "eq" },
+    "max_score": 18.969877,
+    "hits": [
+      {
+        "_index": "edgar_file",
+        "_id": "0001209191-05-040615:doc4.xml",
+        "_score": 18.969877,
+        "_source": {
+          "ciks": ["0001035267", "0001055919"],
+          "display_names": [
+            "INTUITIVE SURGICAL INC  (ISRG)  (CIK 0001035267)",
+            "DUGGAN ROBERT W  (CIK 0001055919)"
+          ],
+          "form": "4",
+          "file_date": "2005-08-03"
+        }
+      },
+      {
+        "_index": "edgar_file",
+        "_id": "0001035704-04-000459:d15187exv10w12.htm",
+        "_score": 15.158973,
+        "_source": {
+          "ciks": ["0001094561"],
+          "display_names": ["QUOVADX INC  (CIK 0001094561)"],
+          "form": "10-Q",
+          "file_date": "2004-08-16"
+        }
+      },
+      {
+        "_index": "edgar_file",
+        "_id": "0001193125-15-154580:d909113dex991.htm",
+        "_score": 12.0,
+        "_source": {
+          "ciks": ["0001105705"],
+          "display_names": ["TIME WARNER INC.  (CIK 0001105705)"],
+          "form": "8-K",
+          "file_date": "2015-04-29"
+        }
+      }
+    ]
+  }
+}
