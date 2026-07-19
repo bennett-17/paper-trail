@@ -75,15 +75,21 @@ export EDGAR_USER_AGENT="Your Name your.email@example.com"
 `ukcharity` is the one exception to this project's no-API-key model: the
 Charity Commission's own API requires a registered subscription key (free,
 but there's no keyless live-query alternative the way there is for SEC
-EDGAR, ProPublica, or ACNC). To use it:
+EDGAR, ProPublica, or ACNC). Azure API Management (which the Commission
+uses) issues every subscription two keys, primary and secondary, so you
+can rotate one without downtime. To use it:
 
 1. Sign up for a free account at
    [api-portal.charitycommission.gov.uk](https://api-portal.charitycommission.gov.uk)
-2. Subscribe to the "Register of Charities" product and find your key
-   under your account's subscriptions
-3. Set it as `UK_CHARITY_API_KEY`, the same way as `EDGAR_USER_AGENT` above
+2. Subscribe to the "Register of Charities" product, open your
+   subscription's page, and click "Show" next to each key
+3. Set `UK_CHARITY_API_KEY_PRIMARY` to the primary key, the same way as
+   `EDGAR_USER_AGENT` above; optionally also set
+   `UK_CHARITY_API_KEY_SECONDARY` to the secondary key -- the tool tries
+   primary first and only falls back to secondary if primary is rejected
+   (e.g. mid-rotation)
 
-Or set both by copying `.env.example` to `.env` and filling it in:
+Or set them all by copying `.env.example` to `.env` and filling it in:
 
 ```bash
 cp .env.example .env
@@ -130,7 +136,7 @@ go run ./cmd/paper-trail aucharity "Church of Scientology"
 go run ./cmd/paper-trail aucharity --abn 13172090453
 
 # Search the England & Wales Charity Commission register (requires
-# UK_CHARITY_API_KEY -- see Setup)
+# UK_CHARITY_API_KEY_PRIMARY -- see Setup)
 go run ./cmd/paper-trail ukcharity "Church of Scientology"
 
 # Show one charity's registration + trustees by exact registered number
@@ -163,7 +169,7 @@ internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not compa
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
 internal/graph/              # builds a node/edge relationship graph, exports JSON
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
-internal/ukcharity/          # UK Charity Commission (England & Wales) client -- needs UK_CHARITY_API_KEY
+internal/ukcharity/          # UK Charity Commission (England & Wales) client -- needs UK_CHARITY_API_KEY_PRIMARY
 testdata/                    # fixtures used by the offline test suite
 ```
 

@@ -20,7 +20,7 @@ func mustReadFixture(t *testing.T, name string) string {
 
 func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
-	c, err := NewClient("test-subscription-key")
+	c, err := NewClient("test-primary-key", "")
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -30,23 +30,39 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	return c
 }
 
-func TestNewClientRequiresSubscriptionKey(t *testing.T) {
-	os.Unsetenv("UK_CHARITY_API_KEY")
-	if _, err := NewClient(""); err == nil {
-		t.Fatal("expected error when no subscription key is configured")
+func TestNewClientRequiresAKey(t *testing.T) {
+	os.Unsetenv("UK_CHARITY_API_KEY_PRIMARY")
+	os.Unsetenv("UK_CHARITY_API_KEY_SECONDARY")
+	if _, err := NewClient("", ""); err == nil {
+		t.Fatal("expected error when neither key is configured")
 	}
 }
 
-func TestNewClientFallsBackToEnvVar(t *testing.T) {
-	os.Setenv("UK_CHARITY_API_KEY", "env-key")
-	t.Cleanup(func() { os.Unsetenv("UK_CHARITY_API_KEY") })
+func TestNewClientFallsBackToEnvVars(t *testing.T) {
+	os.Setenv("UK_CHARITY_API_KEY_PRIMARY", "env-primary")
+	os.Setenv("UK_CHARITY_API_KEY_SECONDARY", "env-secondary")
+	t.Cleanup(func() {
+		os.Unsetenv("UK_CHARITY_API_KEY_PRIMARY")
+		os.Unsetenv("UK_CHARITY_API_KEY_SECONDARY")
+	})
 
-	c, err := NewClient("")
+	c, err := NewClient("", "")
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if c.SubscriptionKey != "env-key" {
-		t.Errorf("SubscriptionKey = %q, want env-key", c.SubscriptionKey)
+	if c.PrimaryKey != "env-primary" {
+		t.Errorf("PrimaryKey = %q, want env-primary", c.PrimaryKey)
+	}
+	if c.SecondaryKey != "env-secondary" {
+		t.Errorf("SecondaryKey = %q, want env-secondary", c.SecondaryKey)
+	}
+}
+
+func TestNewClientAcceptsSecondaryKeyAlone(t *testing.T) {
+	os.Unsetenv("UK_CHARITY_API_KEY_PRIMARY")
+	os.Unsetenv("UK_CHARITY_API_KEY_SECONDARY")
+	if _, err := NewClient("", "only-secondary"); err != nil {
+		t.Errorf("NewClient with only a secondary key: %v, want no error", err)
 	}
 }
 
@@ -66,8 +82,8 @@ func TestSearchCharitiesSendsSubscriptionKeyHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchCharities: %v", err)
 	}
-	if gotKey != "test-subscription-key" {
-		t.Errorf("Ocp-Apim-Subscription-Key header = %q, want test-subscription-key", gotKey)
+	if gotKey != "test-primary-key" {
+		t.Errorf("Ocp-Apim-Subscription-Key header = %q, want test-primary-key", gotKey)
 	}
 	if gotPath != "/searchCharityName/Scientology" {
 		t.Errorf("request path = %q, want /searchCharityName/Scientology", gotPath)
@@ -152,7 +168,75 @@ func TestGet401ReturnsActionableError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a 401 response")
 	}
-	if !strings.Contains(err.Error(), "UK_CHARITY_API_KEY") {
-		t.Errorf("error %q should mention UK_CHARITY_API_KEY so the user knows how to fix it", err.Error())
+	if !strings.Contains(err.Error(), "UK_CHARITY_API_KEY_PRIMARY") {
+		t.Errorf("error %q should mention UK_CHARITY_API_KEY_PRIMARY so the user knows how to fix it", err.Error())
+	}
+}
+
+// TestFallsBackToSecondaryKeyOn401 is the actual point of having two
+// keys: if the primary is rejected (e.g. mid-rotation, or it was
+// regenerated and .env hasn't caught up), the client should retry once
+// with the secondary before giving up.
+func TestFallsBackToSecondaryKeyOn401(t *testing.T) {
+	var keysReceived []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/searchCharityName/", func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("Ocp-Apim-Subscription-Key")
+		keysReceived = append(keysReceived, key)
+		if key != "good-secondary" {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"statusCode":401,"message":"Access denied due to invalid subscription key"}`)
+			return
+		}
+		fmt.Fprint(w, mustReadFixture(t, "ukcharity_search_scientology.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := NewClient("stale-primary", "good-secondary")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	c.MinInterval = 0
+	c.SearchURL = srv.URL + "/searchCharityName/%s"
+
+	charities, err := c.SearchCharities("Scientology")
+	if err != nil {
+		t.Fatalf("SearchCharities: %v, want it to succeed after falling back to the secondary key", err)
+	}
+	if len(charities) != 2 {
+		t.Errorf("got %d charities, want 2", len(charities))
+	}
+	want := []string{"stale-primary", "good-secondary"}
+	if len(keysReceived) != 2 || keysReceived[0] != want[0] || keysReceived[1] != want[1] {
+		t.Errorf("keys tried = %v, want %v (primary first, then secondary)", keysReceived, want)
+	}
+}
+
+// TestBothKeysRejectedReturnsError verifies the client doesn't retry
+// forever or silently succeed if neither key works.
+func TestBothKeysRejectedReturnsError(t *testing.T) {
+	requestCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/searchCharityName/", func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"statusCode":401,"message":"Access denied due to invalid subscription key"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := NewClient("bad-primary", "bad-secondary")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	c.MinInterval = 0
+	c.SearchURL = srv.URL + "/searchCharityName/%s"
+
+	if _, err := c.SearchCharities("anything"); err == nil {
+		t.Fatal("expected an error when both keys are rejected")
+	}
+	if requestCount != 2 {
+		t.Errorf("made %d requests, want exactly 2 (one per key, no extra retries)", requestCount)
 	}
 }

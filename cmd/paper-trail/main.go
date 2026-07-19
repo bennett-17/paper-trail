@@ -98,16 +98,18 @@ ukcharity searches the Charity Commission for England and Wales's
 Register of Charities. --regno fetches a specific charity by its exact
 registered number (add --suffix for a specific subsidiary/linked
 charity sharing that number; default 0 is the main charity). Requires
-a UK_CHARITY_API_KEY -- unlike every other command here, the Charity
+UK_CHARITY_API_KEY_PRIMARY (and, optionally, UK_CHARITY_API_KEY_SECONDARY
+as a rotation fallback) -- unlike every other command here, the Charity
 Commission's API has no keyless option. Register for a free account
 and subscribe to the "Register of Charities" product at
-https://api-portal.charitycommission.gov.uk to get one.
+https://api-portal.charitycommission.gov.uk to get your keys.
 
 Environment:
-  EDGAR_USER_AGENT   required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
-                     (can also be set via a .env file in the working dir)
-                     (not needed for the nonprofit or aucharity commands)
-  UK_CHARITY_API_KEY required for the ukcharity command only (see above)`)
+  EDGAR_USER_AGENT             required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
+                                (can also be set via a .env file in the working dir)
+                                (not needed for the nonprofit or aucharity commands)
+  UK_CHARITY_API_KEY_PRIMARY   required for the ukcharity command only (see above)
+  UK_CHARITY_API_KEY_SECONDARY optional rotation fallback for ukcharity (see above)`)
 }
 
 // resolveTargetCIK returns cikFlag directly if set -- bypassing name/
@@ -546,7 +548,7 @@ func runUKCharity(args []string) {
 		os.Exit(1)
 	}
 
-	client, err := ukcharity.NewClient("")
+	client, err := ukcharity.NewClient("", "")
 	exitOnErr(err)
 
 	if *regno != 0 {

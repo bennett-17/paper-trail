@@ -35,11 +35,20 @@ func newClientError(format string, args ...any) error {
 }
 
 // Client talks to the Charity Commission's Register of Charities API.
+//
+// Azure API Management (which the Commission uses) issues every
+// subscription two equally-valid keys, primary and secondary, so a key
+// can be rotated without downtime: regenerate one while the other still
+// works, then swap. PrimaryKey is tried first on every request;
+// SecondaryKey is only used as an automatic fallback if a request with
+// PrimaryKey comes back 401 (e.g. mid-rotation, or the primary was
+// regenerated and the .env file hasn't been updated yet).
 type Client struct {
-	HTTPClient      *http.Client
-	MinInterval     time.Duration
-	UserAgent       string
-	SubscriptionKey string
+	HTTPClient   *http.Client
+	MinInterval  time.Duration
+	UserAgent    string
+	PrimaryKey   string
+	SecondaryKey string
 
 	SearchURL string // format string with a single %s for the URL-escaped charity name
 	DetailURL string // format string with two %d: registered number, then suffix
@@ -48,29 +57,35 @@ type Client struct {
 	lastRequestAt time.Time
 }
 
-// NewClient builds a Client. If subscriptionKey is empty, it falls back
-// to the UK_CHARITY_API_KEY environment variable. Returns an error if no
-// key is available -- unlike this project's other integrations, the
-// Charity Commission's API requires one; there's no keyless path.
-func NewClient(subscriptionKey string) (*Client, error) {
-	if subscriptionKey == "" {
-		subscriptionKey = os.Getenv("UK_CHARITY_API_KEY")
+// NewClient builds a Client. Empty arguments fall back to the
+// UK_CHARITY_API_KEY_PRIMARY / UK_CHARITY_API_KEY_SECONDARY environment
+// variables. Returns an error if neither a primary nor a secondary key
+// is available -- unlike this project's other integrations, the Charity
+// Commission's API requires one; there's no keyless path.
+func NewClient(primaryKey, secondaryKey string) (*Client, error) {
+	if primaryKey == "" {
+		primaryKey = os.Getenv("UK_CHARITY_API_KEY_PRIMARY")
 	}
-	if subscriptionKey == "" {
+	if secondaryKey == "" {
+		secondaryKey = os.Getenv("UK_CHARITY_API_KEY_SECONDARY")
+	}
+	if primaryKey == "" && secondaryKey == "" {
 		return nil, newClientError(
 			"the Charity Commission API requires a subscription key. Register for a " +
 				"free account and subscribe to the \"Register of Charities\" product at " +
-				"https://api-portal.charitycommission.gov.uk, then set the " +
-				"UK_CHARITY_API_KEY environment variable to your key.",
+				"https://api-portal.charitycommission.gov.uk, then set " +
+				"UK_CHARITY_API_KEY_PRIMARY (and, optionally, UK_CHARITY_API_KEY_SECONDARY) " +
+				"to the keys shown on your subscription.",
 		)
 	}
 	return &Client{
-		HTTPClient:      &http.Client{Timeout: 15 * time.Second},
-		MinInterval:     150 * time.Millisecond,
-		UserAgent:       "paper-trail (https://github.com/bennett-17/paper-trail)",
-		SubscriptionKey: subscriptionKey,
-		SearchURL:       DefaultBaseURL + "/searchCharityName/%s",
-		DetailURL:       DefaultBaseURL + "/allcharitydetailsV2/%d/%d",
+		HTTPClient:   &http.Client{Timeout: 15 * time.Second},
+		MinInterval:  150 * time.Millisecond,
+		UserAgent:    "paper-trail (https://github.com/bennett-17/paper-trail)",
+		PrimaryKey:   primaryKey,
+		SecondaryKey: secondaryKey,
+		SearchURL:    DefaultBaseURL + "/searchCharityName/%s",
+		DetailURL:    DefaultBaseURL + "/allcharitydetailsV2/%d/%d",
 	}, nil
 }
 
@@ -85,38 +100,67 @@ func (c *Client) throttle() {
 }
 
 func (c *Client) get(u string) ([]byte, error) {
+	// Try whichever key is set first; if both are set, primary goes
+	// first and secondary is only used if primary is rejected.
+	keys := make([]string, 0, 2)
+	if c.PrimaryKey != "" {
+		keys = append(keys, c.PrimaryKey)
+	}
+	if c.SecondaryKey != "" {
+		keys = append(keys, c.SecondaryKey)
+	}
+
+	var lastErr error
+	for _, key := range keys {
+		body, unauthorized, err := c.doGet(u, key)
+		if err != nil {
+			return nil, err
+		}
+		if !unauthorized {
+			return body, nil
+		}
+		lastErr = newClientError(
+			"Charity Commission API returned 401 Unauthorized for %s -- check that "+
+				"UK_CHARITY_API_KEY_PRIMARY / UK_CHARITY_API_KEY_SECONDARY are set to "+
+				"valid, active subscription keys", u,
+		)
+	}
+	return nil, lastErr
+}
+
+// doGet performs a single request with the given subscription key.
+// unauthorized is true only for a 401 response, letting the caller
+// decide whether to retry with a different key.
+func (c *Client) doGet(u, key string) (body []byte, unauthorized bool, err error) {
 	c.throttle()
 
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, newClientError("building request for %s: %v", u, err)
+	req, reqErr := http.NewRequest(http.MethodGet, u, nil)
+	if reqErr != nil {
+		return nil, false, newClientError("building request for %s: %v", u, reqErr)
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
 	// Header name confirmed live: an unauthenticated request to this API
 	// returns 401 with WWW-Authenticate naming "Ocp-Apim-Subscription-Key"
 	// as the expected header (standard Azure API Management convention).
-	req.Header.Set("Ocp-Apim-Subscription-Key", c.SubscriptionKey)
+	req.Header.Set("Ocp-Apim-Subscription-Key", key)
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, newClientError("request to %s failed: %v", u, err)
+	resp, doErr := c.HTTPClient.Do(req)
+	if doErr != nil {
+		return nil, false, newClientError("request to %s failed: %v", u, doErr)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, newClientError("reading response from %s: %v", u, err)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, false, newClientError("reading response from %s: %v", u, readErr)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, newClientError(
-			"Charity Commission API returned 401 Unauthorized for %s -- check that "+
-				"UK_CHARITY_API_KEY is set to a valid, active subscription key", u,
-		)
+		return nil, true, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newClientError("Charity Commission API returned HTTP %d for %s", resp.StatusCode, u)
+		return nil, false, newClientError("Charity Commission API returned HTTP %d for %s", resp.StatusCode, u)
 	}
-	return body, nil
+	return respBody, false, nil
 }
 
 // Charity is a single search-result match: identity and registration
