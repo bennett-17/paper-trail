@@ -131,6 +131,16 @@ type Organization struct {
 	City     string `json:"city,omitempty"`
 	State    string `json:"state,omitempty"`
 	NTEECode string `json:"nteeCode,omitempty"` // National Taxonomy of Exempt Entities activity code
+
+	// FilingRequirement is the IRS's own stated reason this entity either
+	// must or need not file Form 990 (only populated by GetOrganization,
+	// not search results). Some 501(c)(3) categories -- churches and
+	// other religious organizations -- are statutorily exempt from filing
+	// at all under IRC 6033(a)(3)(A)(i), regardless of size or revenue,
+	// which is why some large, well-known organizations simply have zero
+	// filings on record here: it's a real, lawful absence, not a data
+	// gap in this API.
+	FilingRequirement string `json:"filingRequirement,omitempty"`
 }
 
 // SearchResult is one page of an organization name search.
@@ -204,7 +214,7 @@ func (c *Client) SearchOrganizations(query string, page int) (SearchResult, erro
 type Filing struct {
 	TaxYear       int    `json:"taxYear"`
 	FormType      string `json:"formType,omitempty"` // "990", "990EZ", "990PF", or "" if unknown
-	HasFinancials bool   `json:"hasFinancials"`       // true if IRS has published extracted line-item figures for this filing
+	HasFinancials bool   `json:"hasFinancials"`      // true if IRS has published extracted line-item figures for this filing
 	TotalRevenue  *int64 `json:"totalRevenue,omitempty"`
 	TotalExpenses *int64 `json:"totalExpenses,omitempty"`
 	TotalAssets   *int64 `json:"totalAssets,omitempty"`
@@ -220,13 +230,14 @@ type OrganizationProfile struct {
 
 type organizationResponse struct {
 	Organization struct {
-		EIN      int64  `json:"ein"`
-		Name     string `json:"name"`
-		Address  string `json:"address"`
-		City     string `json:"city"`
-		State    string `json:"state"`
-		Zipcode  string `json:"zipcode"`
-		NTEECode string `json:"ntee_code"`
+		EIN         int64  `json:"ein"`
+		Name        string `json:"name"`
+		Address     string `json:"address"`
+		City        string `json:"city"`
+		State       string `json:"state"`
+		Zipcode     string `json:"zipcode"`
+		NTEECode    string `json:"ntee_code"`
+		FilingReqCd int    `json:"filing_requirement_code"`
 	} `json:"organization"`
 	FilingsWithData []struct {
 		TaxPrdYr     int    `json:"tax_prd_yr"`
@@ -253,6 +264,37 @@ func formTypeName(code int) string {
 		return "990EZ"
 	case 2:
 		return "990PF"
+	default:
+		return ""
+	}
+}
+
+// filingRequirementName decodes the IRS's FILING_REQ_CD field (EO
+// Business Master File), per the official IRS record layout published
+// at https://www.irs.gov/pub/irs-soi/eo-info.pdf. Codes 06 and 13 are
+// the ones that explain an org with zero Form 990 filings on record:
+// churches and religious organizations are statutorily exempt from
+// filing under IRC 6033(a)(3)(A)(i), not merely missing from this data.
+func filingRequirementName(code int) string {
+	switch code {
+	case 1:
+		return "Required to file Form 990 or 990-EZ"
+	case 2:
+		return "Required to file Form 990-N (income under $50,000/year)"
+	case 3:
+		return "Files as part of a group return"
+	case 4:
+		return "Required to file Form 990-BL (Black Lung Trust)"
+	case 6:
+		return "Not required to file (IRS classifies this as a church)"
+	case 7:
+		return "Government 501(c)(1) organization"
+	case 13:
+		return "Not required to file (IRS classifies this as a religious organization)"
+	case 14:
+		return "Not required to file (instrumentality of a state/political subdivision)"
+	case 0:
+		return "Not required to file"
 	default:
 		return ""
 	}
@@ -303,11 +345,12 @@ func (c *Client) GetOrganization(ein string) (OrganizationProfile, error) {
 
 	return OrganizationProfile{
 		Organization: Organization{
-			EIN:      formatEIN(resp.Organization.EIN),
-			Name:     resp.Organization.Name,
-			City:     resp.Organization.City,
-			State:    resp.Organization.State,
-			NTEECode: resp.Organization.NTEECode,
+			EIN:               formatEIN(resp.Organization.EIN),
+			Name:              resp.Organization.Name,
+			City:              resp.Organization.City,
+			State:             resp.Organization.State,
+			NTEECode:          resp.Organization.NTEECode,
+			FilingRequirement: filingRequirementName(resp.Organization.FilingReqCd),
 		},
 		Filings: filings,
 	}, nil

@@ -179,6 +179,47 @@ func TestGetOrganizationAcceptsEINWithOrWithoutHyphen(t *testing.T) {
 	}
 }
 
+// TestGetOrganizationExplainsChurchFilingExemption verifies an
+// organization with zero filings gets a FilingRequirement string that
+// actually explains why (IRS filing_requirement_code 6 = church,
+// statutorily exempt from Form 990 under IRC 6033(a)(3)(A)(i)) rather
+// than leaving the caller unable to tell "exempt by law" apart from
+// "just missing from this dataset".
+func TestGetOrganizationExplainsChurchFilingExemption(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/organizations/930801236.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "nonprofit_organization_church_exempt.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	profile, err := c.GetOrganization("93-0801236")
+	if err != nil {
+		t.Fatalf("GetOrganization: %v", err)
+	}
+	if len(profile.Filings) != 0 {
+		t.Fatalf("got %d filings, want 0", len(profile.Filings))
+	}
+	want := "Not required to file (IRS classifies this as a church)"
+	if profile.Organization.FilingRequirement != want {
+		t.Errorf("FilingRequirement = %q, want %q", profile.Organization.FilingRequirement, want)
+	}
+}
+
+func TestFilingRequirementNameCoversKnownCodes(t *testing.T) {
+	cases := map[int]string{
+		1:  "Required to file Form 990 or 990-EZ",
+		6:  "Not required to file (IRS classifies this as a church)",
+		13: "Not required to file (IRS classifies this as a religious organization)",
+	}
+	for code, want := range cases {
+		if got := filingRequirementName(code); got != want {
+			t.Errorf("filingRequirementName(%d) = %q, want %q", code, got, want)
+		}
+	}
+}
+
 func TestFormatEINPadsLeadingZeros(t *testing.T) {
 	cases := map[int64]string{
 		530196605: "53-0196605", // ordinary case

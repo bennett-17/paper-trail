@@ -374,8 +374,15 @@ func runNonprofit(args []string) {
 		if org.NTEECode != "" {
 			fmt.Printf("NTEE code: %s\n", org.NTEECode)
 		}
+		if org.FilingRequirement != "" {
+			fmt.Printf("IRS filing requirement: %s\n", org.FilingRequirement)
+		}
 		if len(profile.Filings) == 0 {
-			fmt.Println("No Form 990 filings on record with ProPublica -- may file on paper, or filings haven't been processed into this dataset yet. That's a real gap in this data source, not necessarily an absence of filings.")
+			if strings.HasPrefix(org.FilingRequirement, "Not required to file") {
+				fmt.Println("No Form 990 filings on record -- and none expected: the IRS filing requirement above means this organization is lawfully exempt from filing at all (e.g. churches are exempt under IRC 6033(a)(3)(A)(i), regardless of size or revenue).")
+			} else {
+				fmt.Println("No Form 990 filings on record with ProPublica -- may file on paper, or filings haven't been processed into this dataset yet. That's a real gap in this data source, not necessarily an absence of filings.")
+			}
 			return
 		}
 		fmt.Println("Filings (newest first):")
