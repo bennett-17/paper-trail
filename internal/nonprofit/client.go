@@ -70,6 +70,19 @@ func (c *Client) throttle() {
 }
 
 func (c *Client) get(u string) ([]byte, error) {
+	return c.doGet(u, false)
+}
+
+// getTolerant404 is like get, but treats HTTP 404 as a valid response
+// rather than an error. ProPublica's search endpoint returns 404 --
+// with a normal JSON body reporting zero results -- for queries that
+// match nothing, so a strict "any non-2xx is an error" check would
+// misreport a legitimate empty result as a failure.
+func (c *Client) getTolerant404(u string) ([]byte, error) {
+	return c.doGet(u, true)
+}
+
+func (c *Client) doGet(u string, tolerate404 bool) ([]byte, error) {
 	c.throttle()
 
 	req, err := http.NewRequest(http.MethodGet, u, nil)
@@ -87,6 +100,9 @@ func (c *Client) get(u string) ([]byte, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, newClientError("reading response from %s: %v", u, err)
+	}
+	if tolerate404 && resp.StatusCode == http.StatusNotFound {
+		return body, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, newClientError("ProPublica Nonprofit Explorer returned HTTP %d for %s", resp.StatusCode, u)
@@ -154,7 +170,7 @@ func (c *Client) SearchOrganizations(query string, page int) (SearchResult, erro
 		params.Set("page", fmt.Sprintf("%d", page))
 	}
 
-	body, err := c.get(c.SearchURL + "?" + params.Encode())
+	body, err := c.getTolerant404(c.SearchURL + "?" + params.Encode())
 	if err != nil {
 		return SearchResult{}, err
 	}

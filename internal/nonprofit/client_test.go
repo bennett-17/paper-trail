@@ -86,6 +86,36 @@ func TestSearchOrganizationsSecondPage(t *testing.T) {
 	}
 }
 
+// TestSearchOrganizationsToleratesZeroResult404 guards against a real
+// bug found live: ProPublica's search endpoint returns HTTP 404 (not
+// 200), with a normal JSON body reporting zero results, for a query
+// that matches nothing. A naive "any non-2xx is an error" check
+// misreports that as a request failure instead of an empty result.
+func TestSearchOrganizationsToleratesZeroResult404(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search.json", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"total_results":0,"organizations":[],"num_pages":0,"cur_page":0,"search_query":"no such organization"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	result, err := c.SearchOrganizations("no such organization", 1)
+	if err != nil {
+		t.Fatalf("SearchOrganizations: %v, want nil error for a zero-result 404", err)
+	}
+	if result.TotalResults != 0 {
+		t.Errorf("TotalResults = %d, want 0", result.TotalResults)
+	}
+	if len(result.Organizations) != 0 {
+		t.Errorf("got %d organizations, want 0", len(result.Organizations))
+	}
+	if result.Page != 1 {
+		t.Errorf("Page = %d, want 1 (should floor cur_page=0 to 1)", result.Page)
+	}
+}
+
 func TestGetOrganizationParsesFilings(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/organizations/530196605.json", func(w http.ResponseWriter, r *http.Request) {
