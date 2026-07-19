@@ -105,7 +105,6 @@ func (c *Client) get(url string) ([]byte, error) {
 		return nil, newClientError("building request for %s: %v", url, err)
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

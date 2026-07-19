@@ -19,9 +19,12 @@ import (
 	"os"
 
 	"github.com/bennett-17/paper-trail/internal/edgar"
+	"github.com/bennett-17/paper-trail/internal/envfile"
 )
 
 func main() {
+	_ = envfile.Load(".env")
+
 	if len(os.Args) != 2 {
 		fmt.Println("Usage: go run ./cmd/smoketest <ticker-or-company-name>")
 		os.Exit(1)

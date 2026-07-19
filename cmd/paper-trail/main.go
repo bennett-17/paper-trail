@@ -10,10 +10,13 @@ import (
 	"text/tabwriter"
 
 	"github.com/bennett-17/paper-trail/internal/edgar"
+	"github.com/bennett-17/paper-trail/internal/envfile"
 	"github.com/bennett-17/paper-trail/internal/graph"
 )
 
 func main() {
+	_ = envfile.Load(".env")
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -44,7 +47,8 @@ Usage:
   paper-trail graph <query> [--output <path>] [--no-include-insiders]
 
 Environment:
-  EDGAR_USER_AGENT   required, e.g. "Your Name your.email@example.com"`)
+  EDGAR_USER_AGENT   required, e.g. "Your Name your.email@example.com"
+                     (can also be set via a .env file in the working dir)`)
 }
 
 func newClientOrExit() *edgar.Client {

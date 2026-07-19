@@ -43,13 +43,24 @@ go build ./...
 SEC EDGAR requires all automated requests to identify the requester via a
 `User-Agent` header (name + contact email) per their
 [fair access policy](https://www.sec.gov/os/accessing-edgar-data). Set
-this before running anything:
+this before running anything, either by exporting it:
 
 ```bash
 export EDGAR_USER_AGENT="Your Name your.email@example.com"
 ```
 
-The tool will refuse to make requests without this set.
+or by copying `.env.example` to `.env` and filling it in:
+
+```bash
+cp .env.example .env
+# then edit .env
+```
+
+`.env` is loaded automatically from the working directory at startup
+(see `internal/envfile` — still no third-party dependencies) and is
+git-ignored. A real exported environment variable always takes
+precedence over the file. The tool will refuse to make requests without
+this set.
 
 ## Usage
 
@@ -80,6 +91,7 @@ of the formatted console view.
 cmd/paper-trail/        # CLI entrypoint (lookup, filings, graph subcommands)
 cmd/smoketest/          # manual live-API validation tool (see Testing below)
 internal/edgar/         # SEC EDGAR client + data models
+internal/envfile/       # minimal .env loader (stdlib only, see Setup below)
 internal/graph/         # builds a node/edge relationship graph, exports JSON
 testdata/               # fixtures used by the offline test suite
 ```
