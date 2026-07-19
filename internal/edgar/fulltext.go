@@ -62,14 +62,17 @@ type fullTextSearchResponse struct {
 // EDGAR's full-text search (a separate system from the company registry
 // used elsewhere in this package). forms and ciks are optional
 // comma-separated filters (e.g. "4,8-K" / "0001055919,0001035267");
-// startDate/endDate are optional "YYYY-MM-DD" bounds. limit caps how
-// many of the (possibly much larger) result set are returned; the total
-// match count is returned separately so callers can tell when results
-// were truncated.
+// startDate/endDate are optional "YYYY-MM-DD" bounds.
+//
+// SEC returns at most ~100 hits per request; offset ("from" in SEC's
+// API) skips that many higher-ranked results to page through anything
+// beyond the first ~100, and limit caps how many of *this page* are
+// returned. The total match count is returned separately (stable across
+// pages) so callers can tell how much more there is to page through.
 //
 // Coverage is filings filed 2001-01-01 onward only -- SEC has not
 // backfilled full-text indexing for older filings.
-func (c *Client) SearchFullText(query, forms, ciks, startDate, endDate string, limit int) ([]FullTextHit, int, error) {
+func (c *Client) SearchFullText(query, forms, ciks, startDate, endDate string, offset, limit int) ([]FullTextHit, int, error) {
 	params := url.Values{}
 	params.Set("q", query)
 	if forms != "" {
@@ -83,6 +86,9 @@ func (c *Client) SearchFullText(query, forms, ciks, startDate, endDate string, l
 	}
 	if endDate != "" {
 		params.Set("enddt", endDate)
+	}
+	if offset > 0 {
+		params.Set("from", strconv.Itoa(offset))
 	}
 
 	body, err := c.get(c.FullTextSearchURL + "?" + params.Encode())

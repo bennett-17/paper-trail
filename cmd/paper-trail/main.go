@@ -51,7 +51,8 @@ Usage:
   paper-trail graph <query> [--output <path>] [--include-insiders=false]
   paper-trail graph --cik <cik> [--output <path>] [--include-insiders=false]
   paper-trail fulltext <query> [--forms <f1,f2>] [--ciks <cik1,cik2>]
-                                [--start <date>] [--end <date>] [--limit <n>] [--json]
+                                [--start <date>] [--end <date>]
+                                [--offset <n>] [--limit <n>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -284,36 +285,40 @@ func runFullText(args []string) {
 	ciks := fs.String("ciks", "", "comma-separated CIKs to scope the search to")
 	start := fs.String("start", "", "only filings on/after this date (YYYY-MM-DD)")
 	end := fs.String("end", "", "only filings on/before this date (YYYY-MM-DD)")
-	limit := fs.Int("limit", 10, "max results to show")
+	offset := fs.Int("offset", 0, "pagination offset -- skip this many higher-ranked results (SEC returns ~100 per page)")
+	limit := fs.Int("limit", 10, "max results to show from this page")
 	asJSON := fs.Bool("json", false, "print raw JSON")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
 	if len(positional) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: paper-trail fulltext <query> [--forms <f1,f2>] [--ciks <cik1,cik2>] [--start <date>] [--end <date>] [--limit <n>] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: paper-trail fulltext <query> [--forms <f1,f2>] [--ciks <cik1,cik2>] [--start <date>] [--end <date>] [--offset <n>] [--limit <n>] [--json]")
 		os.Exit(1)
 	}
 	query := positional[0]
 
 	client := newClientOrExit()
-	hits, total, err := client.SearchFullText(query, *forms, *ciks, *start, *end, *limit)
+	hits, total, err := client.SearchFullText(query, *forms, *ciks, *start, *end, *offset, *limit)
 	exitOnErr(err)
 
 	if *asJSON {
 		printJSON(struct {
-			Total int                 `json:"total"`
-			Hits  []edgar.FullTextHit `json:"hits"`
-		}{total, hits})
+			Total  int                 `json:"total"`
+			Offset int                 `json:"offset"`
+			Hits   []edgar.FullTextHit `json:"hits"`
+		}{total, *offset, hits})
 		return
 	}
 
-	fmt.Printf("%d total match(es) (showing %d):\n\n", total, len(hits))
+	fmt.Printf("%d total match(es), showing %d-%d:\n\n", total, *offset+1, *offset+len(hits))
 	for _, h := range hits {
 		fmt.Printf("%s  %s  %s\n", h.Form, h.FiledDate, strings.Join(h.DisplayNames, "; "))
 		fmt.Printf("  %s\n", h.IndexURL())
 	}
 	if total == 0 {
 		fmt.Println("No matches. Note: EDGAR full-text search covers filing content from 2001 onward only, and searches document text -- not company names (use `lookup` for that).")
+	} else if next := *offset + len(hits); next < total {
+		fmt.Printf("\n%d more match(es) -- rerun with --offset %d to see the next page.\n", total-next, next)
 	}
 }
 

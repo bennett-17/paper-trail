@@ -9,17 +9,19 @@ import (
 
 func TestSearchFullTextParsesAndLimitsResults(t *testing.T) {
 	var gotQuery, gotForms string
+	var sawFrom bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fulltext-search", func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query().Get("q")
 		gotForms = r.URL.Query().Get("forms")
+		_, sawFrom = r.URL.Query()["from"]
 		fmt.Fprint(w, mustReadFixture(t, "fulltext_search_scientology.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	hits, total, err := c.SearchFullText(`"Scientology"`, "4,10-Q", "", "", "", 2)
+	hits, total, err := c.SearchFullText(`"Scientology"`, "4,10-Q", "", "", "", 0, 2)
 	if err != nil {
 		t.Fatalf("SearchFullText: %v", err)
 	}
@@ -28,6 +30,9 @@ func TestSearchFullTextParsesAndLimitsResults(t *testing.T) {
 	}
 	if gotForms != "4,10-Q" {
 		t.Errorf("forms param = %q, want %q", gotForms, "4,10-Q")
+	}
+	if sawFrom {
+		t.Errorf(`offset=0 should omit the "from" param entirely, but it was present`)
 	}
 	if total != 193 {
 		t.Errorf("total = %d, want 193 (limit should not affect the reported total)", total)
@@ -64,7 +69,7 @@ func TestSearchFullTextNoResults(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	hits, total, err := c.SearchFullText("no such organization anywhere", "", "", "", "", 10)
+	hits, total, err := c.SearchFullText("no such organization anywhere", "", "", "", "", 0, 10)
 	if err != nil {
 		t.Fatalf("SearchFullText: %v", err)
 	}
@@ -73,5 +78,47 @@ func TestSearchFullTextNoResults(t *testing.T) {
 	}
 	if len(hits) != 0 {
 		t.Errorf("got %d hits, want 0", len(hits))
+	}
+}
+
+// TestSearchFullTextOffsetPagesThroughResults verifies offset is passed
+// through as SEC's "from" param, and that a nonzero offset can retrieve
+// results beyond whatever the first page returned (SEC caps each page at
+// ~100 hits, so paging is the only way to see everything past that).
+func TestSearchFullTextOffsetPagesThroughResults(t *testing.T) {
+	var gotFrom string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fulltext-search", func(w http.ResponseWriter, r *http.Request) {
+		gotFrom = r.URL.Query().Get("from")
+		if gotFrom == "3" {
+			fmt.Fprint(w, mustReadFixture(t, "fulltext_search_scientology_page2.json"))
+			return
+		}
+		fmt.Fprint(w, mustReadFixture(t, "fulltext_search_scientology.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	page1, total1, err := c.SearchFullText(`"Scientology"`, "", "", "", "", 0, 100)
+	if err != nil {
+		t.Fatalf("SearchFullText (page 1): %v", err)
+	}
+
+	page2, total2, err := c.SearchFullText(`"Scientology"`, "", "", "", "", 3, 100)
+	if err != nil {
+		t.Fatalf("SearchFullText (page 2): %v", err)
+	}
+	if gotFrom != "3" {
+		t.Errorf(`offset=3 should send from=3, got from=%q`, gotFrom)
+	}
+	if total1 != total2 {
+		t.Errorf("total differs across pages of the same query: %d vs %d, want equal", total1, total2)
+	}
+	if len(page2) != 1 || page2[0].AccessionNumber != "0001409970-13-000123" {
+		t.Errorf("page 2 = %+v, want the single page-2 fixture hit", page2)
+	}
+	if page1[0].AccessionNumber == page2[0].AccessionNumber {
+		t.Errorf("page 1 and page 2 returned the same hit %q -- offset had no effect", page1[0].AccessionNumber)
 	}
 }

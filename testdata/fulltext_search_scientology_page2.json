@@ -1,0 +1,21 @@
+{
+  "took": 40,
+  "timed_out": false,
+  "hits": {
+    "total": { "value": 193, "relation": "eq" },
+    "max_score": 9.1,
+    "hits": [
+      {
+        "_index": "edgar_file",
+        "_id": "0001409970-13-000123:postingsup_20130115-100002.htm",
+        "_score": 9.1,
+        "_source": {
+          "ciks": ["0001409970"],
+          "display_names": ["LendingClub Corp  (LC)  (CIK 0001409970)"],
+          "form": "424B3",
+          "file_date": "2013-01-22"
+        }
+      }
+    ]
+  }
+}
