@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<ownershipDocument>
+    <schemaVersion>X0508</schemaVersion>
+    <documentType>5</documentType>
+    <periodOfReport>2024-09-28</periodOfReport>
+    <notSubjectToSection16>0</notSubjectToSection16>
+    <form3HoldingsReported>0</form3HoldingsReported>
+    <form4TransactionsReported>0</form4TransactionsReported>
+    <issuer>
+        <issuerCik>0000320193</issuerCik>
+        <issuerName>Apple Inc.</issuerName>
+        <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0001059235</rptOwnerCik>
+            <rptOwnerName>WAGNER SUSAN</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerRelationship>
+            <isDirector>1</isDirector>
+            <isOfficer>0</isOfficer>
+            <isTenPercentOwner>0</isTenPercentOwner>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+</ownershipDocument>

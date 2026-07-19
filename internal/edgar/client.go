@@ -414,12 +414,13 @@ type reportingOwner struct {
 // insiderFormTypes controls both which filings count as evidence of an
 // insider relationship and the priority order edges are recorded in when
 // the same person shows up more than once (an earlier type "wins" the
-// single evidence slot on Relationship). Form 4s (trading activity) come
-// first since they're the most current signal; Form 3s (one-time initial
-// ownership statements, filed once on appointment) come second so a
-// long-tenured officer or director who simply hasn't traded recently
-// still shows up instead of being invisible to a Form-4-only query.
-var insiderFormTypes = []string{"4", "3"}
+// single evidence slot on Relationship), ordered most- to least-current:
+// Form 4 (individual trades, the most current signal), Form 5 (annual
+// catch-all for deferred/exempt transactions, filed once a year), then
+// Form 3 (one-time initial ownership statement, filed once on
+// appointment and potentially very old). Querying all three means an
+// insider shows up even if they haven't filed a Form 4 recently.
+var insiderFormTypes = []string{"4", "5", "3"}
 
 // SEC's Atom feed for these filings no longer carries the reporting
 // owner's name in its <title> (just the form's boilerplate description),
@@ -427,7 +428,8 @@ var insiderFormTypes = []string{"4", "3"}
 // find its primary XML document, then reads the reporting owner(s)
 // straight out of that document. That's two extra requests per filing on
 // top of each feed fetch, throttled the same as every other request —
-// querying both Form 3 and Form 4 roughly doubles total request count.
+// querying three form types roughly triples total request count versus
+// Form 4 alone.
 func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]Relationship, error) {
 	cik10 := zeroPadCIK(cik)
 	edges := make([]Relationship, 0, limit)

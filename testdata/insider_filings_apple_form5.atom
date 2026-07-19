@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>SEC EDGAR Filings</title>
+  <entry>
+    <content type="text/xml">
+      <accession-number>0000320193-24-000102</accession-number>
+      <filing-date>2024-10-01</filing-date>
+      <filing-href>{{BASE}}/Archives/edgar/data/320193/000032019324000102/0000320193-24-000102-index.htm</filing-href>
+      <filing-type>5</filing-type>
+      <form-name>Annual statement of changes in beneficial ownership of securities</form-name>
+    </content>
+    <title>5  - Annual statement of changes in beneficial ownership of securities</title>
+    <updated>2024-10-01T18:30:00-04:00</updated>
+  </entry>
+</feed>
