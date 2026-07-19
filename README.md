@@ -4,9 +4,10 @@ An open-source OSINT tool for mapping corporate entity relationships using
 public financial filings. This is Phase 1 of an ongoing project: SEC EDGAR
 for US public companies, IRS Form 990 data (via ProPublica's Nonprofit
 Explorer) for US entities EDGAR can't see at all -- churches, charities, and
-other 501(c) organizations that never file with the SEC -- and the
-Australian Charities and Not-for-profits Commission (ACNC) register for
-organizations operating out of Australia. A future phase will add
+other 501(c) organizations that never file with the SEC -- the Australian
+Charities and Not-for-profits Commission (ACNC) register for organizations
+operating out of Australia, and the Charity Commission for England and
+Wales's Register of Charities for the UK. A future phase will add
 [OpenCorporates](https://opencorporates.com) data to extend coverage
 further (private companies, more non-US jurisdictions, and
 registered-agent/address-based relationship mapping).
@@ -36,6 +37,9 @@ Separately, for organizations that don't file with the SEC at all:
   case (e.g. churches are statutorily exempt from filing at all)
 - Searches the Australian ACNC charity register by name or exact ABN, for
   organizations operating out of Australia
+- Searches the UK Charity Commission's Register of Charities by name or
+  exact registered number, for organizations operating out of England and
+  Wales (requires your own free API key -- see Setup)
 
 ## Why
 
@@ -44,8 +48,8 @@ Investigators, journalists, and security researchers doing due-diligence
 or threat-intel work often need to manually stitch together filings,
 names, and addresses to spot patterns (e.g., the same individual showing
 up as an officer across multiple entities). Paper Trail automates the
-first step of that process using freely available government data, with
-no API key required for this phase.
+first step of that process using freely available government data --
+no API key required for any command except `ukcharity` (see Setup).
 
 ## Setup
 
@@ -68,7 +72,18 @@ either by exporting it:
 export EDGAR_USER_AGENT="Your Name your.email@example.com"
 ```
 
-or by copying `.env.example` to `.env` and filling it in:
+`ukcharity` is the one exception to this project's no-API-key model: the
+Charity Commission's own API requires a registered subscription key (free,
+but there's no keyless live-query alternative the way there is for SEC
+EDGAR, ProPublica, or ACNC). To use it:
+
+1. Sign up for a free account at
+   [api-portal.charitycommission.gov.uk](https://api-portal.charitycommission.gov.uk)
+2. Subscribe to the "Register of Charities" product and find your key
+   under your account's subscriptions
+3. Set it as `UK_CHARITY_API_KEY`, the same way as `EDGAR_USER_AGENT` above
+
+Or set both by copying `.env.example` to `.env` and filling it in:
 
 ```bash
 cp .env.example .env
@@ -78,8 +93,8 @@ cp .env.example .env
 `.env` is loaded automatically from the working directory at startup
 (see `internal/envfile` — still no third-party dependencies) and is
 git-ignored. A real exported environment variable always takes
-precedence over the file. The tool will refuse to make requests without
-this set.
+precedence over the file. Commands refuse to make requests without their
+required credentials set.
 
 ## Usage
 
@@ -113,6 +128,14 @@ go run ./cmd/paper-trail aucharity "Church of Scientology"
 
 # Show one charity's registration by exact ABN
 go run ./cmd/paper-trail aucharity --abn 13172090453
+
+# Search the England & Wales Charity Commission register (requires
+# UK_CHARITY_API_KEY -- see Setup)
+go run ./cmd/paper-trail ukcharity "Church of Scientology"
+
+# Show one charity's registration + trustees by exact registered number
+# (get the number from a ukcharity search result first)
+go run ./cmd/paper-trail ukcharity --regno <registered-number>
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -132,7 +155,7 @@ of the formatted console view.
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/edgar/              # SEC EDGAR client + data models
@@ -140,6 +163,7 @@ internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not compa
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
 internal/graph/              # builds a node/edge relationship graph, exports JSON
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
+internal/ukcharity/          # UK Charity Commission (England & Wales) client -- needs UK_CHARITY_API_KEY
 testdata/                    # fixtures used by the offline test suite
 ```
 
@@ -151,6 +175,7 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://efts.sec.gov/LATEST/search-index` (full-text search over filing content, 2001+ only)
 - `https://projects.propublica.org/nonprofits/api/` (IRS Form 990 data for 501(c) organizations, no API key required)
 - `https://data.gov.au/data/api/3/action/datastore_search` (ACNC Australian charity register, via data.gov.au's CKAN API, no API key required)
+- `https://api.charitycommission.gov.uk/register/api/` (UK Register of Charities, requires a free registered API key -- the one exception to this project's no-key model)
 
 ## Testing
 

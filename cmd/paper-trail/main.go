@@ -15,6 +15,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/envfile"
 	"github.com/bennett-17/paper-trail/internal/graph"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
+	"github.com/bennett-17/paper-trail/internal/ukcharity"
 )
 
 func main() {
@@ -38,6 +39,8 @@ func main() {
 		runNonprofit(os.Args[2:])
 	case "aucharity":
 		runAUCharity(os.Args[2:])
+	case "ukcharity":
+		runUKCharity(os.Args[2:])
 	case "-h", "--help", "help":
 		printUsage()
 	default:
@@ -48,7 +51,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `paper-trail: OSINT entity lookup and relationship mapping via SEC EDGAR, IRS Form 990, and ACNC (Australia) data
+	fmt.Fprintln(os.Stderr, `paper-trail: OSINT entity lookup and relationship mapping via SEC EDGAR, IRS Form 990, ACNC (Australia), and Charity Commission (UK) data
 
 Usage:
   paper-trail lookup <query> [--json]
@@ -63,6 +66,8 @@ Usage:
   paper-trail nonprofit --ein <ein> [--json]
   paper-trail aucharity <query> [--offset <n>] [--limit <n>] [--json]
   paper-trail aucharity --abn <abn> [--json]
+  paper-trail ukcharity <query> [--json]
+  paper-trail ukcharity --regno <n> [--suffix <n>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -89,10 +94,20 @@ Australia -- entities invisible to both SEC EDGAR and IRS Form 990
 data. --abn fetches a specific charity by its exact Australian Business
 Number.
 
+ukcharity searches the Charity Commission for England and Wales's
+Register of Charities. --regno fetches a specific charity by its exact
+registered number (add --suffix for a specific subsidiary/linked
+charity sharing that number; default 0 is the main charity). Requires
+a UK_CHARITY_API_KEY -- unlike every other command here, the Charity
+Commission's API has no keyless option. Register for a free account
+and subscribe to the "Register of Charities" product at
+https://api-portal.charitycommission.gov.uk to get one.
+
 Environment:
   EDGAR_USER_AGENT   required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
                      (can also be set via a .env file in the working dir)
-                     (not needed for the nonprofit or aucharity commands)`)
+                     (not needed for the nonprofit or aucharity commands)
+  UK_CHARITY_API_KEY required for the ukcharity command only (see above)`)
 }
 
 // resolveTargetCIK returns cikFlag directly if set -- bypassing name/
@@ -508,6 +523,99 @@ func runAUCharity(args []string) {
 	} else if next := result.Offset + len(result.Charities); next < result.Total {
 		fmt.Printf("\n%d more match(es) -- rerun with --offset %d to see the next page.\n", result.Total-next, next)
 	}
+}
+
+func runUKCharity(args []string) {
+	fs := flag.NewFlagSet("ukcharity", flag.ExitOnError)
+	regno := fs.Int("regno", 0, "look up a specific charity by exact registered number, e.g. 283127")
+	suffix := fs.Int("suffix", 0, "linked/subsidiary charity suffix (0 = main charity)")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail ukcharity <query> [--json]  (or: paper-trail ukcharity --regno <n> [--suffix <n>] [--json])"
+	var query string
+	if *regno == 0 {
+		if len(positional) != 1 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(1)
+		}
+		query = positional[0]
+	} else if len(positional) != 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+
+	client, err := ukcharity.NewClient("")
+	exitOnErr(err)
+
+	if *regno != 0 {
+		detail, err := client.GetCharityDetail(*regno, *suffix)
+		exitOnErr(err)
+
+		if *asJSON {
+			printJSON(detail)
+			return
+		}
+
+		regRef := fmt.Sprintf("%d", detail.RegisteredNumber)
+		if detail.Suffix != 0 {
+			regRef += fmt.Sprintf("-%d", detail.Suffix)
+		}
+		fmt.Printf("%s  (registered number %s)\n", detail.Name, regRef)
+		if detail.CharityType != "" {
+			fmt.Printf("Type: %s\n", detail.CharityType)
+		}
+		if detail.Status != "" {
+			fmt.Printf("Status: %s\n", detail.Status)
+		}
+		if detail.Address != "" || detail.Postcode != "" {
+			fmt.Printf("Address: %s %s\n", detail.Address, detail.Postcode)
+		}
+		if detail.RegistrationDate != "" {
+			fmt.Printf("Registered: %s\n", detail.RegistrationDate)
+		}
+		if detail.LatestIncome != nil || detail.LatestExpenditure != nil {
+			fmt.Printf("Latest income/expenditure: %s / %s\n", gbpOrDash(detail.LatestIncome), gbpOrDash(detail.LatestExpenditure))
+		}
+		if detail.Website != "" {
+			fmt.Printf("Website: %s\n", detail.Website)
+		}
+		if len(detail.Trustees) > 0 {
+			fmt.Printf("Trustees: %s\n", strings.Join(detail.Trustees, "; "))
+		}
+		return
+	}
+
+	charities, err := client.SearchCharities(query)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(charities)
+		return
+	}
+
+	fmt.Printf("%d match(es):\n\n", len(charities))
+	for _, c := range charities {
+		regRef := fmt.Sprintf("%d", c.RegisteredNumber)
+		if c.Suffix != 0 {
+			regRef += fmt.Sprintf("-%d", c.Suffix)
+		}
+		fmt.Printf("%s  (registered number %s)\n", c.Name, regRef)
+		if c.Status != "" {
+			fmt.Printf("  status: %s\n", c.Status)
+		}
+	}
+	if len(charities) == 0 {
+		fmt.Println("No matches. Note: this searches the England & Wales Charity Commission register only -- use `lookup`/`nonprofit`/`aucharity` for other jurisdictions.")
+	}
+}
+
+func gbpOrDash(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	return fmt.Sprintf("£%d", *v)
 }
 
 func orDash(s string) string {

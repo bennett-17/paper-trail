@@ -1,0 +1,26 @@
+{
+  "organisation_number": 1000001,
+  "reg_charity_number": 283127,
+  "group_subsid_suffix": 0,
+  "charity_name": "Church Of Scientology Religious Education College Incorporated",
+  "charity_type": "Charitable company",
+  "reg_status": "R",
+  "date_of_registration": "1981-08-05",
+  "date_of_removal": null,
+  "latest_income": 1234567,
+  "latest_expenditure": 987654,
+  "address_line_one": "Saint Hill Manor",
+  "address_line_two": "Saint Hill Road",
+  "address_line_three": "East Grinstead",
+  "address_line_four": "",
+  "address_line_five": "",
+  "address_post_code": "RH19 4JY",
+  "phone": "01342 300 233",
+  "email": null,
+  "web": "https://www.scientology.org.uk",
+  "charity_co_reg_number": null,
+  "trustee_names": [
+    { "trustee_name": "Jane Example" },
+    { "trustee_name": "John Sample" }
+  ]
+}
