@@ -138,19 +138,23 @@ own address/insider lookup too, not just a bare name, so a corporate
 restructuring can actually surface a shared address or officer instead
 of being invisible to every heuristic. Flagged patterns: entities that
 share a registered/mailing address, phone number, email, or website,
-and the same
-individual appearing as an officer, director, or trustee of more than
-one of them -- plus any sanctions-list hit, and, when a sanctions hit's
-own country is on FATF's high-risk or increased-monitoring list, a
-separate jurisdiction_risk indicator (FATF's lists are a manually
-maintained snapshot, refreshed after FATF's periodic plenaries, not a
-live feed -- see internal/risk/fatf.go for the date). Phone/email/
-website are only available from UK charity records today (AU also has
-website). ACNC (Australia) has no free officer/trustee data (see
-aucharity above), so AU entities can only ever match on shared address
-or website, never shared person. Passing multiple terms (e.g. two related
-organization names in different jurisdictions) is the only way to catch
-an overlap between them --
+and the same individual appearing as an officer, director, or trustee
+of more than one of them -- plus any sanctions-list hit, and, when a
+sanctions hit's own country is on FATF's high-risk or
+increased-monitoring list, a separate jurisdiction_risk indicator
+(FATF's lists are a manually maintained snapshot, refreshed after
+FATF's periodic plenaries, not a live feed -- see internal/risk/fatf.go
+for the date). Each query term is also searched against SEC's full-text
+index (see fulltext above) for a mention in some *other* company's
+filing -- e.g. a related-party footnote -- with its own
+filing_mention indicator, scored lowest of all of these since a filing
+can mention a name for reasons that have nothing to do with any real
+connection. Phone/email/website are only available from UK charity
+records today (AU also has website). ACNC (Australia) has no free
+officer/trustee data (see aucharity above), so AU entities can only
+ever match on shared address or website, never shared person. Passing
+multiple terms (e.g. two related organization names in different
+jurisdictions) is the only way to catch an overlap between them --
 running each separately checks each in isolation and can't compare
 across runs. Each flag is a plain sum of named, evidence-linked
 indicators, not a black-box number -- every point in the total traces
@@ -791,11 +795,14 @@ func runRisk(args []string) {
 		notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
 	}
 
-	// SEC EDGAR -- one client shared across every query term, so a
-	// missing credential is reported once, not once per term.
-	if edgarClient, err := edgar.NewClient(""); err != nil {
+	// SEC EDGAR -- one client shared across every query term (and
+	// reused below for the full-text mentions step), so a missing
+	// credential is reported once, not once per term.
+	var edgarClient *edgar.Client
+	if c, err := edgar.NewClient(""); err != nil {
 		note("SEC EDGAR", "skipped (%v)", err)
 	} else {
+		edgarClient = c
 		for _, query := range queries {
 			cik, err := edgarClient.ResolveCIK(query)
 			if err != nil {
@@ -1002,6 +1009,77 @@ func runRisk(args []string) {
 			for _, p := range e.People {
 				screen(p, e.Label())
 			}
+		}
+	}
+
+	// EDGAR full-text mentions -- catches a name showing up in
+	// *someone else's* filing (e.g. a related-party footnote, a
+	// litigation reference) even when no formal officer or address
+	// relationship was ever recorded anywhere else this tool looks.
+	// This is a much weaker, noisier signal than the others: a filing
+	// can mention a name for all kinds of reasons unrelated to any real
+	// connection, so it's scored lowest and the description says so.
+	//
+	// Scoped to query terms only, not every discovered person --
+	// confirmed live that screening individual names floods this with
+	// low-value noise (a well-known executive's own Form 3/4 filings at
+	// every company they sit on the board of, each counted as a
+	// separate "mention"), burying the indicators worth actually
+	// looking at. An organization name turning up in someone else's
+	// filing is a much more targeted signal than a person's name is.
+	if edgarClient != nil {
+		knownEDGARCIKs := map[string]bool{}
+		for _, e := range entities {
+			if e.Source == "edgar" {
+				knownEDGARCIKs[e.ID] = true
+			}
+		}
+
+		mentioned := map[string]bool{}
+		seenFilers := map[string]bool{}
+		mention := func(name, screenedFor string) {
+			key := strings.ToLower(strings.TrimSpace(name))
+			if key == "" || mentioned[key] {
+				return
+			}
+			mentioned[key] = true
+			hits, _, err := edgarClient.SearchFullText(fmt.Sprintf("%q", name), "", "", "", "", 0, *limit)
+			if err != nil {
+				note("SEC EDGAR full-text", "%q: %v", name, err)
+				return
+			}
+			for _, hit := range hits {
+				isKnownFiler := false
+				for _, cik := range hit.CIKs {
+					if knownEDGARCIKs[cik] {
+						isKnownFiler = true
+						break
+					}
+				}
+				if isKnownFiler {
+					continue // every filer on this hit is already a known entity -- a self-mention, not a new connection
+				}
+				filerLabel := strings.Join(hit.DisplayNames, ", ")
+				if filerLabel == "" {
+					filerLabel = strings.Join(hit.CIKs, ", ")
+				}
+				dedupeKey := key + "|" + filerLabel
+				if seenFilers[dedupeKey] {
+					continue
+				}
+				seenFilers[dedupeKey] = true
+				extra = append(extra, risk.Indicator{
+					Code:        "filing_mention",
+					Description: "Name appears in another company's SEC filing text -- could be a related-party disclosure, litigation reference, or unrelated context; verify before treating as a relationship",
+					Weight:      1,
+					Entities:    []string{screenedFor},
+					Evidence:    fmt.Sprintf("%s -- %s (%s, filed %s)", name, filerLabel, hit.Form, hit.FiledDate),
+				})
+			}
+		}
+
+		for _, query := range queries {
+			mention(query, fmt.Sprintf("search query: %q", query))
 		}
 	}
 

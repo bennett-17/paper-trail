@@ -94,7 +94,11 @@ And on top of all of the above, structural risk heuristics:
   country is on FATF's high-risk or increased-monitoring list (a
   manually maintained snapshot refreshed after FATF's periodic plenary
   meetings, not a live feed -- FATF doesn't publish these as an API).
-  Phone/email are UK-only today, website is UK+AU; AU
+  Each query term is also run against SEC's full-text index (see
+  fulltext above) for a mention in some *other* company's filing --
+  its own indicator, scored lowest of the bunch since a filing can
+  mention a name for reasons that have nothing to do with any real
+  connection. Phone/email are UK-only today, website is UK+AU; AU
   entities have no officer/trustee data (see above) and so can only ever
   match on shared address or website, never shared person. Passing
   related names together (e.g.
