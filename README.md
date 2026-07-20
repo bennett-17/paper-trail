@@ -223,6 +223,9 @@ go run ./cmd/paper-trail risk "Example Name"
 # e.g. the same organization's presence in two countries -- not just
 # within each name's own results
 go run ./cmd/paper-trail risk "Example Name UK" "Example Name International"
+
+# Save the report to a file instead of printing it (works with --json too)
+go run ./cmd/paper-trail risk "Example Name" --output risk_report.txt
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,

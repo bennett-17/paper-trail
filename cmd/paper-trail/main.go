@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -75,7 +76,7 @@ Usage:
   paper-trail ukcharity <query> [--json]
   paper-trail ukcharity --regno <n> [--suffix <n>] [--json]
   paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]
-  paper-trail risk <query> [<query> ...] [--limit <n>] [--json]
+  paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -143,12 +144,14 @@ across runs. Each flag is a plain sum of named, evidence-linked
 indicators, not a black-box number -- every point in the total traces
 back to one printed indicator with the specific entities and evidence
 behind it. --limit caps how many candidates are pulled per source per
-query term (default 5) to bound the number of live API calls. A source
-with no credentials configured (ukcharity/sanctions) or no match for a
-given term is skipped and noted, not treated as a failure. This is a
-lead-generation tool: it flags patterns worth checking by hand, not a
-finding, and it is not a determination of money laundering, tax
-evasion, terrorism financing, or any other wrongdoing.
+query term (default 5) to bound the number of live API calls. --output
+writes the report (in whichever format --json selects) to a file
+instead of stdout. A source with no credentials configured
+(ukcharity/sanctions) or no match for a given term is skipped and
+noted, not treated as a failure. This is a lead-generation tool: it
+flags patterns worth checking by hand, not a finding, and it is not a
+determination of money laundering, tax evasion, terrorism financing, or
+any other wrongdoing.
 
 Environment:
   EDGAR_USER_AGENT             required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
@@ -731,10 +734,11 @@ func runRisk(args []string) {
 	fs := flag.NewFlagSet("risk", flag.ExitOnError)
 	limit := fs.Int("limit", 5, "max candidates to pull per source, per query term")
 	asJSON := fs.Bool("json", false, "print raw JSON")
+	output := fs.String("output", "", "write results to this file instead of stdout")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--json]"
+	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--json]"
 	if len(positional) < 1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
@@ -934,42 +938,55 @@ func runRisk(args []string) {
 	// in the same Assess() call.
 	score := risk.Assess(entities, extra)
 
+	var w io.Writer = os.Stdout
+	if *output != "" {
+		f, err := os.Create(*output)
+		exitOnErr(err)
+		defer f.Close()
+		w = f
+	}
+
 	if *asJSON {
-		printJSON(struct {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		enc.Encode(struct {
 			Queries  []string      `json:"queries"`
 			Entities []risk.Entity `json:"entities"`
 			Notes    []string      `json:"notes"`
 			Score    risk.Score    `json:"score"`
 		}{queries, entities, notes, score})
-		return
-	}
-
-	quoted := make([]string, len(queries))
-	for i, q := range queries {
-		quoted[i] = fmt.Sprintf("%q", q)
-	}
-	fmt.Printf("Risk assessment for %s\n\n", strings.Join(quoted, ", "))
-	fmt.Printf("%d entit(ies) found:\n", len(entities))
-	for _, e := range entities {
-		fmt.Printf("  %s\n", e.Label())
-	}
-	if len(notes) > 0 {
-		fmt.Println("\nNotes:")
-		for _, n := range notes {
-			fmt.Printf("  - %s\n", n)
+	} else {
+		quoted := make([]string, len(queries))
+		for i, q := range queries {
+			quoted[i] = fmt.Sprintf("%q", q)
 		}
+		fmt.Fprintf(w, "Risk assessment for %s\n\n", strings.Join(quoted, ", "))
+		fmt.Fprintf(w, "%d entit(ies) found:\n", len(entities))
+		for _, e := range entities {
+			fmt.Fprintf(w, "  %s\n", e.Label())
+		}
+		if len(notes) > 0 {
+			fmt.Fprintln(w, "\nNotes:")
+			for _, n := range notes {
+				fmt.Fprintf(w, "  - %s\n", n)
+			}
+		}
+
+		fmt.Fprintf(w, "\nRisk score: %d\n\n", score.Total)
+		if len(score.Indicators) == 0 {
+			fmt.Fprintln(w, "No structural indicators found among the entities located.")
+		}
+		for _, ind := range score.Indicators {
+			fmt.Fprintf(w, "+%d  %s\n", ind.Weight, ind.Description)
+			fmt.Fprintf(w, "     Entities: %s\n", strings.Join(ind.Entities, "; "))
+			fmt.Fprintf(w, "     Evidence: %s\n\n", ind.Evidence)
+		}
+		fmt.Fprintln(w, "This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
 	}
 
-	fmt.Printf("\nRisk score: %d\n\n", score.Total)
-	if len(score.Indicators) == 0 {
-		fmt.Println("No structural indicators found among the entities located.")
+	if *output != "" {
+		fmt.Printf("Wrote risk assessment (%d entities, score %d) to %s\n", len(entities), score.Total, *output)
 	}
-	for _, ind := range score.Indicators {
-		fmt.Printf("+%d  %s\n", ind.Weight, ind.Description)
-		fmt.Printf("     Entities: %s\n", strings.Join(ind.Entities, "; "))
-		fmt.Printf("     Evidence: %s\n\n", ind.Evidence)
-	}
-	fmt.Println("This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
 }
 
 func gbpOrDash(v *int64) string {
