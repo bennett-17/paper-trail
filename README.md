@@ -76,12 +76,16 @@ And separately, for sanctions screening:
 
 And on top of all of the above, structural risk heuristics:
 
-- `risk` runs a name across every source that's configured, normalizes
-  whatever address/officer data each source exposes, and flags two
-  patterns: entities that share a registered/mailing address, and the
-  same individual appearing as an officer, director, or trustee of more
-  than one of them (an "interlocking directorate") -- plus any
-  sanctions-list hit on the name or any person found. Every point in the
+- `risk` runs one or more names across every source that's configured,
+  normalizes whatever address/officer data each source exposes, and
+  flags two patterns across the *combined* results of every name given:
+  entities that share a registered/mailing address, and the same
+  individual appearing as an officer, director, or trustee of more than
+  one of them (an "interlocking directorate") -- plus any sanctions-list
+  hit on any name or person found. Passing related names together (e.g.
+  the same organization's presence in two different countries) is the
+  only way to catch an overlap between them; checked one at a time,
+  each run only compares within its own results. Every point in the
   resulting score is a plain sum of named, evidence-linked indicators --
   never a bare number, and never a claim about money laundering, tax
   evasion, or terrorism financing specifically. It's a lead-generation
@@ -209,6 +213,11 @@ go run ./cmd/paper-trail sanctions "Example Name" --fuzzy
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
 go run ./cmd/paper-trail risk "Example Name"
+
+# Pass multiple names to cross-reference them against EACH OTHER too --
+# e.g. the same organization's presence in two countries -- not just
+# within each name's own results
+go run ./cmd/paper-trail risk "Example Name UK" "Example Name International"
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,

@@ -75,7 +75,7 @@ Usage:
   paper-trail ukcharity <query> [--json]
   paper-trail ukcharity --regno <n> [--suffix <n>] [--json]
   paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]
-  paper-trail risk <query> [--limit <n>] [--json]
+  paper-trail risk <query> [<query> ...] [--limit <n>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -124,22 +124,26 @@ CSL_API_KEY_SECONDARY as a rotation fallback) -- same no-keyless-option
 model as ukcharity. Register for a free account and subscribe to "Data
 Services Platform APIs" at https://developer.trade.gov to get your keys.
 
-risk runs <query> against every source above that's configured (SEC
-EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a sanctions
-screen), normalizes whatever address/officer data each source exposes,
-and flags two structural patterns: entities that share a registered/
-mailing address, and the same individual appearing as an officer,
-director, or trustee of more than one of them -- plus any sanctions-list
-hit. Each flag is a plain sum of named, evidence-linked indicators, not
-a black-box number -- every point in the total traces back to one
-printed indicator with the specific entities and evidence behind it.
---limit caps how many candidates are pulled per source (default 5) to
-bound the number of live API calls. A source with no credentials
-configured (ukcharity/sanctions) or no match is skipped and noted, not
-treated as a failure. This is a lead-generation tool: it flags patterns
-worth checking by hand, not a finding, and it is not a determination of
-money laundering, tax evasion, terrorism financing, or any other
-wrongdoing.
+risk runs one or more <query> terms against every source above that's
+configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a
+sanctions screen), normalizes whatever address/officer data each source
+exposes, and flags two structural patterns across the *combined* pool of
+everything every term found: entities that share a registered/mailing
+address, and the same individual appearing as an officer, director, or
+trustee of more than one of them -- plus any sanctions-list hit. Passing
+multiple terms (e.g. two related organization names in different
+jurisdictions) is the only way to catch an overlap between them --
+running each separately checks each in isolation and can't compare
+across runs. Each flag is a plain sum of named, evidence-linked
+indicators, not a black-box number -- every point in the total traces
+back to one printed indicator with the specific entities and evidence
+behind it. --limit caps how many candidates are pulled per source per
+query term (default 5) to bound the number of live API calls. A source
+with no credentials configured (ukcharity/sanctions) or no match for a
+given term is skipped and noted, not treated as a failure. This is a
+lead-generation tool: it flags patterns worth checking by hand, not a
+finding, and it is not a determination of money laundering, tax
+evasion, terrorism financing, or any other wrongdoing.
 
 Environment:
   EDGAR_USER_AGENT             required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
@@ -720,17 +724,17 @@ func runSanctions(args []string) {
 // useful than an all-or-nothing failure.
 func runRisk(args []string) {
 	fs := flag.NewFlagSet("risk", flag.ExitOnError)
-	limit := fs.Int("limit", 5, "max candidates to pull per source")
+	limit := fs.Int("limit", 5, "max candidates to pull per source, per query term")
 	asJSON := fs.Bool("json", false, "print raw JSON")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk <query> [--limit <n>] [--json]"
-	if len(positional) != 1 {
+	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--json]"
+	if len(positional) < 1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
 	}
-	query := positional[0]
+	queries := positional
 
 	var entities []risk.Entity
 	var extra []risk.Indicator
@@ -739,50 +743,64 @@ func runRisk(args []string) {
 		notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
 	}
 
-	// SEC EDGAR
+	// SEC EDGAR -- one client shared across every query term, so a
+	// missing credential is reported once, not once per term.
 	if edgarClient, err := edgar.NewClient(""); err != nil {
 		note("SEC EDGAR", "skipped (%v)", err)
-	} else if cik, err := edgarClient.ResolveCIK(query); err != nil {
-		note("SEC EDGAR", "no match for %q", query)
-	} else if company, err := edgarClient.GetCompany(cik); err != nil {
-		note("SEC EDGAR", "%v", err)
 	} else {
-		var addrs []string
-		if company.BusinessAddress != nil {
-			if a := company.BusinessAddress.AsSingleLine(); a != "" {
-				addrs = append(addrs, a)
+		for _, query := range queries {
+			cik, err := edgarClient.ResolveCIK(query)
+			if err != nil {
+				note("SEC EDGAR", "no match for %q", query)
+				continue
 			}
-		}
-		if company.MailingAddress != nil {
-			if a := company.MailingAddress.AsSingleLine(); a != "" {
-				addrs = append(addrs, a)
+			company, err := edgarClient.GetCompany(cik)
+			if err != nil {
+				note("SEC EDGAR", "%v", err)
+				continue
 			}
-		}
-		var people []string
-		if rels, err := edgarClient.GetInsiderRelationships(cik, company.Name, *limit); err == nil {
-			for _, r := range rels {
-				people = append(people, r.TargetName)
-			}
-		}
-		entities = append(entities, risk.NewEntity("edgar", cik, company.Name, addrs, people))
-
-		if related, err := edgarClient.FindRelatedCIKs(company); err == nil {
-			for i, re := range related {
-				if i >= *limit {
-					break
+			var addrs []string
+			if company.BusinessAddress != nil {
+				if a := company.BusinessAddress.AsSingleLine(); a != "" {
+					addrs = append(addrs, a)
 				}
-				entities = append(entities, risk.NewEntity("edgar", re.CIK, re.Name, nil, nil))
+			}
+			if company.MailingAddress != nil {
+				if a := company.MailingAddress.AsSingleLine(); a != "" {
+					addrs = append(addrs, a)
+				}
+			}
+			var people []string
+			if rels, err := edgarClient.GetInsiderRelationships(cik, company.Name, *limit); err == nil {
+				for _, r := range rels {
+					people = append(people, r.TargetName)
+				}
+			}
+			entities = append(entities, risk.NewEntity("edgar", cik, company.Name, addrs, people))
+
+			if related, err := edgarClient.FindRelatedCIKs(company); err == nil {
+				for i, re := range related {
+					if i >= *limit {
+						break
+					}
+					entities = append(entities, risk.NewEntity("edgar", re.CIK, re.Name, nil, nil))
+				}
 			}
 		}
 	}
 
 	// IRS Form 990 (nonprofit), via ProPublica
 	npClient := nonprofit.NewClient()
-	if result, err := npClient.SearchOrganizations(query, 1); err != nil {
-		note("IRS Form 990", "%v", err)
-	} else if len(result.Organizations) == 0 {
-		note("IRS Form 990", "no match for %q", query)
-	} else {
+	for _, query := range queries {
+		result, err := npClient.SearchOrganizations(query, 1)
+		if err != nil {
+			note("IRS Form 990", "%v", err)
+			continue
+		}
+		if len(result.Organizations) == 0 {
+			note("IRS Form 990", "no match for %q", query)
+			continue
+		}
 		for i, o := range result.Organizations {
 			if i >= *limit {
 				break
@@ -801,11 +819,16 @@ func runRisk(args []string) {
 
 	// Australian ACNC
 	auClient := aucharity.NewClient()
-	if result, err := auClient.SearchCharities(query, 0, *limit); err != nil {
-		note("ACNC (Australia)", "%v", err)
-	} else if len(result.Charities) == 0 {
-		note("ACNC (Australia)", "no match for %q", query)
-	} else {
+	for _, query := range queries {
+		result, err := auClient.SearchCharities(query, 0, *limit)
+		if err != nil {
+			note("ACNC (Australia)", "%v", err)
+			continue
+		}
+		if len(result.Charities) == 0 {
+			note("ACNC (Australia)", "no match for %q", query)
+			continue
+		}
 		for _, c := range result.Charities {
 			var addrs []string
 			if c.Address != "" {
@@ -818,29 +841,37 @@ func runRisk(args []string) {
 	// UK Charity Commission
 	if ukClient, err := ukcharity.NewClient("", ""); err != nil {
 		note("UK Charity Commission", "skipped (%v)", err)
-	} else if charities, err := ukClient.SearchCharities(query); err != nil {
-		note("UK Charity Commission", "%v", err)
-	} else if len(charities) == 0 {
-		note("UK Charity Commission", "no match for %q", query)
 	} else {
-		for i, c := range charities {
-			if i >= *limit {
-				break
-			}
-			detail, err := ukClient.GetCharityDetail(c.RegisteredNumber, c.Suffix)
+		for _, query := range queries {
+			charities, err := ukClient.SearchCharities(query)
 			if err != nil {
+				note("UK Charity Commission", "%v", err)
 				continue
 			}
-			var addrs []string
-			if addr := strings.TrimSpace(detail.Address + " " + detail.Postcode); addr != "" {
-				addrs = append(addrs, addr)
+			if len(charities) == 0 {
+				note("UK Charity Commission", "no match for %q", query)
+				continue
 			}
-			entities = append(entities, risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, detail.Trustees))
+			for i, c := range charities {
+				if i >= *limit {
+					break
+				}
+				detail, err := ukClient.GetCharityDetail(c.RegisteredNumber, c.Suffix)
+				if err != nil {
+					continue
+				}
+				var addrs []string
+				if addr := strings.TrimSpace(detail.Address + " " + detail.Postcode); addr != "" {
+					addrs = append(addrs, addr)
+				}
+				entities = append(entities, risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, detail.Trustees))
+			}
 		}
 	}
 
-	// Sanctions screen -- the query itself, plus every distinct person
-	// name gathered from the sources above.
+	// Sanctions screen -- every query term itself, plus every distinct
+	// person name gathered from the sources above (deduplicated across
+	// all query terms, not just within one).
 	if sanctionsClient, err := sanctions.NewClient("", ""); err != nil {
 		note("Sanctions screen", "skipped (%v)", err)
 	} else {
@@ -867,7 +898,9 @@ func runRisk(args []string) {
 			}
 		}
 
-		screen(query, fmt.Sprintf("search query: %q", query))
+		for _, query := range queries {
+			screen(query, fmt.Sprintf("search query: %q", query))
+		}
 		for _, e := range entities {
 			for _, p := range e.People {
 				screen(p, e.Label())
@@ -875,19 +908,28 @@ func runRisk(args []string) {
 		}
 	}
 
+	// Cross-referencing runs once over the combined pool from every
+	// query term -- this is the whole point of taking multiple terms:
+	// an officer/trustee or address shared between, say, a "Narconon
+	// UK" result and a "Criminon UK" result only surfaces if both are
+	// in the same Assess() call.
 	score := risk.Assess(entities, extra)
 
 	if *asJSON {
 		printJSON(struct {
-			Query    string        `json:"query"`
+			Queries  []string      `json:"queries"`
 			Entities []risk.Entity `json:"entities"`
 			Notes    []string      `json:"notes"`
 			Score    risk.Score    `json:"score"`
-		}{query, entities, notes, score})
+		}{queries, entities, notes, score})
 		return
 	}
 
-	fmt.Printf("Risk assessment for %q\n\n", query)
+	quoted := make([]string, len(queries))
+	for i, q := range queries {
+		quoted[i] = fmt.Sprintf("%q", q)
+	}
+	fmt.Printf("Risk assessment for %s\n\n", strings.Join(quoted, ", "))
 	fmt.Printf("%d entit(ies) found:\n", len(entities))
 	for _, e := range entities {
 		fmt.Printf("  %s\n", e.Label())
