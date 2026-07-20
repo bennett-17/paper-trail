@@ -42,6 +42,16 @@ type Entity struct {
 	// only by FormationClusters. Not every source exposes one (EDGAR
 	// has no clean formation date at all).
 	FormedOn string `json:"formedOn,omitempty"`
+
+	// LinkedGroup is an explicit, source-asserted grouping key -- set
+	// only when the source itself says two records are part of one
+	// group (e.g. the UK Charity Commission's registered number, shared
+	// by a main charity and its linked/subsidiary charities under
+	// different suffixes). Used only by SharedLinkedGroup, and unlike
+	// every other heuristic in this package, a match here isn't an
+	// inference from circumstantial evidence -- it's a fact the source
+	// already states.
+	LinkedGroup string `json:"linkedGroup,omitempty"`
 }
 
 // NewEntity builds an Entity from its core fields (addresses/people may
@@ -276,6 +286,32 @@ func SharedWebsites(entities []Entity) []Indicator {
 	)
 }
 
+// SharedLinkedGroup flags groups of two or more distinct entities that
+// share the same LinkedGroup key -- unlike every other heuristic here,
+// this isn't circumstantial: it's a fact the source's own data model
+// already asserts (e.g. two UK charities registered under the same
+// number with different suffixes are, by the Charity Commission's own
+// records, one umbrella charity's linked/subsidiary structure).
+// Weighted low deliberately: this kind of grouping is routine and
+// expected, not itself unusual, so its main value is context for
+// interpreting other indicators involving the same entities (e.g. two
+// linked charities also sharing an address isn't a coincidence worth
+// separate suspicion -- of course they do, they're the same group).
+func SharedLinkedGroup(entities []Entity) []Indicator {
+	return sharedValueIndicators(entities,
+		func(e Entity) []string {
+			if e.LinkedGroup == "" {
+				return nil
+			}
+			return []string{e.LinkedGroup}
+		},
+		normalizeText,
+		"registry_linked_group",
+		"Entities are officially linked/grouped under the same registry record by the source itself (e.g. a shared registered number) -- routine and expected, not on its own unusual",
+		1,
+	)
+}
+
 // Assess runs every structural heuristic over entities and combines the
 // result with extra indicators the caller already built from other
 // sources (e.g. sanctions-list hits, which aren't a comparison between
@@ -289,6 +325,7 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SharedPhones(entities)...)
 	indicators = append(indicators, SharedEmails(entities)...)
 	indicators = append(indicators, SharedWebsites(entities)...)
+	indicators = append(indicators, SharedLinkedGroup(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
 

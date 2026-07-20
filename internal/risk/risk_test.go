@@ -144,6 +144,39 @@ func TestSharedWebsitesIgnoresDifferentDomains(t *testing.T) {
 	}
 }
 
+func TestSharedLinkedGroupFlagsSameRegisteredNumber(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "283127", Name: "Example Charity", LinkedGroup: "283127"},
+		{Source: "ukcharity", ID: "283127-1", Name: "Example Charity (Scotland)", LinkedGroup: "283127"},
+		{Source: "ukcharity", ID: "999999", Name: "Unrelated Charity", LinkedGroup: "999999"},
+	}
+
+	indicators := SharedLinkedGroup(entities)
+	if len(indicators) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(indicators), indicators)
+	}
+	ind := indicators[0]
+	if ind.Code != "registry_linked_group" {
+		t.Errorf("Code = %q, want registry_linked_group", ind.Code)
+	}
+	if ind.Weight != 1 {
+		t.Errorf("Weight = %d, want 1 (routine/expected, not itself unusual)", ind.Weight)
+	}
+	if len(ind.Entities) != 2 {
+		t.Errorf("Entities = %v, want 2 entries", ind.Entities)
+	}
+}
+
+func TestSharedLinkedGroupIgnoresEntitiesWithNoGroup(t *testing.T) {
+	entities := []Entity{
+		{Source: "edgar", ID: "1", Name: "Example Corp"},
+		{Source: "nonprofit", ID: "2", Name: "Example Org"},
+	}
+	if got := SharedLinkedGroup(entities); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0 (no LinkedGroup set on either entity)", len(got))
+	}
+}
+
 func TestAssessSumsWeightsAcrossAllIndicators(t *testing.T) {
 	entities := []Entity{
 		NewEntity("edgar", "1", "Example Corp", []string{"123 Main St"}, []string{"Jane Example"}),

@@ -97,7 +97,14 @@ And on top of all of the above, structural risk heuristics:
   A UK charity that's also a registered company gets its Companies
   House officers pulled in alongside its Charity Commission trustees --
   otherwise a company's directors would be invisible to this tool
-  entirely, since ukcharity itself only exposes trustees.
+  entirely, since ukcharity itself only exposes trustees. UK charities
+  sharing a Charity Commission registered number under different
+  suffixes (a main charity and its own linked/subsidiary charities) get
+  a registry_linked_group indicator -- unlike every other one here,
+  this isn't circumstantial, it's a fact the Charity Commission's own
+  data already states, so it's scored low: the linkage is routine and
+  expected on its own, and mainly useful as context for interpreting
+  other indicators between the same entities.
   Flagged patterns: a registered/mailing address, phone number, email, or website
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an

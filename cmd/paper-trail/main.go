@@ -158,8 +158,16 @@ registered company (has a CompaniesHouseNumber), its Companies House
 officers are pulled in alongside its Charity Commission trustees --
 often the same people under a different governance role, sometimes
 not, and either way a company's directors are otherwise invisible to
-this tool since ukcharity itself only exposes trustees. Flagged
-patterns: entities that share a registered/mailing address, phone
+this tool since ukcharity itself only exposes trustees. UK charities
+that share a Charity Commission registered number under different
+suffixes (a main charity and its own linked/subsidiary charities) get
+a registry_linked_group indicator -- unlike every other indicator
+here, this isn't circumstantial, it's a fact the Charity Commission's
+own data already states, so it's scored low: the linkage itself is
+routine and expected, not unusual, and mainly useful as context for
+interpreting other indicators between the same entities (e.g. linked
+charities also sharing an address isn't a coincidence worth separate
+suspicion). Flagged patterns: entities that share a registered/mailing address, phone
 number, email, or website, and the same individual appearing as an
 officer, director, or trustee of more than one of them -- including a
 weaker, lower-scored version of that check for names that only match
@@ -1082,7 +1090,15 @@ func runRisk(args []string) {
 						}
 					}
 				}
-				e := risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, people)
+				// ID includes the suffix -- confirmed a real bug fetching
+				// this: a main charity (suffix 0) and its own linked
+				// charities (suffix > 0) share one RegisteredNumber, so
+				// the number alone isn't a unique entity ID.
+				regRef := fmt.Sprintf("%d", detail.RegisteredNumber)
+				if detail.Suffix != 0 {
+					regRef += fmt.Sprintf("-%d", detail.Suffix)
+				}
+				e := risk.NewEntity("ukcharity", regRef, detail.Name, addrs, people)
 				if detail.Phone != "" {
 					e.Phones = []string{detail.Phone}
 				}
@@ -1092,6 +1108,10 @@ func runRisk(args []string) {
 				if detail.Website != "" {
 					e.Websites = []string{detail.Website}
 				}
+				// LinkedGroup is the registered number WITHOUT the
+				// suffix -- the key that groups a main charity together
+				// with its own linked/subsidiary charities.
+				e.LinkedGroup = fmt.Sprintf("%d", detail.RegisteredNumber)
 				e.FormedOn = detail.RegistrationDate
 				entities = append(entities, e)
 			}
