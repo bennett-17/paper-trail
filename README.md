@@ -101,8 +101,12 @@ And on top of all of the above, structural risk heuristics:
   Flagged patterns: a registered/mailing address, phone number, email, or website
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an
-  "interlocking directorate") -- plus any sanctions-list hit on any name
-  or person found, and a separate flag when a sanctions hit's own
+  "interlocking directorate"), plus a weaker, lower-scored version of
+  that same check for names that only match once titles/honorifics are
+  stripped and word order is ignored (different sources format the same
+  person differently, and an exact match alone misses that) -- plus any
+  sanctions-list hit on any name or person found, and a separate flag
+  when a sanctions hit's own
   country is on FATF's high-risk or increased-monitoring list (a
   manually maintained snapshot refreshed after FATF's periodic plenary
   meetings, not a live feed -- FATF doesn't publish these as an API).

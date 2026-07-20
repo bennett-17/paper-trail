@@ -280,6 +280,7 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	var indicators []Indicator
 	indicators = append(indicators, SharedAddresses(entities)...)
 	indicators = append(indicators, SharedPeople(entities)...)
+	indicators = append(indicators, SharedPeopleFuzzy(entities)...)
 	indicators = append(indicators, SharedPhones(entities)...)
 	indicators = append(indicators, SharedEmails(entities)...)
 	indicators = append(indicators, SharedWebsites(entities)...)

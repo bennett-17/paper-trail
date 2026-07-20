@@ -161,8 +161,13 @@ not, and either way a company's directors are otherwise invisible to
 this tool since ukcharity itself only exposes trustees. Flagged
 patterns: entities that share a registered/mailing address, phone
 number, email, or website, and the same individual appearing as an
-officer, director, or trustee of more than one of them -- plus any
-sanctions-list hit, and, when a sanctions hit's own country is on
+officer, director, or trustee of more than one of them -- including a
+weaker, lower-scored version of that check for names that only match
+after stripping titles/honorifics and ignoring word order (e.g. "Prof.
+Doreen Cantrell FRS" vs. "CANTRELL, Doreen, Professor"), since
+different sources format the same person's name differently and an
+exact match alone misses that -- plus any sanctions-list hit, and,
+when a sanctions hit's own country is on
 FATF's high-risk or increased-monitoring list, a separate
 jurisdiction_risk indicator (FATF's lists are a manually maintained
 snapshot, refreshed after FATF's periodic plenaries, not a live feed -- see internal/risk/fatf.go
