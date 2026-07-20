@@ -132,8 +132,13 @@ risk runs one or more <query> terms against every source above that's
 configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a
 sanctions screen), normalizes whatever address/officer/contact data each
 source exposes, and flags structural patterns across the *combined*
-pool of everything every term found: entities that share a registered/
-mailing address, phone number, email, or website, and the same
+pool of everything every term found. For SEC EDGAR this includes any
+related CIKs (see lookup's "Related CIKs" check) -- each one gets its
+own address/insider lookup too, not just a bare name, so a corporate
+restructuring can actually surface a shared address or officer instead
+of being invisible to every heuristic. Flagged patterns: entities that
+share a registered/mailing address, phone number, email, or website,
+and the same
 individual appearing as an officer, director, or trustee of more than
 one of them -- plus any sanctions-list hit, and, when a sanctions hit's
 own country is on FATF's high-risk or increased-monitoring list, a
@@ -730,6 +735,33 @@ func runSanctions(args []string) {
 	}
 }
 
+// edgarEntityFromCompany builds a risk.Entity for an already-resolved
+// EDGAR company, including its addresses and (up to limit) insider
+// officers/directors. Shared by both the primary company in a `risk`
+// query and any related CIKs it turns up (see runRisk) -- a related
+// CIK is only useful cross-referencing evidence if it's resolved the
+// same way the primary company is, not left as a bare name+CIK.
+func edgarEntityFromCompany(client *edgar.Client, company edgar.Company, limit int) risk.Entity {
+	var addrs []string
+	if company.BusinessAddress != nil {
+		if a := company.BusinessAddress.AsSingleLine(); a != "" {
+			addrs = append(addrs, a)
+		}
+	}
+	if company.MailingAddress != nil {
+		if a := company.MailingAddress.AsSingleLine(); a != "" {
+			addrs = append(addrs, a)
+		}
+	}
+	var people []string
+	if rels, err := client.GetInsiderRelationships(company.CIK, company.Name, limit); err == nil {
+		for _, r := range rels {
+			people = append(people, r.TargetName)
+		}
+	}
+	return risk.NewEntity("edgar", company.CIK, company.Name, addrs, people)
+}
+
 // runRisk queries every configured source for candidates matching
 // query, normalizes whatever address/officer data each source exposes
 // into risk.Entity values, and runs the structural heuristics over the
@@ -775,31 +807,25 @@ func runRisk(args []string) {
 				note("SEC EDGAR", "%v", err)
 				continue
 			}
-			var addrs []string
-			if company.BusinessAddress != nil {
-				if a := company.BusinessAddress.AsSingleLine(); a != "" {
-					addrs = append(addrs, a)
-				}
-			}
-			if company.MailingAddress != nil {
-				if a := company.MailingAddress.AsSingleLine(); a != "" {
-					addrs = append(addrs, a)
-				}
-			}
-			var people []string
-			if rels, err := edgarClient.GetInsiderRelationships(cik, company.Name, *limit); err == nil {
-				for _, r := range rels {
-					people = append(people, r.TargetName)
-				}
-			}
-			entities = append(entities, risk.NewEntity("edgar", cik, company.Name, addrs, people))
+			entities = append(entities, edgarEntityFromCompany(edgarClient, company, *limit))
 
+			// Related CIKs (former identities after a corporate
+			// restructuring) are the clearest possible evidence for
+			// this tool's cross-referencing -- but only if they're
+			// resolved into real entities with their own address/
+			// insiders, not left as a bare name+CIK that can never
+			// match anything.
 			if related, err := edgarClient.FindRelatedCIKs(company); err == nil {
 				for i, re := range related {
 					if i >= *limit {
 						break
 					}
-					entities = append(entities, risk.NewEntity("edgar", re.CIK, re.Name, nil, nil))
+					reCompany, err := edgarClient.GetCompany(re.CIK)
+					if err != nil {
+						entities = append(entities, risk.NewEntity("edgar", re.CIK, re.Name, nil, nil))
+						continue
+					}
+					entities = append(entities, edgarEntityFromCompany(edgarClient, reCompany, *limit))
 				}
 			}
 		}

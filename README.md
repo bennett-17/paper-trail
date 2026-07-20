@@ -82,7 +82,11 @@ And on top of all of the above, structural risk heuristics:
 - `risk` runs one or more names across every source that's configured,
   normalizes whatever address/officer/contact data each source exposes,
   and flags shared values across the *combined* results of every name
-  given: a registered/mailing address, phone number, email, or website
+  given. For SEC EDGAR, any related CIKs (see lookup's "Related CIKs"
+  check) get their own address/insider lookup too, not just a bare
+  name, so a corporate restructuring can actually surface a shared
+  address or officer instead of being invisible to every heuristic.
+  Flagged patterns: a registered/mailing address, phone number, email, or website
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an
   "interlocking directorate") -- plus any sanctions-list hit on any name
