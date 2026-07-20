@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func mustReadFixture(t *testing.T, name string) string {
@@ -25,6 +26,7 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 		t.Fatalf("NewClient: %v", err)
 	}
 	c.MinInterval = 0
+	c.RetryBaseDelay = time.Millisecond
 	c.SearchURL = srv.URL + "/search"
 	return c
 }
@@ -242,5 +244,81 @@ func TestBothKeysRejectedReturnsError(t *testing.T) {
 	}
 	if requestCount != 2 {
 		t.Errorf("made %d requests, want exactly 2 (one per key, no extra retries)", requestCount)
+	}
+}
+
+// TestRetriesOn429ThenSucceeds is the actual point of retry-with-backoff:
+// a transient rate-limit response shouldn't surface as a hard failure if
+// a retry on the same key would have worked -- observed live when a
+// `risk` scan screens many names in a short burst.
+func TestRetriesOn429ThenSucceeds(t *testing.T) {
+	attempts := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"statusCode":429,"message":"Rate limit exceeded"}`)
+			return
+		}
+		fmt.Fprint(w, mustReadFixture(t, "sanctions_search_results.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	result, err := c.SearchEntities("Example", false, 0, 0)
+	if err != nil {
+		t.Fatalf("SearchEntities: %v, want it to succeed after retrying past the 429s", err)
+	}
+	if attempts != 3 {
+		t.Errorf("made %d attempts, want 3 (two 429s then a success)", attempts)
+	}
+	if result.Total != 2 {
+		t.Errorf("Total = %d, want 2", result.Total)
+	}
+}
+
+// TestGivesUpOn429AfterMaxRetries verifies the client doesn't retry
+// forever against a persistently rate-limited endpoint, and that it
+// still tries the secondary key afterward (a second key may have its
+// own separate quota).
+func TestGivesUpOn429AfterMaxRetries(t *testing.T) {
+	var keysReceived []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		keysReceived = append(keysReceived, r.URL.Query().Get("subscription-key"))
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"statusCode":429,"message":"Rate limit exceeded"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := NewClient("primary-key", "secondary-key")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	c.MinInterval = 0
+	c.RetryBaseDelay = time.Millisecond
+	c.MaxRetries = 2
+	c.SearchURL = srv.URL + "/search"
+
+	if _, err := c.SearchEntities("anything", false, 0, 0); err == nil {
+		t.Fatal("expected an error when every attempt on both keys is rate-limited")
+	}
+	// MaxRetries=2 means 3 attempts per key (the original try plus 2
+	// retries), times 2 keys.
+	if len(keysReceived) != 6 {
+		t.Errorf("made %d requests, want 6 (3 attempts x 2 keys)", len(keysReceived))
+	}
+	for i := 0; i < 3; i++ {
+		if keysReceived[i] != "primary-key" {
+			t.Errorf("request %d used key %q, want primary-key", i, keysReceived[i])
+		}
+	}
+	for i := 3; i < 6; i++ {
+		if keysReceived[i] != "secondary-key" {
+			t.Errorf("request %d used key %q, want secondary-key", i, keysReceived[i])
+		}
 	}
 }

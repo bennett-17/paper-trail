@@ -54,6 +54,15 @@ type Client struct {
 
 	SearchURL string
 
+	// MaxRetries is how many additional attempts are made on the same
+	// key after a 429 (rate limited) response before moving on to the
+	// next key -- observed live under bursts of screening calls (e.g.
+	// many people to check within one `risk` scan). RetryBaseDelay is
+	// the backoff before the first retry, doubled after each subsequent
+	// attempt.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+
 	mu            sync.Mutex
 	lastRequestAt time.Time
 }
@@ -79,12 +88,14 @@ func NewClient(primaryKey, secondaryKey string) (*Client, error) {
 		)
 	}
 	return &Client{
-		HTTPClient:   &http.Client{Timeout: 15 * time.Second},
-		MinInterval:  150 * time.Millisecond,
-		UserAgent:    "paper-trail (https://github.com/bennett-17/paper-trail)",
-		PrimaryKey:   primaryKey,
-		SecondaryKey: secondaryKey,
-		SearchURL:    DefaultSearchURL,
+		HTTPClient:     &http.Client{Timeout: 15 * time.Second},
+		MinInterval:    150 * time.Millisecond,
+		UserAgent:      "paper-trail (https://github.com/bennett-17/paper-trail)",
+		PrimaryKey:     primaryKey,
+		SecondaryKey:   secondaryKey,
+		SearchURL:      DefaultSearchURL,
+		MaxRetries:     3,
+		RetryBaseDelay: time.Second,
 	}, nil
 }
 
@@ -113,7 +124,7 @@ func (c *Client) getWithFallback(base *url.URL) ([]byte, error) {
 
 	var lastErr error
 	for _, key := range keys {
-		status, body, err := c.doGet(base, key)
+		status, body, err := c.doGetWithRetry(base, key)
 		if err != nil {
 			return nil, err
 		}
@@ -127,11 +138,33 @@ func (c *Client) getWithFallback(base *url.URL) ([]byte, error) {
 					"subscription keys", base.Path,
 			)
 			continue // try the next key, if any
+		case status == http.StatusTooManyRequests:
+			lastErr = newClientError(
+				"Consolidated Screening List API rate-limited %s even after %d retries -- "+
+					"try again shortly, or space out requests further", base.Path, c.MaxRetries,
+			)
+			continue // a second key may have its own separate quota
 		default:
 			return nil, newClientError("Consolidated Screening List API returned HTTP %d for %s", status, base.Path)
 		}
 	}
 	return nil, lastErr
+}
+
+// doGetWithRetry wraps doGet with exponential backoff retries when the
+// API responds 429 (rate limited). It does not retry any other status
+// code -- those are handled by the caller (getWithFallback), e.g.
+// falling back to a different key on 401.
+func (c *Client) doGetWithRetry(base *url.URL, key string) (statusCode int, body []byte, err error) {
+	delay := c.RetryBaseDelay
+	for attempt := 0; ; attempt++ {
+		status, respBody, doErr := c.doGet(base, key)
+		if doErr != nil || status != http.StatusTooManyRequests || attempt >= c.MaxRetries {
+			return status, respBody, doErr
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
 }
 
 // doGet performs a single request with the given subscription key
