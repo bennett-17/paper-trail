@@ -1,0 +1,47 @@
+{
+  "total": 2,
+  "sources": [
+    {
+      "value": "Specially Designated Nationals (SDN) - Treasury Department",
+      "count": 2
+    }
+  ],
+  "results": [
+    {
+      "id": "SDN-12345",
+      "name": "EXAMPLE SANCTIONED ENTITY LTD",
+      "alt_names": ["EXAMPLE ALTERNATE NAME"],
+      "type": "Entity",
+      "source": "Specially Designated Nationals (SDN) - Treasury Department",
+      "country": "RU",
+      "entity_number": "12345",
+      "remarks": "Blocked pursuant to Executive Order 14024.",
+      "programs": ["RUSSIA-EO14024"],
+      "addresses": [
+        {
+          "address": "1 Example Street",
+          "city": "Moscow",
+          "state": null,
+          "postal_code": "121467",
+          "country": "RU"
+        }
+      ],
+      "source_information_url": "https://home.treasury.gov/policy-issues/financial-sanctions/specially-designated-nationals-and-blocked-persons-list-sdn-human-readable-lists",
+      "source_list_url": "https://sanctionslist.ofac.treas.gov/Home/SdnList"
+    },
+    {
+      "id": "SDN-67890",
+      "name": "EXAMPLE SANCTIONED PERSON",
+      "alt_names": [],
+      "type": "Individual",
+      "source": "Specially Designated Nationals (SDN) - Treasury Department",
+      "country": null,
+      "entity_number": "67890",
+      "remarks": null,
+      "programs": ["SDNTK"],
+      "addresses": [],
+      "source_information_url": "https://home.treasury.gov/policy-issues/financial-sanctions/specially-designated-nationals-and-blocked-persons-list-sdn-human-readable-lists",
+      "source_list_url": "https://sanctionslist.ofac.treas.gov/Home/SdnList"
+    }
+  ]
+}

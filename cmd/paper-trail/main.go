@@ -15,6 +15,8 @@ import (
 	"github.com/bennett-17/paper-trail/internal/envfile"
 	"github.com/bennett-17/paper-trail/internal/graph"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
+	"github.com/bennett-17/paper-trail/internal/risk"
+	"github.com/bennett-17/paper-trail/internal/sanctions"
 	"github.com/bennett-17/paper-trail/internal/ukcharity"
 )
 
@@ -41,6 +43,10 @@ func main() {
 		runAUCharity(os.Args[2:])
 	case "ukcharity":
 		runUKCharity(os.Args[2:])
+	case "sanctions":
+		runSanctions(os.Args[2:])
+	case "risk":
+		runRisk(os.Args[2:])
 	case "-h", "--help", "help":
 		printUsage()
 	default:
@@ -68,6 +74,8 @@ Usage:
   paper-trail aucharity --abn <abn> [--json]
   paper-trail ukcharity <query> [--json]
   paper-trail ukcharity --regno <n> [--suffix <n>] [--json]
+  paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]
+  paper-trail risk <query> [--limit <n>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -104,12 +112,43 @@ Commission's API has no keyless option. Register for a free account
 and subscribe to the "Register of Charities" product at
 https://api-portal.charitycommission.gov.uk to get your keys.
 
+sanctions searches the US Consolidated Screening List (CSL) -- OFAC's
+Specially Designated Nationals list plus State Department, Commerce/BIS,
+and other federal restricted-party lists, aggregated into one API by
+the International Trade Administration. --fuzzy enables the API's own
+fuzzy name matching (catches spelling/transliteration variants at the
+cost of more false positives). A match here is a lead to verify, not a
+finding on its own -- always check the linked source list entry before
+treating it as confirmed. Requires CSL_API_KEY_PRIMARY (and, optionally,
+CSL_API_KEY_SECONDARY as a rotation fallback) -- same no-keyless-option
+model as ukcharity. Register for a free account and subscribe to "Data
+Services Platform APIs" at https://developer.trade.gov to get your keys.
+
+risk runs <query> against every source above that's configured (SEC
+EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a sanctions
+screen), normalizes whatever address/officer data each source exposes,
+and flags two structural patterns: entities that share a registered/
+mailing address, and the same individual appearing as an officer,
+director, or trustee of more than one of them -- plus any sanctions-list
+hit. Each flag is a plain sum of named, evidence-linked indicators, not
+a black-box number -- every point in the total traces back to one
+printed indicator with the specific entities and evidence behind it.
+--limit caps how many candidates are pulled per source (default 5) to
+bound the number of live API calls. A source with no credentials
+configured (ukcharity/sanctions) or no match is skipped and noted, not
+treated as a failure. This is a lead-generation tool: it flags patterns
+worth checking by hand, not a finding, and it is not a determination of
+money laundering, tax evasion, terrorism financing, or any other
+wrongdoing.
+
 Environment:
   EDGAR_USER_AGENT             required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
                                 (can also be set via a .env file in the working dir)
                                 (not needed for the nonprofit or aucharity commands)
   UK_CHARITY_API_KEY_PRIMARY   required for the ukcharity command only (see above)
-  UK_CHARITY_API_KEY_SECONDARY optional rotation fallback for ukcharity (see above)`)
+  UK_CHARITY_API_KEY_SECONDARY optional rotation fallback for ukcharity (see above)
+  CSL_API_KEY_PRIMARY          required for the sanctions command only (see above)
+  CSL_API_KEY_SECONDARY        optional rotation fallback for sanctions (see above)`)
 }
 
 // resolveTargetCIK returns cikFlag directly if set -- bypassing name/
@@ -611,6 +650,265 @@ func runUKCharity(args []string) {
 	if len(charities) == 0 {
 		fmt.Println("No matches. Note: this searches the England & Wales Charity Commission register only -- use `lookup`/`nonprofit`/`aucharity` for other jurisdictions.")
 	}
+}
+
+func runSanctions(args []string) {
+	fs := flag.NewFlagSet("sanctions", flag.ExitOnError)
+	fuzzy := fs.Bool("fuzzy", false, "enable fuzzy name matching (more false positives)")
+	offset := fs.Int("offset", 0, "pagination offset -- skip this many higher-ranked results")
+	limit := fs.Int("limit", 10, "max results to show (API caps at 50)")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]"
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+	query := positional[0]
+
+	client, err := sanctions.NewClient("", "")
+	exitOnErr(err)
+
+	result, err := client.SearchEntities(query, *fuzzy, *offset, *limit)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("%d total match(es) across US restricted-party lists, showing %d:\n\n", result.Total, len(result.Hits))
+	for _, h := range result.Hits {
+		fmt.Printf("%s  [%s]\n", h.Name, orDash(h.Type))
+		if len(h.AltNames) > 0 {
+			fmt.Printf("  Also known as: %s\n", strings.Join(h.AltNames, "; "))
+		}
+		fmt.Printf("  Source list: %s\n", h.Source)
+		if len(h.Programs) > 0 {
+			fmt.Printf("  Program(s): %s\n", strings.Join(h.Programs, ", "))
+		}
+		if h.Country != "" {
+			fmt.Printf("  Country: %s\n", h.Country)
+		}
+		if len(h.Addresses) > 0 {
+			a := h.Addresses[0]
+			fmt.Printf("  Address: %s, %s %s\n", orDash(a.Address), orDash(a.City), orDash(a.Country))
+		}
+		if h.Remarks != "" {
+			fmt.Printf("  Remarks: %s\n", h.Remarks)
+		}
+		fmt.Println()
+	}
+	if result.Total == 0 {
+		fmt.Println("No matches. A clean result here does not itself clear an entity -- it means no name/alias match on the US lists this API aggregates.")
+	} else {
+		fmt.Println("A match here is a lead to verify against the linked source list, not a finding on its own -- names collide, and this is not a determination of wrongdoing.")
+		if next := *offset + len(result.Hits); next < result.Total {
+			fmt.Printf("%d more match(es) -- rerun with --offset %d to see the next page.\n", result.Total-next, next)
+		}
+	}
+}
+
+// runRisk queries every configured source for candidates matching
+// query, normalizes whatever address/officer data each source exposes
+// into risk.Entity values, and runs the structural heuristics over the
+// combined set. Every source is best-effort: a missing credential or a
+// failed/empty lookup is recorded as a note and skipped, never fatal --
+// a partial report across whichever sources are configured is more
+// useful than an all-or-nothing failure.
+func runRisk(args []string) {
+	fs := flag.NewFlagSet("risk", flag.ExitOnError)
+	limit := fs.Int("limit", 5, "max candidates to pull per source")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail risk <query> [--limit <n>] [--json]"
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+	query := positional[0]
+
+	var entities []risk.Entity
+	var extra []risk.Indicator
+	var notes []string
+	note := func(source, format string, a ...any) {
+		notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
+	}
+
+	// SEC EDGAR
+	if edgarClient, err := edgar.NewClient(""); err != nil {
+		note("SEC EDGAR", "skipped (%v)", err)
+	} else if cik, err := edgarClient.ResolveCIK(query); err != nil {
+		note("SEC EDGAR", "no match for %q", query)
+	} else if company, err := edgarClient.GetCompany(cik); err != nil {
+		note("SEC EDGAR", "%v", err)
+	} else {
+		var addrs []string
+		if company.BusinessAddress != nil {
+			if a := company.BusinessAddress.AsSingleLine(); a != "" {
+				addrs = append(addrs, a)
+			}
+		}
+		if company.MailingAddress != nil {
+			if a := company.MailingAddress.AsSingleLine(); a != "" {
+				addrs = append(addrs, a)
+			}
+		}
+		var people []string
+		if rels, err := edgarClient.GetInsiderRelationships(cik, company.Name, *limit); err == nil {
+			for _, r := range rels {
+				people = append(people, r.TargetName)
+			}
+		}
+		entities = append(entities, risk.NewEntity("edgar", cik, company.Name, addrs, people))
+
+		if related, err := edgarClient.FindRelatedCIKs(company); err == nil {
+			for i, re := range related {
+				if i >= *limit {
+					break
+				}
+				entities = append(entities, risk.NewEntity("edgar", re.CIK, re.Name, nil, nil))
+			}
+		}
+	}
+
+	// IRS Form 990 (nonprofit), via ProPublica
+	npClient := nonprofit.NewClient()
+	if result, err := npClient.SearchOrganizations(query, 1); err != nil {
+		note("IRS Form 990", "%v", err)
+	} else if len(result.Organizations) == 0 {
+		note("IRS Form 990", "no match for %q", query)
+	} else {
+		for i, o := range result.Organizations {
+			if i >= *limit {
+				break
+			}
+			profile, err := npClient.GetOrganization(o.EIN)
+			if err != nil {
+				continue // skip this one candidate, not the whole source
+			}
+			var addrs []string
+			if profile.Organization.Address != "" {
+				addrs = append(addrs, fmt.Sprintf("%s, %s, %s", profile.Organization.Address, profile.Organization.City, profile.Organization.State))
+			}
+			entities = append(entities, risk.NewEntity("nonprofit", profile.Organization.EIN, profile.Organization.Name, addrs, nil))
+		}
+	}
+
+	// Australian ACNC
+	auClient := aucharity.NewClient()
+	if result, err := auClient.SearchCharities(query, 0, *limit); err != nil {
+		note("ACNC (Australia)", "%v", err)
+	} else if len(result.Charities) == 0 {
+		note("ACNC (Australia)", "no match for %q", query)
+	} else {
+		for _, c := range result.Charities {
+			var addrs []string
+			if c.Address != "" {
+				addrs = append(addrs, fmt.Sprintf("%s, %s, %s", c.Address, c.City, c.State))
+			}
+			entities = append(entities, risk.NewEntity("aucharity", c.ABN, c.LegalName, addrs, nil))
+		}
+	}
+
+	// UK Charity Commission
+	if ukClient, err := ukcharity.NewClient("", ""); err != nil {
+		note("UK Charity Commission", "skipped (%v)", err)
+	} else if charities, err := ukClient.SearchCharities(query); err != nil {
+		note("UK Charity Commission", "%v", err)
+	} else if len(charities) == 0 {
+		note("UK Charity Commission", "no match for %q", query)
+	} else {
+		for i, c := range charities {
+			if i >= *limit {
+				break
+			}
+			detail, err := ukClient.GetCharityDetail(c.RegisteredNumber, c.Suffix)
+			if err != nil {
+				continue
+			}
+			var addrs []string
+			if addr := strings.TrimSpace(detail.Address + " " + detail.Postcode); addr != "" {
+				addrs = append(addrs, addr)
+			}
+			entities = append(entities, risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, detail.Trustees))
+		}
+	}
+
+	// Sanctions screen -- the query itself, plus every distinct person
+	// name gathered from the sources above.
+	if sanctionsClient, err := sanctions.NewClient("", ""); err != nil {
+		note("Sanctions screen", "skipped (%v)", err)
+	} else {
+		screened := map[string]bool{}
+		screen := func(name, screenedFor string) {
+			key := strings.ToLower(strings.TrimSpace(name))
+			if key == "" || screened[key] {
+				return
+			}
+			screened[key] = true
+			result, err := sanctionsClient.SearchEntities(name, false, 0, 5)
+			if err != nil {
+				note("Sanctions screen", "%q: %v", name, err)
+				return
+			}
+			for _, hit := range result.Hits {
+				extra = append(extra, risk.Indicator{
+					Code:        "sanctions_match",
+					Description: "Name matched a US restricted-party list",
+					Weight:      5,
+					Entities:    []string{screenedFor},
+					Evidence:    fmt.Sprintf("%s -- %s (%s)", hit.Name, hit.Source, strings.Join(hit.Programs, ", ")),
+				})
+			}
+		}
+
+		screen(query, fmt.Sprintf("search query: %q", query))
+		for _, e := range entities {
+			for _, p := range e.People {
+				screen(p, e.Label())
+			}
+		}
+	}
+
+	score := risk.Assess(entities, extra)
+
+	if *asJSON {
+		printJSON(struct {
+			Query    string        `json:"query"`
+			Entities []risk.Entity `json:"entities"`
+			Notes    []string      `json:"notes"`
+			Score    risk.Score    `json:"score"`
+		}{query, entities, notes, score})
+		return
+	}
+
+	fmt.Printf("Risk assessment for %q\n\n", query)
+	fmt.Printf("%d entit(ies) found:\n", len(entities))
+	for _, e := range entities {
+		fmt.Printf("  %s\n", e.Label())
+	}
+	if len(notes) > 0 {
+		fmt.Println("\nNotes:")
+		for _, n := range notes {
+			fmt.Printf("  - %s\n", n)
+		}
+	}
+
+	fmt.Printf("\nRisk score: %d\n\n", score.Total)
+	if len(score.Indicators) == 0 {
+		fmt.Println("No structural indicators found among the entities located.")
+	}
+	for _, ind := range score.Indicators {
+		fmt.Printf("+%d  %s\n", ind.Weight, ind.Description)
+		fmt.Printf("     Entities: %s\n", strings.Join(ind.Entities, "; "))
+		fmt.Printf("     Evidence: %s\n\n", ind.Evidence)
+	}
+	fmt.Println("This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
 }
 
 func gbpOrDash(v *int64) string {

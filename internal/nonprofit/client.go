@@ -132,6 +132,11 @@ type Organization struct {
 	State    string `json:"state,omitempty"`
 	NTEECode string `json:"nteeCode,omitempty"` // National Taxonomy of Exempt Entities activity code
 
+	// Address is the street address on file -- only populated by
+	// GetOrganization, not search results (ProPublica's search endpoint
+	// doesn't return it).
+	Address string `json:"address,omitempty"`
+
 	// FilingRequirement is the IRS's own stated reason this entity either
 	// must or need not file Form 990 (only populated by GetOrganization,
 	// not search results). Some 501(c)(3) categories -- churches and
@@ -350,6 +355,7 @@ func (c *Client) GetOrganization(ein string) (OrganizationProfile, error) {
 			City:              resp.Organization.City,
 			State:             resp.Organization.State,
 			NTEECode:          resp.Organization.NTEECode,
+			Address:           resp.Organization.Address,
 			FilingRequirement: filingRequirementName(resp.Organization.FilingReqCd),
 		},
 		Filings: filings,

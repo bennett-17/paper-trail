@@ -2,11 +2,11 @@
   "organization": {
     "id": 930801236,
     "ein": 930801236,
-    "name": "Religious Technology Center",
-    "address": "1710 IVAR AVE STE 1100",
-    "city": "Los Angeles",
+    "name": "Example Religious Organization",
+    "address": "1 Example Street Ste 100",
+    "city": "Sampleburg",
     "state": "CA",
-    "zipcode": "90028",
+    "zipcode": "90000",
     "filing_requirement_code": 6
   },
   "filings_with_data": [],

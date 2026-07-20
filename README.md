@@ -6,8 +6,11 @@ for US public companies, IRS Form 990 data (via ProPublica's Nonprofit
 Explorer) for US entities EDGAR can't see at all -- churches, charities, and
 other 501(c) organizations that never file with the SEC -- the Australian
 Charities and Not-for-profits Commission (ACNC) register for organizations
-operating out of Australia, and the Charity Commission for England and
-Wales's Register of Charities for the UK. A future phase will add
+operating out of Australia, the Charity Commission for England and
+Wales's Register of Charities for the UK, and the US Consolidated
+Screening List (OFAC's Specially Designated Nationals list plus State
+Department and Commerce/BIS restricted-party lists) for sanctions
+screening. A future phase will add
 [OpenCorporates](https://opencorporates.com) data to extend coverage
 further (private companies, more non-US jurisdictions, and
 registered-agent/address-based relationship mapping).
@@ -23,8 +26,10 @@ registered-agent/address-based relationship mapping).
 | `nonprofit` | IRS Form 990, via ProPublica | US 501(c) organizations | none |
 | `aucharity` | ACNC, via data.gov.au | Australian charities | none |
 | `ukcharity` | Charity Commission | England & Wales charities | `UK_CHARITY_API_KEY_PRIMARY` |
+| `sanctions` | US Consolidated Screening List | OFAC SDN + State/BIS restricted-party lists | `CSL_API_KEY_PRIMARY` |
+| `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Four independent public-data sources across three countries, unified
+Five independent public-data sources across three countries, unified
 under one CLI and one `--json` output convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
@@ -59,6 +64,29 @@ Separately, for organizations that don't file with the SEC at all:
   exact registered number, for organizations operating out of England and
   Wales (requires your own free API key -- see Setup)
 
+And separately, for sanctions screening:
+
+- Searches the US Consolidated Screening List -- OFAC's SDN list plus
+  State Department and Commerce/BIS restricted-party lists -- by name,
+  with optional fuzzy matching, so any entity or officer/trustee name
+  surfaced by another command can be checked against US restricted-party
+  lists in the same tool (requires your own free API key -- see Setup).
+  A match is a lead to verify against the linked source-list entry, not
+  a finding on its own.
+
+And on top of all of the above, structural risk heuristics:
+
+- `risk` runs a name across every source that's configured, normalizes
+  whatever address/officer data each source exposes, and flags two
+  patterns: entities that share a registered/mailing address, and the
+  same individual appearing as an officer, director, or trustee of more
+  than one of them (an "interlocking directorate") -- plus any
+  sanctions-list hit on the name or any person found. Every point in the
+  resulting score is a plain sum of named, evidence-linked indicators --
+  never a bare number, and never a claim about money laundering, tax
+  evasion, or terrorism financing specifically. It's a lead-generation
+  report, not a finding.
+
 ## Why
 
 Corporate ownership and relationship data is public but scattered.
@@ -67,7 +95,8 @@ or threat-intel work often need to manually stitch together filings,
 names, and addresses to spot patterns (e.g., the same individual showing
 up as an officer across multiple entities). Paper Trail automates the
 first step of that process using freely available government data --
-no API key required for any command except `ukcharity` (see Setup).
+no API key required for any command except `ukcharity` and `sanctions`
+(see Setup).
 
 ## Setup
 
@@ -90,12 +119,12 @@ either by exporting it:
 export EDGAR_USER_AGENT="Your Name your.email@example.com"
 ```
 
-`ukcharity` is the one exception to this project's no-API-key model: the
-Charity Commission's own API requires a registered subscription key (free,
-but there's no keyless live-query alternative the way there is for SEC
-EDGAR, ProPublica, or ACNC). Azure API Management (which the Commission
-uses) issues every subscription two keys, primary and secondary, so you
-can rotate one without downtime. To use it:
+`ukcharity` and `sanctions` are the two exceptions to this project's
+no-API-key model: both APIs require a registered subscription key
+(free, but there's no keyless live-query alternative the way there is
+for SEC EDGAR, ProPublica, or ACNC), and both sit behind Azure API
+Management, which issues every subscription two keys, primary and
+secondary, so you can rotate one without downtime. To use `ukcharity`:
 
 1. Sign up for a free account at
    [api-portal.charitycommission.gov.uk](https://api-portal.charitycommission.gov.uk)
@@ -106,6 +135,15 @@ can rotate one without downtime. To use it:
    `UK_CHARITY_API_KEY_SECONDARY` to the secondary key -- the tool tries
    primary first and only falls back to secondary if primary is rejected
    (e.g. mid-rotation)
+
+And to use `sanctions`:
+
+1. Sign up for a free account at
+   [developer.trade.gov](https://developer.trade.gov)
+2. Go to Products, subscribe to "Data Services Platform APIs"
+3. Go to your Profile page and copy the primary and secondary keys
+4. Set `CSL_API_KEY_PRIMARY` (and, optionally, `CSL_API_KEY_SECONDARY`)
+   the same way as above
 
 Or set them all by copying `.env.example` to `.env` and filling it in:
 
@@ -160,6 +198,17 @@ go run ./cmd/paper-trail ukcharity "Example Foundation"
 # Show one charity's registration + trustees by exact registered number
 # (get the number from a ukcharity search result first)
 go run ./cmd/paper-trail ukcharity --regno <registered-number>
+
+# Screen a name against US restricted-party lists -- OFAC's SDN list
+# plus State/Commerce lists (requires CSL_API_KEY_PRIMARY -- see Setup)
+go run ./cmd/paper-trail sanctions "Example Name"
+
+# Same, with fuzzy name matching (more false positives, catches variants)
+go run ./cmd/paper-trail sanctions "Example Name" --fuzzy
+
+# Cross-reference a name across every configured source and flag shared
+# addresses, shared officers/trustees, and sanctions hits
+go run ./cmd/paper-trail risk "Example Name"
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -179,7 +228,7 @@ of the formatted console view.
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/edgar/              # SEC EDGAR client + data models
@@ -187,6 +236,8 @@ internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not compa
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
 internal/graph/              # builds a node/edge relationship graph, exports JSON
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
+internal/risk/                # structural red-flag heuristics and scoring (calls no API itself)
+internal/sanctions/          # US Consolidated Screening List client -- needs CSL_API_KEY_PRIMARY
 internal/ukcharity/          # UK Charity Commission (England & Wales) client -- needs UK_CHARITY_API_KEY_PRIMARY
 testdata/                    # fixtures used by the offline test suite
 ```
@@ -199,7 +250,10 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://efts.sec.gov/LATEST/search-index` (full-text search over filing content, 2001+ only)
 - `https://projects.propublica.org/nonprofits/api/` (IRS Form 990 data for 501(c) organizations, no API key required)
 - `https://data.gov.au/data/api/3/action/datastore_search` (ACNC Australian charity register, via data.gov.au's CKAN API, no API key required)
-- `https://api.charitycommission.gov.uk/register/api/` (UK Register of Charities, requires a free registered API key -- the one exception to this project's no-key model)
+- `https://api.charitycommission.gov.uk/register/api/` (UK Register of Charities, requires a free registered API key)
+- `https://data.trade.gov/consolidated_screening_list/v1/search` (US Consolidated Screening List -- OFAC SDN + State/BIS restricted-party lists, requires a free registered API key)
+
+`ukcharity` and `sanctions` are the two exceptions to this project's no-key model.
 
 ## Testing
 
@@ -236,9 +290,16 @@ applies to its output.
 - [x] Phase 1: SEC EDGAR lookup, filings, and insider-relationship graph
 - [ ] Phase 2: OpenCorporates integration (non-US entities, registered
       agents, subsidiary/parent structures)
-- [ ] Phase 3: OFAC/sanctions list cross-referencing
-- [ ] Phase 4: Shell-company risk heuristics (shared addresses/agents,
-      recent formation dates, etc.)
+- [x] Phase 3: sanctions list cross-referencing (`sanctions`, via the US
+      Consolidated Screening List -- OFAC SDN + State/BIS lists;
+      done ahead of Phase 2)
+- [x] Phase 4: shell-company risk heuristics (`risk` -- shared
+      addresses, interlocking officers/trustees) plus a transparent,
+      evidence-linked risk score combining those heuristics with
+      `sanctions` hits; done ahead of Phase 2. Formation-date recency
+      is not yet a heuristic -- most sources here don't expose a
+      formation date cleanly, and recency alone is weak signal without
+      something else to correlate it against
 - [ ] Phase 5: Graph visualization front end
 
 ## Disclaimer
