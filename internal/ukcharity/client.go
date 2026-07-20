@@ -100,8 +100,26 @@ func (c *Client) throttle() {
 }
 
 func (c *Client) get(u string) ([]byte, error) {
-	// Try whichever key is set first; if both are set, primary goes
-	// first and secondary is only used if primary is rejected.
+	return c.getWithFallback(u, false)
+}
+
+// getTolerant404 is like get, but treats HTTP 404 as a valid empty
+// response rather than an error. Confirmed live: the search endpoint
+// returns 404 with an empty body for a query that matches nothing in
+// the live England & Wales register -- the same not-quite-RESTful
+// convention ProPublica's API uses for empty US nonprofit searches (see
+// internal/nonprofit). A strict "any non-2xx is an error" check would
+// misreport that as a request failure instead of a genuinely empty
+// result.
+func (c *Client) getTolerant404(u string) ([]byte, error) {
+	return c.getWithFallback(u, true)
+}
+
+// getWithFallback tries PrimaryKey first and SecondaryKey only if the
+// primary comes back 401 (see the Client doc comment). tolerate404
+// controls whether a 404 response is treated as success (with whatever
+// body came back, e.g. "") or as an error.
+func (c *Client) getWithFallback(u string, tolerate404 bool) ([]byte, error) {
 	keys := make([]string, 0, 2)
 	if c.PrimaryKey != "" {
 		keys = append(keys, c.PrimaryKey)
@@ -112,31 +130,39 @@ func (c *Client) get(u string) ([]byte, error) {
 
 	var lastErr error
 	for _, key := range keys {
-		body, unauthorized, err := c.doGet(u, key)
+		status, body, err := c.doGet(u, key)
 		if err != nil {
 			return nil, err
 		}
-		if !unauthorized {
+		switch {
+		case status >= 200 && status < 300:
 			return body, nil
+		case tolerate404 && status == http.StatusNotFound:
+			return body, nil
+		case status == http.StatusUnauthorized:
+			lastErr = newClientError(
+				"Charity Commission API returned 401 Unauthorized for %s -- check that "+
+					"UK_CHARITY_API_KEY_PRIMARY / UK_CHARITY_API_KEY_SECONDARY are set to "+
+					"valid, active subscription keys", u,
+			)
+			continue // try the next key, if any
+		default:
+			return nil, newClientError("Charity Commission API returned HTTP %d for %s", status, u)
 		}
-		lastErr = newClientError(
-			"Charity Commission API returned 401 Unauthorized for %s -- check that "+
-				"UK_CHARITY_API_KEY_PRIMARY / UK_CHARITY_API_KEY_SECONDARY are set to "+
-				"valid, active subscription keys", u,
-		)
 	}
 	return nil, lastErr
 }
 
-// doGet performs a single request with the given subscription key.
-// unauthorized is true only for a 401 response, letting the caller
-// decide whether to retry with a different key.
-func (c *Client) doGet(u, key string) (body []byte, unauthorized bool, err error) {
+// doGet performs a single request with the given subscription key,
+// returning the raw status code and body so the caller decides how to
+// interpret them (e.g. retrying with a different key on 401, or
+// treating 404 as an empty result rather than a failure).
+func (c *Client) doGet(u, key string) (statusCode int, body []byte, err error) {
 	c.throttle()
 
 	req, reqErr := http.NewRequest(http.MethodGet, u, nil)
 	if reqErr != nil {
-		return nil, false, newClientError("building request for %s: %v", u, reqErr)
+		return 0, nil, newClientError("building request for %s: %v", u, reqErr)
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
 	// Header name confirmed live: an unauthenticated request to this API
@@ -146,21 +172,15 @@ func (c *Client) doGet(u, key string) (body []byte, unauthorized bool, err error
 
 	resp, doErr := c.HTTPClient.Do(req)
 	if doErr != nil {
-		return nil, false, newClientError("request to %s failed: %v", u, doErr)
+		return 0, nil, newClientError("request to %s failed: %v", u, doErr)
 	}
 	defer resp.Body.Close()
 
 	respBody, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return nil, false, newClientError("reading response from %s: %v", u, readErr)
+		return 0, nil, newClientError("reading response from %s: %v", u, readErr)
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, true, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false, newClientError("Charity Commission API returned HTTP %d for %s", resp.StatusCode, u)
-	}
-	return respBody, false, nil
+	return resp.StatusCode, respBody, nil
 }
 
 // Charity is a single search-result match: identity and registration
@@ -188,9 +208,16 @@ type searchRecord struct {
 // SearchCharities searches the Register of Charities by name (GetSearchCharityByName).
 func (c *Client) SearchCharities(name string) ([]Charity, error) {
 	u := fmt.Sprintf(c.SearchURL, url.PathEscape(name))
-	body, err := c.get(u)
+	body, err := c.getTolerant404(u)
 	if err != nil {
 		return nil, err
+	}
+
+	// A tolerated 404 (zero matches) comes back with an empty body,
+	// which isn't valid JSON to unmarshal -- that's a normal empty
+	// result, not a parse failure.
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return []Charity{}, nil
 	}
 
 	var records []searchRecord

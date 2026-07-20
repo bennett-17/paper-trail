@@ -72,21 +72,21 @@ func TestSearchCharitiesSendsSubscriptionKeyHeader(t *testing.T) {
 	mux.HandleFunc("/searchCharityName/", func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("Ocp-Apim-Subscription-Key")
 		gotPath = r.URL.Path
-		fmt.Fprint(w, mustReadFixture(t, "ukcharity_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "ukcharity_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	charities, err := c.SearchCharities("Scientology")
+	charities, err := c.SearchCharities("Example")
 	if err != nil {
 		t.Fatalf("SearchCharities: %v", err)
 	}
 	if gotKey != "test-primary-key" {
 		t.Errorf("Ocp-Apim-Subscription-Key header = %q, want test-primary-key", gotKey)
 	}
-	if gotPath != "/searchCharityName/Scientology" {
-		t.Errorf("request path = %q, want /searchCharityName/Scientology", gotPath)
+	if gotPath != "/searchCharityName/Example" {
+		t.Errorf("request path = %q, want /searchCharityName/Example", gotPath)
 	}
 	if len(charities) != 2 {
 		t.Fatalf("got %d charities, want 2", len(charities))
@@ -136,14 +136,14 @@ func TestGetCharityDetailParsesAddressAndTrustees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCharityDetail: %v", err)
 	}
-	if detail.Name != "Church Of Scientology Religious Education College Incorporated" {
+	if detail.Name != "Example Charitable Trust" {
 		t.Errorf("Name = %q", detail.Name)
 	}
-	wantAddr := "Saint Hill Manor, Saint Hill Road, East Grinstead"
+	wantAddr := "1 Example Street, Sample District, Exampleton"
 	if detail.Address != wantAddr {
 		t.Errorf("Address = %q, want %q (blank lines should be dropped)", detail.Address, wantAddr)
 	}
-	if detail.Postcode != "RH19 4JY" {
+	if detail.Postcode != "EX1 2AM" {
 		t.Errorf("Postcode = %q", detail.Postcode)
 	}
 	if detail.LatestIncome == nil || *detail.LatestIncome != 1234567 {
@@ -188,7 +188,7 @@ func TestFallsBackToSecondaryKeyOn401(t *testing.T) {
 			fmt.Fprint(w, `{"statusCode":401,"message":"Access denied due to invalid subscription key"}`)
 			return
 		}
-		fmt.Fprint(w, mustReadFixture(t, "ukcharity_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "ukcharity_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -200,7 +200,7 @@ func TestFallsBackToSecondaryKeyOn401(t *testing.T) {
 	c.MinInterval = 0
 	c.SearchURL = srv.URL + "/searchCharityName/%s"
 
-	charities, err := c.SearchCharities("Scientology")
+	charities, err := c.SearchCharities("Example")
 	if err != nil {
 		t.Fatalf("SearchCharities: %v, want it to succeed after falling back to the secondary key", err)
 	}
@@ -238,5 +238,31 @@ func TestBothKeysRejectedReturnsError(t *testing.T) {
 	}
 	if requestCount != 2 {
 		t.Errorf("made %d requests, want exactly 2 (one per key, no extra retries)", requestCount)
+	}
+}
+
+// TestSearchCharitiesToleratesZeroResult404 guards against a real bug
+// found live: a search term with zero matches in the live England &
+// Wales register returns HTTP 404 with an empty body (confirmed via a
+// nonsense query and several genuinely-zero-match real terms, ruling
+// out a routing/auth problem). A naive "any non-2xx is an error" check
+// misreported that as a request failure instead of an empty result.
+func TestSearchCharitiesToleratesZeroResult404(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/searchCharityName/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		// The live API returns a genuinely empty body for this case,
+		// not an empty JSON array -- exercise that exact shape.
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	charities, err := c.SearchCharities("NoMatchesForThisTerm")
+	if err != nil {
+		t.Fatalf("SearchCharities: %v, want nil error for a zero-result 404", err)
+	}
+	if len(charities) != 0 {
+		t.Errorf("got %d charities, want 0", len(charities))
 	}
 }
