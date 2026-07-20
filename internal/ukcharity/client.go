@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -270,21 +271,37 @@ type detailResponse struct {
 	RegStatus          string `json:"reg_status"`
 	DateOfRegistration string `json:"date_of_registration"`
 	DateOfRemoval      string `json:"date_of_removal"`
-	LatestIncome       *int64 `json:"latest_income"`
-	LatestExpenditure  *int64 `json:"latest_expenditure"`
-	AddressLineOne     string `json:"address_line_one"`
-	AddressLineTwo     string `json:"address_line_two"`
-	AddressLineThree   string `json:"address_line_three"`
-	AddressLineFour    string `json:"address_line_four"`
-	AddressLineFive    string `json:"address_line_five"`
-	AddressPostCode    string `json:"address_post_code"`
-	Phone              string `json:"phone"`
-	Email              string `json:"email"`
-	Web                string `json:"web"`
-	CharityCoRegNumber string `json:"charity_co_reg_number"`
+	// The live API serializes these as JSON floats even for whole-pound
+	// amounts (e.g. 12330.0), unlike the plain-integer numeric fields
+	// elsewhere in this response -- confirmed live, and it broke a
+	// strict *int64 unmarshal immediately on real data.
+	LatestIncome       *float64 `json:"latest_income"`
+	LatestExpenditure  *float64 `json:"latest_expenditure"`
+	AddressLineOne     string   `json:"address_line_one"`
+	AddressLineTwo     string   `json:"address_line_two"`
+	AddressLineThree   string   `json:"address_line_three"`
+	AddressLineFour    string   `json:"address_line_four"`
+	AddressLineFive    string   `json:"address_line_five"`
+	AddressPostCode    string   `json:"address_post_code"`
+	Phone              string   `json:"phone"`
+	Email              string   `json:"email"`
+	Web                string   `json:"web"`
+	CharityCoRegNumber string   `json:"charity_co_reg_number"`
 	TrusteeNames       []struct {
 		TrusteeName string `json:"trustee_name"`
 	} `json:"trustee_names"`
+}
+
+// roundToInt64 converts a possibly-nil float64 pointer to an int64
+// pointer, rounding to the nearest whole unit (these fields are
+// whole-currency amounts that the API just happens to serialize with a
+// trailing ".0").
+func roundToInt64(f *float64) *int64 {
+	if f == nil {
+		return nil
+	}
+	v := int64(math.Round(*f))
+	return &v
 }
 
 // GetCharityDetail fetches a charity's full profile by registered number
@@ -326,8 +343,8 @@ func (c *Client) GetCharityDetail(registeredNumber, suffix int) (CharityDetail, 
 		Status:               d.RegStatus,
 		RegistrationDate:     d.DateOfRegistration,
 		RemovalDate:          d.DateOfRemoval,
-		LatestIncome:         d.LatestIncome,
-		LatestExpenditure:    d.LatestExpenditure,
+		LatestIncome:         roundToInt64(d.LatestIncome),
+		LatestExpenditure:    roundToInt64(d.LatestExpenditure),
 		Address:              strings.Join(nonEmpty, ", "),
 		Postcode:             d.AddressPostCode,
 		Phone:                d.Phone,
