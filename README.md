@@ -10,7 +10,8 @@ operating out of Australia, the Charity Commission for England and
 Wales's Register of Charities for the UK, and the US Consolidated
 Screening List (OFAC's Specially Designated Nationals list plus State
 Department and Commerce/BIS restricted-party lists) for sanctions
-screening. A future phase will add
+screening, and the UK's Companies House register for company officer
+and director data. A future phase will add
 [OpenCorporates](https://opencorporates.com) data to extend coverage
 further (private companies, more non-US jurisdictions, and
 registered-agent/address-based relationship mapping).
@@ -27,9 +28,10 @@ registered-agent/address-based relationship mapping).
 | `aucharity` | ACNC, via data.gov.au | Australian charities | none |
 | `ukcharity` | Charity Commission | England & Wales charities | `UK_CHARITY_API_KEY_PRIMARY` |
 | `sanctions` | US Consolidated Screening List | OFAC SDN + State/BIS restricted-party lists | `CSL_API_KEY_PRIMARY` |
+| `companieshouse` | UK Companies House | UK company officers/directors | `COMPANIES_HOUSE_API_KEY` |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Five independent public-data sources across three countries, unified
+Six independent public-data sources across three countries, unified
 under one CLI and one `--json` output convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
@@ -66,6 +68,12 @@ Separately, for organizations that don't file with the SEC at all:
 - Searches the UK Charity Commission's Register of Charities by name or
   exact registered number, for organizations operating out of England and
   Wales (requires your own free API key -- see Setup)
+- Searches the UK Companies House register by name, or fetches one
+  company's profile plus its officers (directors, secretaries, current
+  and former) by exact company number -- the source of real director
+  data for UK charities that are also registered companies, since the
+  Charity Commission API itself only exposes trustees (requires your
+  own free API key -- see Setup)
 
 And separately, for sanctions screening:
 
@@ -86,6 +94,10 @@ And on top of all of the above, structural risk heuristics:
   check) get their own address/insider lookup too, not just a bare
   name, so a corporate restructuring can actually surface a shared
   address or officer instead of being invisible to every heuristic.
+  A UK charity that's also a registered company gets its Companies
+  House officers pulled in alongside its Charity Commission trustees --
+  otherwise a company's directors would be invisible to this tool
+  entirely, since ukcharity itself only exposes trustees.
   Flagged patterns: a registered/mailing address, phone number, email, or website
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an
@@ -118,8 +130,8 @@ or threat-intel work often need to manually stitch together filings,
 names, and addresses to spot patterns (e.g., the same individual showing
 up as an officer across multiple entities). Paper Trail automates the
 first step of that process using freely available government data --
-no API key required for any command except `ukcharity` and `sanctions`
-(see Setup).
+no API key required for any command except `ukcharity`, `sanctions`,
+and `companieshouse` (see Setup).
 
 ## Setup
 
@@ -142,12 +154,14 @@ either by exporting it:
 export EDGAR_USER_AGENT="Your Name your.email@example.com"
 ```
 
-`ukcharity` and `sanctions` are the two exceptions to this project's
-no-API-key model: both APIs require a registered subscription key
-(free, but there's no keyless live-query alternative the way there is
-for SEC EDGAR, ProPublica, or ACNC), and both sit behind Azure API
-Management, which issues every subscription two keys, primary and
-secondary, so you can rotate one without downtime. To use `ukcharity`:
+`ukcharity`, `sanctions`, and `companieshouse` are the three
+exceptions to this project's no-API-key model: each of these APIs
+requires a registered key (free, but there's no keyless live-query
+alternative the way there is for SEC EDGAR, ProPublica, or ACNC).
+`ukcharity` and `sanctions` sit behind Azure API Management, which
+issues every subscription two keys, primary and secondary, so you can
+rotate one without downtime; `companieshouse` issues a single key
+instead. To use `ukcharity`:
 
 1. Sign up for a free account at
    [api-portal.charitycommission.gov.uk](https://api-portal.charitycommission.gov.uk)
@@ -167,6 +181,15 @@ And to use `sanctions`:
 3. Go to your Profile page and copy the primary and secondary keys
 4. Set `CSL_API_KEY_PRIMARY` (and, optionally, `CSL_API_KEY_SECONDARY`)
    the same way as above
+
+And to use `companieshouse`:
+
+1. Sign up for a free account at
+   [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk)
+2. Create an application and request a REST key (not Web or Streaming
+   -- those are for a browser-embedded widget and a real-time change
+   feed respectively, neither of which this tool uses)
+3. Set `COMPANIES_HOUSE_API_KEY` to it
 
 Or set them all by copying `.env.example` to `.env` and filling it in:
 
@@ -229,6 +252,12 @@ go run ./cmd/paper-trail sanctions "Example Name"
 # Same, with fuzzy name matching (more false positives, catches variants)
 go run ./cmd/paper-trail sanctions "Example Name" --fuzzy
 
+# Search UK Companies House by name (requires COMPANIES_HOUSE_API_KEY -- see Setup)
+go run ./cmd/paper-trail companieshouse "Example Name"
+
+# Show one company's profile + officers by exact company number
+go run ./cmd/paper-trail companieshouse --number 04325234
+
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
 go run ./cmd/paper-trail risk "Example Name"
@@ -259,9 +288,10 @@ of the formatted console view.
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, companieshouse subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
+internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
@@ -283,8 +313,9 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://data.gov.au/data/api/3/action/datastore_search` (ACNC Australian charity register, via data.gov.au's CKAN API, no API key required)
 - `https://api.charitycommission.gov.uk/register/api/` (UK Register of Charities, requires a free registered API key)
 - `https://data.trade.gov/consolidated_screening_list/v1/search` (US Consolidated Screening List -- OFAC SDN + State/BIS restricted-party lists, requires a free registered API key)
+- `https://api.company-information.service.gov.uk/` (UK Companies House Public Data API -- company search, profile, and officers, requires a free registered API key)
 
-`ukcharity` and `sanctions` are the two exceptions to this project's no-key model.
+`ukcharity`, `sanctions`, and `companieshouse` are the three exceptions to this project's no-key model.
 
 ## Testing
 

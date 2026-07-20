@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/bennett-17/paper-trail/internal/aucharity"
+	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/envfile"
 	"github.com/bennett-17/paper-trail/internal/graph"
@@ -46,6 +47,8 @@ func main() {
 		runUKCharity(os.Args[2:])
 	case "sanctions":
 		runSanctions(os.Args[2:])
+	case "companieshouse":
+		runCompaniesHouse(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "-h", "--help", "help":
@@ -76,6 +79,8 @@ Usage:
   paper-trail ukcharity <query> [--json]
   paper-trail ukcharity --regno <n> [--suffix <n>] [--json]
   paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]
+  paper-trail companieshouse <query> [--limit <n>] [--json]
+  paper-trail companieshouse --number <company number> [--json]
   paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
@@ -128,6 +133,18 @@ CSL_API_KEY_SECONDARY as a rotation fallback) -- same no-keyless-option
 model as ukcharity. Register for a free account and subscribe to "Data
 Services Platform APIs" at https://developer.trade.gov to get your keys.
 
+companieshouse searches the UK Companies House register for companies
+by name, or --number fetches one company's profile plus its officers
+(directors, secretaries, current and former) by exact company number.
+This is the source of real director data for UK charities that are
+also registered companies -- ukcharity only exposes trustees, and
+Companies House officers are often the same people under a different
+governance role, sometimes not. Requires COMPANIES_HOUSE_API_KEY --
+same no-keyless-option model as ukcharity and sanctions, but a single
+key, not a primary/secondary pair. Register for a free account at
+https://developer.company-information.service.gov.uk, create an
+application, and request a REST key (not Web or Streaming).
+
 risk runs one or more <query> terms against every source above that's
 configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a
 sanctions screen), normalizes whatever address/officer/contact data each
@@ -136,14 +153,19 @@ pool of everything every term found. For SEC EDGAR this includes any
 related CIKs (see lookup's "Related CIKs" check) -- each one gets its
 own address/insider lookup too, not just a bare name, so a corporate
 restructuring can actually surface a shared address or officer instead
-of being invisible to every heuristic. Flagged patterns: entities that
-share a registered/mailing address, phone number, email, or website,
-and the same individual appearing as an officer, director, or trustee
-of more than one of them -- plus any sanctions-list hit, and, when a
-sanctions hit's own country is on FATF's high-risk or
-increased-monitoring list, a separate jurisdiction_risk indicator
-(FATF's lists are a manually maintained snapshot, refreshed after
-FATF's periodic plenaries, not a live feed -- see internal/risk/fatf.go
+of being invisible to every heuristic. For a UK charity that's also a
+registered company (has a CompaniesHouseNumber), its Companies House
+officers are pulled in alongside its Charity Commission trustees --
+often the same people under a different governance role, sometimes
+not, and either way a company's directors are otherwise invisible to
+this tool since ukcharity itself only exposes trustees. Flagged
+patterns: entities that share a registered/mailing address, phone
+number, email, or website, and the same individual appearing as an
+officer, director, or trustee of more than one of them -- plus any
+sanctions-list hit, and, when a sanctions hit's own country is on
+FATF's high-risk or increased-monitoring list, a separate
+jurisdiction_risk indicator (FATF's lists are a manually maintained
+snapshot, refreshed after FATF's periodic plenaries, not a live feed -- see internal/risk/fatf.go
 for the date). Each query term is also searched against SEC's full-text
 index (see fulltext above) for a mention in some *other* company's
 filing -- e.g. a related-party footnote -- with its own
@@ -176,7 +198,8 @@ Environment:
   UK_CHARITY_API_KEY_PRIMARY   required for the ukcharity command only (see above)
   UK_CHARITY_API_KEY_SECONDARY optional rotation fallback for ukcharity (see above)
   CSL_API_KEY_PRIMARY          required for the sanctions command only (see above)
-  CSL_API_KEY_SECONDARY        optional rotation fallback for sanctions (see above)`)
+  CSL_API_KEY_SECONDARY        optional rotation fallback for sanctions (see above)
+  COMPANIES_HOUSE_API_KEY      required for the companieshouse command only (see above)`)
 }
 
 // resolveTargetCIK returns cikFlag directly if set -- bypassing name/
@@ -739,6 +762,88 @@ func runSanctions(args []string) {
 	}
 }
 
+func runCompaniesHouse(args []string) {
+	fs := flag.NewFlagSet("companieshouse", flag.ExitOnError)
+	number := fs.String("number", "", "look up a specific company by exact company number, e.g. 04325234")
+	limit := fs.Int("limit", 10, "max results to show")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail companieshouse <query> [--limit <n>] [--json]  (or: paper-trail companieshouse --number <company number> [--json])"
+	var query string
+	if *number == "" {
+		if len(positional) != 1 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(1)
+		}
+		query = positional[0]
+	} else if len(positional) != 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+
+	client, err := companieshouse.NewClient("")
+	exitOnErr(err)
+
+	if *number != "" {
+		company, err := client.GetCompany(*number)
+		exitOnErr(err)
+		officers, err := client.GetOfficers(*number, *limit)
+		exitOnErr(err)
+
+		if *asJSON {
+			printJSON(struct {
+				companieshouse.Company
+				Officers []companieshouse.Officer `json:"officers"`
+			}{company, officers})
+			return
+		}
+
+		fmt.Printf("%s  (company number %s)\n", company.Name, company.CompanyNumber)
+		if company.Status != "" {
+			fmt.Printf("Status: %s\n", company.Status)
+		}
+		if company.Type != "" {
+			fmt.Printf("Type: %s\n", company.Type)
+		}
+		if company.IncorporatedOn != "" {
+			fmt.Printf("Incorporated: %s\n", company.IncorporatedOn)
+		}
+		if addr := company.RegisteredOffice.AsSingleLine(); addr != "" {
+			fmt.Printf("Registered office: %s\n", addr)
+		}
+		fmt.Printf("\n%d officer(s):\n", len(officers))
+		for _, o := range officers {
+			status := "current"
+			if o.ResignedOn != "" {
+				status = "resigned " + o.ResignedOn
+			}
+			fmt.Printf("  %s -- %s (appointed %s, %s)\n", o.Name, orDash(o.Role), orDash(o.AppointedOn), status)
+		}
+		return
+	}
+
+	result, err := client.SearchCompanies(query, *limit)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("%d total match(es), showing %d:\n\n", result.Total, len(result.Companies))
+	for _, c := range result.Companies {
+		fmt.Printf("%s  (company number %s)\n", c.Name, c.CompanyNumber)
+		if c.Status != "" {
+			fmt.Printf("  status: %s\n", c.Status)
+		}
+	}
+	if result.Total == 0 {
+		fmt.Println("No matches. Note: this searches UK Companies House only -- use `ukcharity` for the England & Wales charity register itself.")
+	}
+}
+
 // edgarEntityFromCompany builds a risk.Entity for an already-resolved
 // EDGAR company, including its addresses and (up to limit) insider
 // officers/directors. Shared by both the primary company in a `risk`
@@ -905,6 +1010,17 @@ func runRisk(args []string) {
 			"access do), so AU entities can't contribute to the shared-person check")
 	}
 
+	// UK Companies House -- one client shared across every charity
+	// below, so a missing credential is reported once, not once per
+	// charity. Adds real director data for UK charities that are also
+	// registered companies, alongside their Charity Commission
+	// trustees: ukcharity alone only exposes trustees, so a company's
+	// directors would otherwise be invisible to the shared_person check.
+	chClient, chErr := companieshouse.NewClient("")
+	if chErr != nil {
+		note("Companies House", "skipped (%v)", chErr)
+	}
+
 	// UK Charity Commission
 	if ukClient, err := ukcharity.NewClient("", ""); err != nil {
 		note("UK Charity Commission", "skipped (%v)", err)
@@ -931,7 +1047,19 @@ func runRisk(args []string) {
 				if addr := strings.TrimSpace(detail.Address + " " + detail.Postcode); addr != "" {
 					addrs = append(addrs, addr)
 				}
-				e := risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, detail.Trustees)
+				people := detail.Trustees
+				if chClient != nil && detail.CompaniesHouseNumber != "" {
+					if officers, err := chClient.GetOfficers(detail.CompaniesHouseNumber, *limit); err != nil {
+						note("Companies House", "%s (company %s): %v", detail.Name, detail.CompaniesHouseNumber, err)
+					} else {
+						for _, o := range officers {
+							if o.ResignedOn == "" { // current officers only, matching Trustees above
+								people = append(people, o.Name)
+							}
+						}
+					}
+				}
+				e := risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, people)
 				if detail.Phone != "" {
 					e.Phones = []string{detail.Phone}
 				}

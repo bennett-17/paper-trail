@@ -1,0 +1,33 @@
+{
+  "active_count": 2,
+  "etag": "example-etag",
+  "items": [
+    {
+      "name": "EXAMPLE, Jane",
+      "officer_role": "director",
+      "appointed_on": "2022-10-04",
+      "address": {
+        "address_line_1": "2 Example Place",
+        "locality": "London",
+        "postal_code": "E20 1JQ"
+      }
+    },
+    {
+      "name": "SAMPLE, John",
+      "officer_role": "secretary",
+      "appointed_on": "2020-01-01",
+      "resigned_on": "2023-06-15",
+      "address": {
+        "address_line_1": "2 Example Place",
+        "locality": "London",
+        "postal_code": "E20 1JQ"
+      }
+    }
+  ],
+  "items_per_page": 35,
+  "kind": "officer-list",
+  "resigned_count": 1,
+  "inactive_count": 0,
+  "start_index": 0,
+  "total_results": 2
+}

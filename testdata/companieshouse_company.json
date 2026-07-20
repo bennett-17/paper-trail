@@ -1,0 +1,13 @@
+{
+  "company_name": "EXAMPLE CHARITABLE COMPANY",
+  "company_number": "04325234",
+  "company_status": "active",
+  "type": "private-limited-guarant-nsc-limited-exemption",
+  "date_of_creation": "2001-11-20",
+  "registered_office_address": {
+    "address_line_1": "2 Example Place",
+    "locality": "London",
+    "postal_code": "E20 1JQ"
+  },
+  "sic_codes": ["86900"]
+}

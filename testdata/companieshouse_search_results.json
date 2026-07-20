@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "company_number": "04325234",
+      "title": "EXAMPLE CHARITABLE COMPANY",
+      "company_status": "active",
+      "company_type": "private-limited-guarant-nsc-limited-exemption",
+      "date_of_creation": "2001-11-20",
+      "address": {
+        "address_line_1": "2 Example Place",
+        "locality": "London",
+        "postal_code": "E20 1JQ"
+      }
+    }
+  ],
+  "kind": "search#companies",
+  "page_number": 1,
+  "items_per_page": 20,
+  "total_results": 1,
+  "start_index": 0
+}
