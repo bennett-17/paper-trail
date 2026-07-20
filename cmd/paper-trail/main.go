@@ -100,7 +100,10 @@ aucharity searches the Australian Charities and Not-for-profits
 Commission (ACNC) register for organizations operating out of
 Australia -- entities invisible to both SEC EDGAR and IRS Form 990
 data. --abn fetches a specific charity by its exact Australian Business
-Number.
+Number. Note: no officer/trustee (responsible-person) names are
+available here -- ACNC's free data doesn't include them, and ASIC's
+company officeholder records are paid-extract or restricted-broker only,
+not a free public API.
 
 ukcharity searches the Charity Commission for England and Wales's
 Register of Charities. --regno fetches a specific charity by its exact
@@ -130,8 +133,10 @@ sanctions screen), normalizes whatever address/officer data each source
 exposes, and flags two structural patterns across the *combined* pool of
 everything every term found: entities that share a registered/mailing
 address, and the same individual appearing as an officer, director, or
-trustee of more than one of them -- plus any sanctions-list hit. Passing
-multiple terms (e.g. two related organization names in different
+trustee of more than one of them -- plus any sanctions-list hit. ACNC
+(Australia) has no free officer/trustee data (see aucharity above), so
+AU entities can only ever match on shared address, never shared person.
+Passing multiple terms (e.g. two related organization names in different
 jurisdictions) is the only way to catch an overlap between them --
 running each separately checks each in isolation and can't compare
 across runs. Each flag is a plain sum of named, evidence-linked
@@ -817,8 +822,16 @@ func runRisk(args []string) {
 		}
 	}
 
-	// Australian ACNC
+	// Australian ACNC -- no officer/trustee data: ACNC's free datasets
+	// don't include responsible-person names (confirmed against the
+	// actual dataset fields), and the only place that data exists is
+	// paid ASIC company extracts or ASIC's restricted "approved broker"
+	// API, neither of which fits this project's free-public-data model.
+	// AU entities are address-only and so never contribute to the
+	// shared_person check; foundAUEntity tracks whether to note that
+	// once, rather than once per query term.
 	auClient := aucharity.NewClient()
+	foundAUEntity := false
 	for _, query := range queries {
 		result, err := auClient.SearchCharities(query, 0, *limit)
 		if err != nil {
@@ -835,7 +848,13 @@ func runRisk(args []string) {
 				addrs = append(addrs, fmt.Sprintf("%s, %s, %s", c.Address, c.City, c.State))
 			}
 			entities = append(entities, risk.NewEntity("aucharity", c.ABN, c.LegalName, addrs, nil))
+			foundAUEntity = true
 		}
+	}
+	if foundAUEntity {
+		note("ACNC (Australia)", "officer/trustee names aren't available for these entities -- "+
+			"ASIC's free datasets don't include them (only paid extracts or restricted broker API "+
+			"access do), so AU entities can't contribute to the shared-person check")
 	}
 
 	// UK Charity Commission

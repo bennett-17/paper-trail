@@ -59,7 +59,10 @@ Separately, for organizations that don't file with the SEC at all:
   and explains *why* an organization has zero filings when that's the
   case (e.g. churches are statutorily exempt from filing at all)
 - Searches the Australian ACNC charity register by name or exact ABN, for
-  organizations operating out of Australia
+  organizations operating out of Australia (registration/address data
+  only -- ACNC's free data doesn't include officer/trustee names, and
+  ASIC's company officeholder records are paid-extract or
+  restricted-broker only, not a free public API)
 - Searches the UK Charity Commission's Register of Charities by name or
   exact registered number, for organizations operating out of England and
   Wales (requires your own free API key -- see Setup)
@@ -82,7 +85,9 @@ And on top of all of the above, structural risk heuristics:
   entities that share a registered/mailing address, and the same
   individual appearing as an officer, director, or trustee of more than
   one of them (an "interlocking directorate") -- plus any sanctions-list
-  hit on any name or person found. Passing related names together (e.g.
+  hit on any name or person found. AU entities have no officer/trustee
+  data (see above) and so can only ever match on shared address, never
+  shared person. Passing related names together (e.g.
   the same organization's presence in two different countries) is the
   only way to catch an overlap between them; checked one at a time,
   each run only compares within its own results. Every point in the
