@@ -130,15 +130,18 @@ Services Platform APIs" at https://developer.trade.gov to get your keys.
 
 risk runs one or more <query> terms against every source above that's
 configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a
-sanctions screen), normalizes whatever address/officer data each source
-exposes, and flags two structural patterns across the *combined* pool of
-everything every term found: entities that share a registered/mailing
-address, and the same individual appearing as an officer, director, or
-trustee of more than one of them -- plus any sanctions-list hit. ACNC
-(Australia) has no free officer/trustee data (see aucharity above), so
-AU entities can only ever match on shared address, never shared person.
-Passing multiple terms (e.g. two related organization names in different
-jurisdictions) is the only way to catch an overlap between them --
+sanctions screen), normalizes whatever address/officer/contact data each
+source exposes, and flags structural patterns across the *combined*
+pool of everything every term found: entities that share a registered/
+mailing address, phone number, email, or website, and the same
+individual appearing as an officer, director, or trustee of more than
+one of them -- plus any sanctions-list hit. Phone/email/website are
+only available from UK charity records today (AU also has website).
+ACNC (Australia) has no free officer/trustee data (see aucharity
+above), so AU entities can only ever match on shared address or
+website, never shared person. Passing multiple terms (e.g. two related
+organization names in different jurisdictions) is the only way to catch
+an overlap between them --
 running each separately checks each in isolation and can't compare
 across runs. Each flag is a plain sum of named, evidence-linked
 indicators, not a black-box number -- every point in the total traces
@@ -851,7 +854,11 @@ func runRisk(args []string) {
 			if c.Address != "" {
 				addrs = append(addrs, fmt.Sprintf("%s, %s, %s", c.Address, c.City, c.State))
 			}
-			entities = append(entities, risk.NewEntity("aucharity", c.ABN, c.LegalName, addrs, nil))
+			e := risk.NewEntity("aucharity", c.ABN, c.LegalName, addrs, nil)
+			if c.Website != "" {
+				e.Websites = []string{c.Website}
+			}
+			entities = append(entities, e)
 			foundAUEntity = true
 		}
 	}
@@ -887,7 +894,17 @@ func runRisk(args []string) {
 				if addr := strings.TrimSpace(detail.Address + " " + detail.Postcode); addr != "" {
 					addrs = append(addrs, addr)
 				}
-				entities = append(entities, risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, detail.Trustees))
+				e := risk.NewEntity("ukcharity", fmt.Sprintf("%d", detail.RegisteredNumber), detail.Name, addrs, detail.Trustees)
+				if detail.Phone != "" {
+					e.Phones = []string{detail.Phone}
+				}
+				if detail.Email != "" {
+					e.Emails = []string{detail.Email}
+				}
+				if detail.Website != "" {
+					e.Websites = []string{detail.Website}
+				}
+				entities = append(entities, e)
 			}
 		}
 	}

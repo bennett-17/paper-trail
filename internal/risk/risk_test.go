@@ -80,6 +80,70 @@ func TestSharedPeopleFlagsInterlockingDirectorate(t *testing.T) {
 	}
 }
 
+func TestSharedPhonesNormalizesPunctuation(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Phones: []string{"020 7724 5024"}},
+		{Source: "aucharity", ID: "999", Name: "Unrelated Org", Phones: []string{"(020) 7724-5024"}},
+	}
+
+	indicators := SharedPhones(entities)
+	if len(indicators) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(indicators), indicators)
+	}
+	if indicators[0].Code != "shared_phone" {
+		t.Errorf("Code = %q, want shared_phone", indicators[0].Code)
+	}
+	if indicators[0].Weight != 2 {
+		t.Errorf("Weight = %d, want 2", indicators[0].Weight)
+	}
+}
+
+func TestSharedEmailsIsCaseInsensitiveButKeepsDots(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Emails: []string{"Contact@Example.org"}},
+		{Source: "aucharity", ID: "999", Name: "Unrelated Org", Emails: []string{"contact@example.org"}},
+	}
+	if got := SharedEmails(entities); len(got) != 1 {
+		t.Fatalf("got %d indicators, want 1 (case should not matter)", len(got))
+	}
+
+	// A genuinely different address that only coincidentally becomes
+	// equal if dots were stripped (as normalizeText does for addresses)
+	// must NOT be flagged as shared.
+	distinct := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Emails: []string{"a.b@example.org"}},
+		{Source: "aucharity", ID: "999", Name: "Unrelated Org", Emails: []string{"ab@example.org"}},
+	}
+	if got := SharedEmails(distinct); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0 (a.b@ and ab@ are different addresses, dots must be preserved)", len(got))
+	}
+}
+
+func TestSharedWebsitesNormalizesSchemeAndWWW(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Websites: []string{"https://www.example.org/"}},
+		{Source: "aucharity", ID: "999", Name: "Unrelated Org", Websites: []string{"http://example.org"}},
+	}
+
+	indicators := SharedWebsites(entities)
+	if len(indicators) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(indicators), indicators)
+	}
+	if indicators[0].Code != "shared_website" {
+		t.Errorf("Code = %q, want shared_website", indicators[0].Code)
+	}
+}
+
+func TestSharedWebsitesIgnoresDifferentDomains(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Websites: []string{"https://example.org"}},
+		{Source: "aucharity", ID: "999", Name: "Unrelated Org", Websites: []string{"https://example.com"}},
+	}
+	if got := SharedWebsites(entities); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0 (different domains)", len(got))
+	}
+}
+
 func TestAssessSumsWeightsAcrossAllIndicators(t *testing.T) {
 	entities := []Entity{
 		NewEntity("edgar", "1", "Example Corp", []string{"123 Main St"}, []string{"Jane Example"}),

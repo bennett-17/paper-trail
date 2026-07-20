@@ -80,14 +80,16 @@ And separately, for sanctions screening:
 And on top of all of the above, structural risk heuristics:
 
 - `risk` runs one or more names across every source that's configured,
-  normalizes whatever address/officer data each source exposes, and
-  flags two patterns across the *combined* results of every name given:
-  entities that share a registered/mailing address, and the same
-  individual appearing as an officer, director, or trustee of more than
-  one of them (an "interlocking directorate") -- plus any sanctions-list
-  hit on any name or person found. AU entities have no officer/trustee
-  data (see above) and so can only ever match on shared address, never
-  shared person. Passing related names together (e.g.
+  normalizes whatever address/officer/contact data each source exposes,
+  and flags shared values across the *combined* results of every name
+  given: a registered/mailing address, phone number, email, or website
+  used by more than one entity, and the same individual appearing as an
+  officer, director, or trustee of more than one of them (an
+  "interlocking directorate") -- plus any sanctions-list hit on any name
+  or person found. Phone/email are UK-only today, website is UK+AU; AU
+  entities have no officer/trustee data (see above) and so can only ever
+  match on shared address or website, never shared person. Passing
+  related names together (e.g.
   the same organization's presence in two different countries) is the
   only way to catch an overlap between them; checked one at a time,
   each run only compares within its own results. Every point in the
