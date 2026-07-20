@@ -12,6 +12,24 @@ Wales's Register of Charities for the UK. A future phase will add
 further (private companies, more non-US jurisdictions, and
 registered-agent/address-based relationship mapping).
 
+## Summary
+
+| Command | Data source | Coverage | Auth required |
+|---|---|---|---|
+| `lookup` | SEC EDGAR | US public companies | `EDGAR_USER_AGENT` |
+| `filings` | SEC EDGAR | US public companies | `EDGAR_USER_AGENT` |
+| `graph` | SEC EDGAR (Form 3/4/5) | US public companies | `EDGAR_USER_AGENT` |
+| `fulltext` | SEC EDGAR full-text search | US filings, 2001+ | `EDGAR_USER_AGENT` |
+| `nonprofit` | IRS Form 990, via ProPublica | US 501(c) organizations | none |
+| `aucharity` | ACNC, via data.gov.au | Australian charities | none |
+| `ukcharity` | Charity Commission | England & Wales charities | `UK_CHARITY_API_KEY_PRIMARY` |
+
+Four independent public-data sources across three countries, unified
+under one CLI and one `--json` output convention. Every command is a
+live query against a government or government-adjacent API -- no
+scraping, no bulk downloads to maintain, no third-party Go
+dependencies.
+
 ## What it does (Phase 1)
 
 Given a company name or ticker, Paper Trail:
