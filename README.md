@@ -110,9 +110,19 @@ And on top of all of the above, structural risk heuristics:
   fulltext above) for a mention in some *other* company's filing --
   its own indicator, scored lowest of the bunch since a filing can
   mention a name for reasons that have nothing to do with any real
-  connection. Phone/email are UK-only today, website is UK+AU; AU
-  entities have no officer/trustee data (see above) and so can only ever
-  match on shared address or website, never shared person. Passing
+  connection. UK, AU, and US nonprofit entities also carry a formation
+  or registration date (or, for US nonprofits, the IRS's tax-exemption
+  ruling date) where the source exposes one -- EDGAR doesn't -- and a
+  cluster of entities formed within 14 days of each other gets its own
+  indicator, the weakest signal of the bunch, since a shared date can
+  just as easily mean a regulator bulk-migrated pre-existing entities
+  on one date rather than anything having been newly formed together
+  (confirmed live: Australia's ACNC register launched 3 December 2012,
+  and that exact date shows up as the "registration date" for charities
+  that existed long before it). Phone/email are UK-only today, website
+  is UK+AU; AU entities have no officer/trustee data (see above) and so
+  can only ever match on shared address or website, never shared
+  person. Passing
   related names together (e.g.
   the same organization's presence in two different countries) is the
   only way to catch an overlap between them; checked one at a time,

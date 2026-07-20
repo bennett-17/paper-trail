@@ -171,8 +171,16 @@ index (see fulltext above) for a mention in some *other* company's
 filing -- e.g. a related-party footnote -- with its own
 filing_mention indicator, scored lowest of all of these since a filing
 can mention a name for reasons that have nothing to do with any real
-connection. Phone/email/website are only available from UK charity
-records today (AU also has website). ACNC (Australia) has no free
+connection. UK, AU, and US nonprofit entities also carry a formation/
+registration/tax-exemption-ruling date where the source exposes one
+(EDGAR doesn't); a formation_cluster indicator flags two or more
+entities formed within 14 days of each other -- the weakest signal
+here, since a shared date can just as easily mean a regulator bulk-
+migrated pre-existing entities on one date (confirmed live against
+Australia's ACNC, whose 3 December 2012 launch date shows up as the
+"registration date" for charities that existed long before). Phone/
+email/website are only available from UK charity records today (AU
+also has website). ACNC (Australia) has no free
 officer/trustee data (see aucharity above), so AU entities can only
 ever match on shared address or website, never shared person. Passing
 multiple terms (e.g. two related organization names in different
@@ -967,7 +975,9 @@ func runRisk(args []string) {
 			if profile.Organization.Address != "" {
 				addrs = append(addrs, fmt.Sprintf("%s, %s, %s", profile.Organization.Address, profile.Organization.City, profile.Organization.State))
 			}
-			entities = append(entities, risk.NewEntity("nonprofit", profile.Organization.EIN, profile.Organization.Name, addrs, nil))
+			e := risk.NewEntity("nonprofit", profile.Organization.EIN, profile.Organization.Name, addrs, nil)
+			e.FormedOn = profile.Organization.RulingDate
+			entities = append(entities, e)
 		}
 	}
 
@@ -1000,6 +1010,7 @@ func runRisk(args []string) {
 			if c.Website != "" {
 				e.Websites = []string{c.Website}
 			}
+			e.FormedOn = c.RegistrationDate
 			entities = append(entities, e)
 			foundAUEntity = true
 		}
@@ -1069,6 +1080,7 @@ func runRisk(args []string) {
 				if detail.Website != "" {
 					e.Websites = []string{detail.Website}
 				}
+				e.FormedOn = detail.RegistrationDate
 				entities = append(entities, e)
 			}
 		}

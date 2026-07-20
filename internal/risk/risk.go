@@ -36,6 +36,12 @@ type Entity struct {
 	Phones    []string `json:"phones,omitempty"`
 	Emails    []string `json:"emails,omitempty"`
 	Websites  []string `json:"websites,omitempty"`
+
+	// FormedOn is a registration/incorporation/ruling date, in whatever
+	// raw format the source returns it (see parseFormationDate) -- used
+	// only by FormationClusters. Not every source exposes one (EDGAR
+	// has no clean formation date at all).
+	FormedOn string `json:"formedOn,omitempty"`
 }
 
 // NewEntity builds an Entity from its core fields (addresses/people may
@@ -277,6 +283,7 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SharedPhones(entities)...)
 	indicators = append(indicators, SharedEmails(entities)...)
 	indicators = append(indicators, SharedWebsites(entities)...)
+	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
 
 	total := 0

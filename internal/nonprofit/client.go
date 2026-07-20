@@ -146,6 +146,12 @@ type Organization struct {
 	// filings on record here: it's a real, lawful absence, not a data
 	// gap in this API.
 	FilingRequirement string `json:"filingRequirement,omitempty"`
+
+	// RulingDate is when the IRS granted this organization's tax-exempt
+	// status (only populated by GetOrganization, not search results) --
+	// not literally an incorporation date, but the closest formation-
+	// adjacent date this source exposes.
+	RulingDate string `json:"rulingDate,omitempty"`
 }
 
 // SearchResult is one page of an organization name search.
@@ -243,6 +249,7 @@ type organizationResponse struct {
 		Zipcode     string `json:"zipcode"`
 		NTEECode    string `json:"ntee_code"`
 		FilingReqCd int    `json:"filing_requirement_code"`
+		RulingDate  string `json:"ruling_date"`
 	} `json:"organization"`
 	FilingsWithData []struct {
 		TaxPrdYr     int    `json:"tax_prd_yr"`
@@ -357,6 +364,7 @@ func (c *Client) GetOrganization(ein string) (OrganizationProfile, error) {
 			NTEECode:          resp.Organization.NTEECode,
 			Address:           resp.Organization.Address,
 			FilingRequirement: filingRequirementName(resp.Organization.FilingReqCd),
+			RulingDate:        resp.Organization.RulingDate,
 		},
 		Filings: filings,
 	}, nil
