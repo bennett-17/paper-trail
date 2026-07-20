@@ -86,7 +86,11 @@ And on top of all of the above, structural risk heuristics:
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an
   "interlocking directorate") -- plus any sanctions-list hit on any name
-  or person found. Phone/email are UK-only today, website is UK+AU; AU
+  or person found, and a separate flag when a sanctions hit's own
+  country is on FATF's high-risk or increased-monitoring list (a
+  manually maintained snapshot refreshed after FATF's periodic plenary
+  meetings, not a live feed -- FATF doesn't publish these as an API).
+  Phone/email are UK-only today, website is UK+AU; AU
   entities have no officer/trustee data (see above) and so can only ever
   match on shared address or website, never shared person. Passing
   related names together (e.g.

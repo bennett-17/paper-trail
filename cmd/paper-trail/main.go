@@ -135,11 +135,15 @@ source exposes, and flags structural patterns across the *combined*
 pool of everything every term found: entities that share a registered/
 mailing address, phone number, email, or website, and the same
 individual appearing as an officer, director, or trustee of more than
-one of them -- plus any sanctions-list hit. Phone/email/website are
-only available from UK charity records today (AU also has website).
-ACNC (Australia) has no free officer/trustee data (see aucharity
-above), so AU entities can only ever match on shared address or
-website, never shared person. Passing multiple terms (e.g. two related
+one of them -- plus any sanctions-list hit, and, when a sanctions hit's
+own country is on FATF's high-risk or increased-monitoring list, a
+separate jurisdiction_risk indicator (FATF's lists are a manually
+maintained snapshot, refreshed after FATF's periodic plenaries, not a
+live feed -- see internal/risk/fatf.go for the date). Phone/email/
+website are only available from UK charity records today (AU also has
+website). ACNC (Australia) has no free officer/trustee data (see
+aucharity above), so AU entities can only ever match on shared address
+or website, never shared person. Passing multiple terms (e.g. two related
 organization names in different jurisdictions) is the only way to catch
 an overlap between them --
 running each separately checks each in isolation and can't compare
@@ -935,6 +939,33 @@ func runRisk(args []string) {
 					Entities:    []string{screenedFor},
 					Evidence:    fmt.Sprintf("%s -- %s (%s)", hit.Name, hit.Source, strings.Join(hit.Programs, ", ")),
 				})
+
+				// Country lives per-address, not on the hit itself --
+				// confirmed live: an entity with addresses in several
+				// countries (e.g. Bank Melli Iran, with 20 addresses
+				// across IR/FR/HK/IQ/OM/AE/DE/AZ/GB/US) has an empty
+				// top-level Country. Check every address and flag each
+				// distinct FATF-listed country once, not once per address.
+				flagged := map[string]bool{}
+				countries := make([]string, 0, len(hit.Addresses)+1)
+				countries = append(countries, hit.Country)
+				for _, a := range hit.Addresses {
+					countries = append(countries, a.Country)
+				}
+				for _, country := range countries {
+					listed, listName, weight := risk.FATFStatus(country)
+					if !listed || flagged[listName] {
+						continue
+					}
+					flagged[listName] = true
+					extra = append(extra, risk.Indicator{
+						Code:        "jurisdiction_risk",
+						Description: "Sanctions match has an address in a FATF-flagged jurisdiction",
+						Weight:      weight,
+						Entities:    []string{screenedFor},
+						Evidence:    fmt.Sprintf("%s -- %s", hit.Name, listName),
+					})
+				}
 			}
 		}
 
