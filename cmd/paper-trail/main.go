@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/bennett-17/paper-trail/internal/aucharity"
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
@@ -18,6 +19,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/graph"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
 	"github.com/bennett-17/paper-trail/internal/risk"
+	"github.com/bennett-17/paper-trail/internal/riskcache"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
 	"github.com/bennett-17/paper-trail/internal/ukcharity"
 )
@@ -81,7 +83,7 @@ Usage:
   paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]
   paper-trail companieshouse <query> [--limit <n>] [--json]
   paper-trail companieshouse --number <company number> [--json]
-  paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--json]
+  paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--cache-ttl <duration>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -222,8 +224,22 @@ between the same two nodes, without needing separate handling. An
 indicator naming only one participant (a sanctions_match or
 filing_mention against the search query itself, not a resolved
 entity) contributes no edge, since there's no second node to connect
-it to -- that only shows up in the report, not the graph. A source
-with no credentials configured
+it to -- that only shows up in the report, not the graph. --html
+writes the same nodes/edges as an interactive, self-contained HTML
+file -- no server, no CDN, works fully offline -- that lays out a
+force-directed graph in the browser: drag nodes, click one to
+highlight what it connects to and why (each edge shows its indicator
+code and evidence on hover or in the click detail panel), scroll to
+zoom. --cache-ttl <duration> (e.g. "24h") caches the entities resolved
+per source/query/limit on disk and reuses them within that window
+instead of re-fetching -- useful when checking overlapping lists of
+names repeatedly, since this tool's own usage does that constantly.
+Unset by default: every run is fully live, since that's this tool's
+whole point, and caching is something you opt into, not something that
+silently happens to you. Sanctions screening and full-text mentions are
+never cached even with --cache-ttl set -- that data is time-sensitive
+in a way registration data isn't, so it's always checked fresh. A
+source with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it
 flags patterns worth checking by hand, not a finding, and it is not a
@@ -923,15 +939,35 @@ func runRisk(args []string) {
 	asJSON := fs.Bool("json", false, "print raw JSON")
 	output := fs.String("output", "", "write results to this file instead of stdout")
 	graphPath := fs.String("graph", "", "additionally write a node/edge graph JSON (entities as nodes, indicators as edges) to this path")
+	htmlPath := fs.String("html", "", "additionally write a self-contained, offline-viewable HTML graph (same nodes/edges as --graph) to this path")
+	cacheTTLFlag := fs.String("cache-ttl", "", "cache entities per source/query/limit on disk for this long (e.g. 24h) and reuse them within that window instead of re-fetching; unset disables caching entirely (always live, the default)")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--json]"
+	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--cache-ttl <duration>] [--json]"
 	if len(positional) < 1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
 	}
 	queries := positional
+
+	// Caching is opt-in: this tool's whole point is checking *current*
+	// public registry state, so silently reusing stale data by default
+	// would work against that. cacheTTL stays zero (disabled) unless
+	// --cache-ttl was set; Get/Set on a Cache with an empty Dir are
+	// already no-ops, but skipping cache.New() entirely when it's not
+	// wanted avoids even trying to touch the OS cache directory.
+	cache := &riskcache.Cache{}
+	var cacheTTL time.Duration
+	if *cacheTTLFlag != "" {
+		d, err := time.ParseDuration(*cacheTTLFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --cache-ttl %q: %v\n", *cacheTTLFlag, err)
+			os.Exit(1)
+		}
+		cacheTTL = d
+		cache = riskcache.New()
+	}
 
 	var entities []risk.Entity
 	var extra []risk.Indicator
@@ -949,17 +985,25 @@ func runRisk(args []string) {
 	} else {
 		edgarClient = c
 		for _, query := range queries {
+			cacheKey := riskcache.Key("edgar", query, *limit)
+			if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+				entities = append(entities, cached...)
+				continue
+			}
+
 			cik, err := edgarClient.ResolveCIK(query)
 			if err != nil {
 				note("SEC EDGAR", "no match for %q", query)
+				cache.Set(cacheKey, nil) // cache the "no match" too, not just hits
 				continue
 			}
 			company, err := edgarClient.GetCompany(cik)
 			if err != nil {
 				note("SEC EDGAR", "%v", err)
-				continue
+				continue // a transient failure shouldn't be cached as a permanent miss
 			}
-			entities = append(entities, edgarEntityFromCompany(edgarClient, company, *limit))
+			var termEntities []risk.Entity
+			termEntities = append(termEntities, edgarEntityFromCompany(edgarClient, company, *limit))
 
 			// Related CIKs (former identities after a corporate
 			// restructuring) are the clearest possible evidence for
@@ -974,18 +1018,26 @@ func runRisk(args []string) {
 					}
 					reCompany, err := edgarClient.GetCompany(re.CIK)
 					if err != nil {
-						entities = append(entities, risk.NewEntity("edgar", re.CIK, re.Name, nil, nil))
+						termEntities = append(termEntities, risk.NewEntity("edgar", re.CIK, re.Name, nil, nil))
 						continue
 					}
-					entities = append(entities, edgarEntityFromCompany(edgarClient, reCompany, *limit))
+					termEntities = append(termEntities, edgarEntityFromCompany(edgarClient, reCompany, *limit))
 				}
 			}
+			entities = append(entities, termEntities...)
+			cache.Set(cacheKey, termEntities)
 		}
 	}
 
 	// IRS Form 990 (nonprofit), via ProPublica
 	npClient := nonprofit.NewClient()
 	for _, query := range queries {
+		cacheKey := riskcache.Key("nonprofit", query, *limit)
+		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+			entities = append(entities, cached...)
+			continue
+		}
+
 		result, err := npClient.SearchOrganizations(query, 1)
 		if err != nil {
 			note("IRS Form 990", "%v", err)
@@ -993,8 +1045,10 @@ func runRisk(args []string) {
 		}
 		if len(result.Organizations) == 0 {
 			note("IRS Form 990", "no match for %q", query)
+			cache.Set(cacheKey, nil)
 			continue
 		}
+		var termEntities []risk.Entity
 		for i, o := range result.Organizations {
 			if i >= *limit {
 				break
@@ -1009,8 +1063,10 @@ func runRisk(args []string) {
 			}
 			e := risk.NewEntity("nonprofit", profile.Organization.EIN, profile.Organization.Name, addrs, nil)
 			e.FormedOn = profile.Organization.RulingDate
-			entities = append(entities, e)
+			termEntities = append(termEntities, e)
 		}
+		entities = append(entities, termEntities...)
+		cache.Set(cacheKey, termEntities)
 	}
 
 	// Australian ACNC -- no officer/trustee data: ACNC's free datasets
@@ -1024,6 +1080,15 @@ func runRisk(args []string) {
 	auClient := aucharity.NewClient()
 	foundAUEntity := false
 	for _, query := range queries {
+		cacheKey := riskcache.Key("aucharity", query, *limit)
+		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+			entities = append(entities, cached...)
+			if len(cached) > 0 {
+				foundAUEntity = true
+			}
+			continue
+		}
+
 		result, err := auClient.SearchCharities(query, 0, *limit)
 		if err != nil {
 			note("ACNC (Australia)", "%v", err)
@@ -1031,8 +1096,10 @@ func runRisk(args []string) {
 		}
 		if len(result.Charities) == 0 {
 			note("ACNC (Australia)", "no match for %q", query)
+			cache.Set(cacheKey, nil)
 			continue
 		}
+		var termEntities []risk.Entity
 		for _, c := range result.Charities {
 			var addrs []string
 			if c.Address != "" {
@@ -1043,9 +1110,11 @@ func runRisk(args []string) {
 				e.Websites = []string{c.Website}
 			}
 			e.FormedOn = c.RegistrationDate
-			entities = append(entities, e)
+			termEntities = append(termEntities, e)
 			foundAUEntity = true
 		}
+		entities = append(entities, termEntities...)
+		cache.Set(cacheKey, termEntities)
 	}
 	if foundAUEntity {
 		note("ACNC (Australia)", "officer/trustee names aren't available for these entities -- "+
@@ -1069,6 +1138,16 @@ func runRisk(args []string) {
 		note("UK Charity Commission", "skipped (%v)", err)
 	} else {
 		for _, query := range queries {
+			// Cached under "ukcharity" but covers the Companies House
+			// officer lookups below too, since those are already baked
+			// into each cached entity's People field -- no separate
+			// Companies House cache entry needed.
+			cacheKey := riskcache.Key("ukcharity", query, *limit)
+			if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+				entities = append(entities, cached...)
+				continue
+			}
+
 			charities, err := ukClient.SearchCharities(query)
 			if err != nil {
 				note("UK Charity Commission", "%v", err)
@@ -1076,8 +1155,10 @@ func runRisk(args []string) {
 			}
 			if len(charities) == 0 {
 				note("UK Charity Commission", "no match for %q", query)
+				cache.Set(cacheKey, nil)
 				continue
 			}
+			var termEntities []risk.Entity
 			for i, c := range charities {
 				if i >= *limit {
 					break
@@ -1125,8 +1206,10 @@ func runRisk(args []string) {
 				// with its own linked/subsidiary charities.
 				e.LinkedGroup = fmt.Sprintf("%d", detail.RegisteredNumber)
 				e.FormedOn = detail.RegistrationDate
-				entities = append(entities, e)
+				termEntities = append(termEntities, e)
 			}
+			entities = append(entities, termEntities...)
+			cache.Set(cacheKey, termEntities)
 		}
 	}
 
@@ -1272,6 +1355,8 @@ func runRisk(args []string) {
 	// an officer/trustee or address shared between, say, a "Narconon
 	// UK" result and a "Criminon UK" result only surfaces if both are
 	// in the same Assess() call.
+	cache.Save() // no-op if --cache-ttl wasn't set
+
 	score := risk.Assess(entities, extra)
 
 	var w io.Writer = os.Stdout
@@ -1331,10 +1416,16 @@ func runRisk(args []string) {
 		fmt.Printf("Wrote risk assessment (%d entities, score %d) to %s\n", len(entities), score.Total, *output)
 	}
 
-	if *graphPath != "" {
+	if *graphPath != "" || *htmlPath != "" {
 		g := graph.BuildFromRisk(entities, score)
-		exitOnErr(graph.WriteJSON(g, *graphPath))
-		fmt.Printf("Wrote graph (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphPath)
+		if *graphPath != "" {
+			exitOnErr(graph.WriteJSON(g, *graphPath))
+			fmt.Printf("Wrote graph (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphPath)
+		}
+		if *htmlPath != "" {
+			exitOnErr(graph.WriteHTML(g, *htmlPath))
+			fmt.Printf("Wrote HTML graph viewer (%d nodes, %d edges) to %s -- open it directly in a browser\n", len(g.Nodes), len(g.Edges), *htmlPath)
+		}
 	}
 }
 

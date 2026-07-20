@@ -301,6 +301,15 @@ go run ./cmd/paper-trail risk "Example Name" --output risk_report.txt
 # Also export a node/edge graph JSON (entities as nodes, indicators as
 # edges) for viewing in an external graph tool
 go run ./cmd/paper-trail risk "Example Name" --graph risk_graph.json
+
+# Or export a self-contained, interactive HTML graph -- no server, no
+# CDN, works fully offline -- just open it in a browser
+go run ./cmd/paper-trail risk "Example Name" --html risk_graph.html
+
+# Cache resolved entities on disk for 24h and reuse them across repeated
+# or overlapping scans instead of re-fetching (opt-in -- every run is
+# fully live by default; sanctions/full-text checks are never cached)
+go run ./cmd/paper-trail risk "Example Name" --cache-ttl 24h
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -330,6 +339,7 @@ internal/envfile/            # minimal .env loader (stdlib only, see Setup below
 internal/graph/              # builds a node/edge relationship graph, exports JSON
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
 internal/risk/                # structural red-flag heuristics and scoring (calls no API itself)
+internal/riskcache/           # opt-in on-disk cache for risk --cache-ttl (see Usage below)
 internal/sanctions/          # US Consolidated Screening List client -- needs CSL_API_KEY_PRIMARY
 internal/ukcharity/          # UK Charity Commission (England & Wales) client -- needs UK_CHARITY_API_KEY_PRIMARY
 testdata/                    # fixtures used by the offline test suite
@@ -394,10 +404,11 @@ applies to its output.
       groups, and a corroborated-pairs rollup) plus a transparent,
       evidence-linked risk score combining those heuristics with
       `sanctions` hits; done ahead of Phase 2
-- [~] Phase 5: Graph visualization front end -- `risk --graph` exports
-      the node/edge JSON (entities as nodes, indicators as edges,
-      viewable in any external graph tool); an actual bundled viewer
-      front end doesn't exist yet
+- [x] Phase 5: Graph visualization front end -- `risk --graph` exports
+      the node/edge JSON for external graph tools, and `risk --html`
+      renders the same graph as a self-contained, interactive,
+      force-directed HTML viewer (drag, click-to-highlight, zoom) with
+      no server or external dependency
 
 ## Disclaimer
 
