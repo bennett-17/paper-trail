@@ -15,18 +15,18 @@ func TestSearchFullTextParsesAndLimitsResults(t *testing.T) {
 		gotQuery = r.URL.Query().Get("q")
 		gotForms = r.URL.Query().Get("forms")
 		_, sawFrom = r.URL.Query()["from"]
-		fmt.Fprint(w, mustReadFixture(t, "fulltext_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "fulltext_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	hits, total, err := c.SearchFullText(`"Scientology"`, "4,10-Q", "", "", "", 0, 2)
+	hits, total, err := c.SearchFullText(`"Example Search Term"`, "4,10-Q", "", "", "", 0, 2)
 	if err != nil {
 		t.Fatalf("SearchFullText: %v", err)
 	}
-	if gotQuery != `"Scientology"` {
-		t.Errorf("q param = %q, want %q", gotQuery, `"Scientology"`)
+	if gotQuery != `"Example Search Term"` {
+		t.Errorf("q param = %q, want %q", gotQuery, `"Example Search Term"`)
 	}
 	if gotForms != "4,10-Q" {
 		t.Errorf("forms param = %q, want %q", gotForms, "4,10-Q")
@@ -91,21 +91,21 @@ func TestSearchFullTextOffsetPagesThroughResults(t *testing.T) {
 	mux.HandleFunc("/fulltext-search", func(w http.ResponseWriter, r *http.Request) {
 		gotFrom = r.URL.Query().Get("from")
 		if gotFrom == "3" {
-			fmt.Fprint(w, mustReadFixture(t, "fulltext_search_scientology_page2.json"))
+			fmt.Fprint(w, mustReadFixture(t, "fulltext_search_results_page2.json"))
 			return
 		}
-		fmt.Fprint(w, mustReadFixture(t, "fulltext_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "fulltext_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	page1, total1, err := c.SearchFullText(`"Scientology"`, "", "", "", "", 0, 100)
+	page1, total1, err := c.SearchFullText(`"Example Search Term"`, "", "", "", "", 0, 100)
 	if err != nil {
 		t.Fatalf("SearchFullText (page 1): %v", err)
 	}
 
-	page2, total2, err := c.SearchFullText(`"Scientology"`, "", "", "", "", 3, 100)
+	page2, total2, err := c.SearchFullText(`"Example Search Term"`, "", "", "", "", 3, 100)
 	if err != nil {
 		t.Fatalf("SearchFullText (page 2): %v", err)
 	}

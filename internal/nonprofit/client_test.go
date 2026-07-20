@@ -32,18 +32,18 @@ func TestSearchOrganizationsParsesResults(t *testing.T) {
 	mux.HandleFunc("/search.json", func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query().Get("q")
 		gotPage = r.URL.Query().Get("page")
-		fmt.Fprint(w, mustReadFixture(t, "nonprofit_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "nonprofit_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	result, err := c.SearchOrganizations("Church of Scientology", 1)
+	result, err := c.SearchOrganizations("Example Foundation", 1)
 	if err != nil {
 		t.Fatalf("SearchOrganizations: %v", err)
 	}
-	if gotQuery != "Church of Scientology" {
-		t.Errorf("q param = %q, want %q", gotQuery, "Church of Scientology")
+	if gotQuery != "Example Foundation" {
+		t.Errorf("q param = %q, want %q", gotQuery, "Example Foundation")
 	}
 	if gotPage != "" {
 		t.Errorf(`page=1 should omit the "page" param entirely, got %q`, gotPage)
@@ -62,8 +62,8 @@ func TestSearchOrganizationsParsesResults(t *testing.T) {
 	if first.EIN != "43-2050079" {
 		t.Errorf("first.EIN = %q, want 43-2050079", first.EIN)
 	}
-	if first.City != "Greenwich" || first.State != "NY" {
-		t.Errorf("first location = %s/%s, want Greenwich/NY", first.City, first.State)
+	if first.City != "Anytown" || first.State != "NY" {
+		t.Errorf("first location = %s/%s, want Anytown/NY", first.City, first.State)
 	}
 }
 
@@ -72,13 +72,13 @@ func TestSearchOrganizationsSecondPage(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/search.json", func(w http.ResponseWriter, r *http.Request) {
 		gotPage = r.URL.Query().Get("page")
-		fmt.Fprint(w, mustReadFixture(t, "nonprofit_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "nonprofit_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	if _, err := c.SearchOrganizations("Church of Scientology", 3); err != nil {
+	if _, err := c.SearchOrganizations("Example Foundation", 3); err != nil {
 		t.Fatalf("SearchOrganizations: %v", err)
 	}
 	if gotPage != "3" {

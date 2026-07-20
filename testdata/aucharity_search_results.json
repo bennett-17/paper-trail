@@ -6,25 +6,25 @@
     "records": [
       {
         "ABN": "13172090453",
-        "Charity_Legal_Name": "The Trustee For Church Of Scientology Brisbane Academy Building Fund",
+        "Charity_Legal_Name": "The Trustee For Example Foundation Building Fund",
         "Other_Organisation_Names": null,
-        "Address_Line_1": "126 Greville St",
-        "Town_City": "Chatswood",
+        "Address_Line_1": "126 Example St",
+        "Town_City": "Sampleville",
         "State": "NSW",
         "Postcode": "2067",
-        "Charity_Website": "https://www.scientology-brisbane.org",
+        "Charity_Website": "https://www.example.org",
         "Registration_Date": "03/12/2012",
         "Charity_Size": "Medium"
       },
       {
         "ABN": "71782886938",
-        "Charity_Legal_Name": "The Church Of Scientology Inc",
+        "Charity_Legal_Name": "The Example Foundation Inc",
         "Other_Organisation_Names": null,
-        "Address_Line_1": "225 Pulteney St",
-        "Town_City": "Adelaide",
+        "Address_Line_1": "225 Sample St",
+        "Town_City": "Anytown",
         "State": "SA",
         "Postcode": "5000",
-        "Charity_Website": "http://www.scientology-adelaide.org",
+        "Charity_Website": "http://www.example.org",
         "Registration_Date": "03/12/2012",
         "Charity_Size": "Small"
       }

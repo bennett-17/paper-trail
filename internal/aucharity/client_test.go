@@ -32,18 +32,18 @@ func TestSearchCharitiesParsesResults(t *testing.T) {
 	mux.HandleFunc("/datastore_search", func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query().Get("q")
 		gotResourceID = r.URL.Query().Get("resource_id")
-		fmt.Fprint(w, mustReadFixture(t, "aucharity_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "aucharity_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	result, err := c.SearchCharities("Scientology", 0, 0)
+	result, err := c.SearchCharities("Example", 0, 0)
 	if err != nil {
 		t.Fatalf("SearchCharities: %v", err)
 	}
-	if gotQuery != "Scientology" {
-		t.Errorf("q param = %q, want Scientology", gotQuery)
+	if gotQuery != "Example" {
+		t.Errorf("q param = %q, want Example", gotQuery)
 	}
 	if gotResourceID != "test-resource-id" {
 		t.Errorf("resource_id param = %q, want test-resource-id", gotResourceID)
@@ -59,8 +59,8 @@ func TestSearchCharitiesParsesResults(t *testing.T) {
 	if first.ABN != "13172090453" {
 		t.Errorf("first.ABN = %q, want 13172090453", first.ABN)
 	}
-	if first.City != "Chatswood" || first.State != "NSW" {
-		t.Errorf("first location = %s/%s, want Chatswood/NSW", first.City, first.State)
+	if first.City != "Sampleville" || first.State != "NSW" {
+		t.Errorf("first location = %s/%s, want Sampleville/NSW", first.City, first.State)
 	}
 	if first.Size != "Medium" {
 		t.Errorf("first.Size = %q, want Medium", first.Size)
@@ -73,13 +73,13 @@ func TestSearchCharitiesPaginationParams(t *testing.T) {
 	mux.HandleFunc("/datastore_search", func(w http.ResponseWriter, r *http.Request) {
 		gotOffset = r.URL.Query().Get("offset")
 		gotLimit = r.URL.Query().Get("limit")
-		fmt.Fprint(w, mustReadFixture(t, "aucharity_search_scientology.json"))
+		fmt.Fprint(w, mustReadFixture(t, "aucharity_search_results.json"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	if _, err := c.SearchCharities("Scientology", 25, 10); err != nil {
+	if _, err := c.SearchCharities("Example", 25, 10); err != nil {
 		t.Fatalf("SearchCharities: %v", err)
 	}
 	if gotOffset != "25" {
@@ -108,7 +108,7 @@ func TestGetCharityByABNUsesExactFilter(t *testing.T) {
 	if gotFilters != `{"ABN":"13172090453"}` {
 		t.Errorf("filters param = %q, want exact-match ABN filter with spaces stripped", gotFilters)
 	}
-	if charity.LegalName != "The Trustee For Church Of Scientology Brisbane Academy Building Fund" {
+	if charity.LegalName != "The Trustee For Example Foundation Building Fund" {
 		t.Errorf("LegalName = %q", charity.LegalName)
 	}
 }

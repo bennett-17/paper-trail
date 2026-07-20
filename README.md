@@ -115,14 +115,14 @@ go run ./cmd/paper-trail filings --cik 0000320193 --form 4 --limit 20
 go run ./cmd/paper-trail graph "Apple Inc" --output apple_graph.json
 
 # Search filing *content* (not just company names) for a name or phrase
-go run ./cmd/paper-trail fulltext '"Church of Scientology"' --forms 4
+go run ./cmd/paper-trail fulltext '"Example Search Phrase"' --forms 4
 
 # Page past the first ~100 results (SEC's per-request cap) with --offset
-go run ./cmd/paper-trail fulltext '"Church of Scientology"' --offset 100
+go run ./cmd/paper-trail fulltext '"Example Search Phrase"' --offset 100
 
 # Search IRS Form 990 filers -- churches, charities, foundations --
 # entities that never appear in SEC EDGAR at all
-go run ./cmd/paper-trail nonprofit "Church of Scientology"
+go run ./cmd/paper-trail nonprofit "Example Foundation"
 
 # Show one organization's registration + filing history (revenue,
 # expenses, assets by year, where the IRS has published extracted figures)
@@ -130,14 +130,14 @@ go run ./cmd/paper-trail nonprofit --ein 53-0196605
 
 # Search the Australian ACNC charity register -- entities operating out
 # of Australia, invisible to both SEC EDGAR and IRS Form 990 data
-go run ./cmd/paper-trail aucharity "Church of Scientology"
+go run ./cmd/paper-trail aucharity "Example Foundation"
 
 # Show one charity's registration by exact ABN
 go run ./cmd/paper-trail aucharity --abn 13172090453
 
 # Search the England & Wales Charity Commission register (requires
 # UK_CHARITY_API_KEY_PRIMARY -- see Setup)
-go run ./cmd/paper-trail ukcharity "Church of Scientology"
+go run ./cmd/paper-trail ukcharity "Example Foundation"
 
 # Show one charity's registration + trustees by exact registered number
 # (get the number from a ukcharity search result first)

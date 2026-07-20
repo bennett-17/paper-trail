@@ -4,23 +4,23 @@
   "cur_page": 1,
   "page_offset": 25,
   "per_page": 25,
-  "search_query": "Church of Scientology",
+  "search_query": "Example Foundation",
   "organizations": [
     {
       "ein": 432050079,
       "strein": "43-2050079",
-      "name": "Church Of Scientology",
-      "sub_name": "Church Of Scientology Mission Of Albany",
-      "city": "Greenwich",
+      "name": "Example Foundation",
+      "sub_name": "Example Foundation Mission Of Anytown",
+      "city": "Anytown",
       "state": "NY",
       "ntee_code": null
     },
     {
       "ein": 592143308,
       "strein": "59-2143308",
-      "name": "Church Of Scientology Flag Service Organization Inc",
-      "sub_name": "Church Of Scientology Flag Service Organization Inc",
-      "city": "Clearwater",
+      "name": "Example Foundation Service Organization Inc",
+      "sub_name": "Example Foundation Service Organization Inc",
+      "city": "Somewhere",
       "state": "FL",
       "ntee_code": null
     }
