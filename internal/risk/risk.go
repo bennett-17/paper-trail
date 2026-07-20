@@ -83,6 +83,11 @@ type Indicator struct {
 type Score struct {
 	Total      int         `json:"total"`
 	Indicators []Indicator `json:"indicators"`
+
+	// Corroborations surfaces entity pairs connected by two or more
+	// *different kinds* of indicator -- see Corroboration for why this
+	// doesn't add its own weight to Total.
+	Corroborations []Corroboration `json:"corroborations,omitempty"`
 }
 
 var whitespaceRE = regexp.MustCompile(`\s+`)
@@ -291,5 +296,9 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	for _, ind := range indicators {
 		total += ind.Weight
 	}
-	return Score{Total: total, Indicators: indicators}
+	return Score{
+		Total:          total,
+		Indicators:     indicators,
+		Corroborations: computeCorroborations(indicators),
+	}
 }

@@ -133,8 +133,15 @@ And on top of all of the above, structural risk heuristics:
   each run only compares within its own results. Every point in the
   resulting score is a plain sum of named, evidence-linked indicators --
   never a bare number, and never a claim about money laundering, tax
-  evasion, or terrorism financing specifically. It's a lead-generation
-  report, not a finding.
+  evasion, or terrorism financing specifically. A separate
+  "Corroborated pairs" section calls out any two entities connected by
+  two or more *different kinds* of indicator (a shared address alone
+  is common and often innocuous; the same two entities also sharing an
+  officer is a materially stronger combination) -- it adds no weight of
+  its own, since every point is already counted by the indicators that
+  produced it; it's a reorganization of that evidence, surfacing a
+  pattern a flat indicator list makes easy to miss. It's a
+  lead-generation report, not a finding.
 
 ## Why
 

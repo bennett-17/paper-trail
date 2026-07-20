@@ -194,7 +194,14 @@ running each separately checks each in isolation and can't compare
 across runs. Each flag is a plain sum of named, evidence-linked
 indicators, not a black-box number -- every point in the total traces
 back to one printed indicator with the specific entities and evidence
-behind it. --limit caps how many candidates are pulled per source per
+behind it. A "Corroborated pairs" section after the indicator list
+separately calls out any two entities connected by two or more
+*different kinds* of indicator (e.g. both a shared address and a
+shared officer) -- that combination is materially stronger evidence
+than either alone, but scanning a flat list of indicators makes it easy
+to miss. This adds no weight of its own to the total; it's a
+reorganization of evidence already counted, not new evidence. --limit
+caps how many candidates are pulled per source per
 query term (default 5) to bound the number of live API calls. --output
 writes the report (in whichever format --json selects) to a file
 instead of stdout. A source with no credentials configured
@@ -1277,6 +1284,13 @@ func runRisk(args []string) {
 			fmt.Fprintf(w, "+%d  %s\n", ind.Weight, ind.Description)
 			fmt.Fprintf(w, "     Entities: %s\n", strings.Join(ind.Entities, "; "))
 			fmt.Fprintf(w, "     Evidence: %s\n\n", ind.Evidence)
+		}
+		if len(score.Corroborations) > 0 {
+			fmt.Fprintln(w, "Corroborated pairs (matched on 2+ independent kinds of evidence -- stronger than any single indicator above):")
+			for _, c := range score.Corroborations {
+				fmt.Fprintf(w, "  %s\n", strings.Join(c.Entities, "  <->  "))
+				fmt.Fprintf(w, "    matched on: %s\n\n", strings.Join(c.Codes, ", "))
+			}
 		}
 		fmt.Fprintln(w, "This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
 	}
