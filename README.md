@@ -297,6 +297,10 @@ go run ./cmd/paper-trail risk "Example Name UK" "Example Name International"
 
 # Save the report to a file instead of printing it (works with --json too)
 go run ./cmd/paper-trail risk "Example Name" --output risk_report.txt
+
+# Also export a node/edge graph JSON (entities as nodes, indicators as
+# edges) for viewing in an external graph tool
+go run ./cmd/paper-trail risk "Example Name" --graph risk_graph.json
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -384,13 +388,16 @@ applies to its output.
       Consolidated Screening List -- OFAC SDN + State/BIS lists;
       done ahead of Phase 2)
 - [x] Phase 4: shell-company risk heuristics (`risk` -- shared
-      addresses, interlocking officers/trustees) plus a transparent,
+      addresses/phones/emails/websites, interlocking officers/trustees
+      including fuzzy name matching, formation-date clustering, FATF
+      jurisdiction risk, SEC full-text mentions, UK registry-linked
+      groups, and a corroborated-pairs rollup) plus a transparent,
       evidence-linked risk score combining those heuristics with
-      `sanctions` hits; done ahead of Phase 2. Formation-date recency
-      is not yet a heuristic -- most sources here don't expose a
-      formation date cleanly, and recency alone is weak signal without
-      something else to correlate it against
-- [ ] Phase 5: Graph visualization front end
+      `sanctions` hits; done ahead of Phase 2
+- [~] Phase 5: Graph visualization front end -- `risk --graph` exports
+      the node/edge JSON (entities as nodes, indicators as edges,
+      viewable in any external graph tool); an actual bundled viewer
+      front end doesn't exist yet
 
 ## Disclaimer
 

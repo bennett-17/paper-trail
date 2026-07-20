@@ -81,7 +81,7 @@ Usage:
   paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]
   paper-trail companieshouse <query> [--limit <n>] [--json]
   paper-trail companieshouse --number <company number> [--json]
-  paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--json]
+  paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -212,7 +212,18 @@ reorganization of evidence already counted, not new evidence. --limit
 caps how many candidates are pulled per source per
 query term (default 5) to bound the number of live API calls. --output
 writes the report (in whichever format --json selects) to a file
-instead of stdout. A source with no credentials configured
+instead of stdout. --graph additionally writes a node/edge graph JSON
+(same shape as graph's own --output, see above) built from this
+report: entities become nodes, and each indicator becomes an edge
+between every pair of entities it names, labeled with the indicator's
+code -- so two entities connected by more than one kind of indicator
+(a Score.Corroborations pair) naturally show up as multiple edges
+between the same two nodes, without needing separate handling. An
+indicator naming only one participant (a sanctions_match or
+filing_mention against the search query itself, not a resolved
+entity) contributes no edge, since there's no second node to connect
+it to -- that only shows up in the report, not the graph. A source
+with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it
 flags patterns worth checking by hand, not a finding, and it is not a
@@ -911,10 +922,11 @@ func runRisk(args []string) {
 	limit := fs.Int("limit", 5, "max candidates to pull per source, per query term")
 	asJSON := fs.Bool("json", false, "print raw JSON")
 	output := fs.String("output", "", "write results to this file instead of stdout")
+	graphPath := fs.String("graph", "", "additionally write a node/edge graph JSON (entities as nodes, indicators as edges) to this path")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--json]"
+	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--json]"
 	if len(positional) < 1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
@@ -1317,6 +1329,12 @@ func runRisk(args []string) {
 
 	if *output != "" {
 		fmt.Printf("Wrote risk assessment (%d entities, score %d) to %s\n", len(entities), score.Total, *output)
+	}
+
+	if *graphPath != "" {
+		g := graph.BuildFromRisk(entities, score)
+		exitOnErr(graph.WriteJSON(g, *graphPath))
+		fmt.Printf("Wrote graph (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphPath)
 	}
 }
 

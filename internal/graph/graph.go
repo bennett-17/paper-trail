@@ -18,13 +18,18 @@ type Node struct {
 	Type  string `json:"node_type,omitempty"`
 }
 
-// Edge is a directed relationship between two nodes.
+// Edge is a directed relationship between two nodes. EvidenceForm/
+// EvidenceAccessionNumber are SEC-filing-specific (see Build); Evidence
+// and Weight are generic and used by graphs built from other sources
+// (see BuildFromRisk).
 type Edge struct {
 	Source                  string `json:"source"`
 	Target                  string `json:"target"`
 	RelationshipType        string `json:"relationship_type"`
 	EvidenceForm            string `json:"evidence_form,omitempty"`
 	EvidenceAccessionNumber string `json:"evidence_accession_number,omitempty"`
+	Evidence                string `json:"evidence,omitempty"`
+	Weight                  int    `json:"weight,omitempty"`
 }
 
 // Graph is the exportable node/edge representation.
