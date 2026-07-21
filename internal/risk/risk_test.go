@@ -177,6 +177,29 @@ func TestSharedLinkedGroupIgnoresEntitiesWithNoGroup(t *testing.T) {
 	}
 }
 
+func TestSharedChargeesFlagsSameLender(t *testing.T) {
+	entities := []Entity{
+		{Source: "companieshouse", ID: "1", Name: "Example Ltd", Chargees: []string{"Example Private Lender Ltd"}},
+		{Source: "companieshouse", ID: "2", Name: "Unrelated Ltd", Chargees: []string{"Example Private Lender Ltd"}},
+		{Source: "companieshouse", ID: "3", Name: "No Overlap Ltd", Chargees: []string{"Some Other Bank PLC"}},
+	}
+
+	indicators := SharedChargees(entities)
+	if len(indicators) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(indicators), indicators)
+	}
+	ind := indicators[0]
+	if ind.Code != "shared_chargee" {
+		t.Errorf("Code = %q, want shared_chargee", ind.Code)
+	}
+	if ind.Weight != 1 {
+		t.Errorf("Weight = %d, want 1 (lowest, matching formation_cluster/registry_linked_group)", ind.Weight)
+	}
+	if len(ind.Entities) != 2 {
+		t.Errorf("Entities = %v, want 2 entries", ind.Entities)
+	}
+}
+
 func TestAssessSumsWeightsAcrossAllIndicators(t *testing.T) {
 	entities := []Entity{
 		NewEntity("edgar", "1", "Example Corp", []string{"123 Main St"}, []string{"Jane Example"}),

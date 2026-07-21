@@ -37,6 +37,14 @@ type Entity struct {
 	Emails    []string `json:"emails,omitempty"`
 	Websites  []string `json:"websites,omitempty"`
 
+	// Chargees are the "persons entitled" (lenders/chargeholders) named
+	// on a company's registered charges (mortgages/debentures) --
+	// currently only populated for UK Companies House entities. See
+	// SharedChargees for why this signal needs more caution than the
+	// others: the same major clearing bank secures enormous numbers of
+	// otherwise-unrelated companies.
+	Chargees []string `json:"chargees,omitempty"`
+
 	// FormedOn is a registration/incorporation/ruling date, in whatever
 	// raw format the source returns it (see parseFormationDate) -- used
 	// only by FormationClusters. Not every source exposes one (EDGAR
@@ -312,6 +320,26 @@ func SharedLinkedGroup(entities []Entity) []Indicator {
 	)
 }
 
+// SharedChargees flags groups of two or more distinct entities whose
+// registered charges (mortgages/debentures) name the same lender or
+// chargeholder -- a lender/counterparty relationship distinct from a
+// shared officer or address. Weighted lowest, like formation_cluster
+// and registry_linked_group: a shared chargee is routine and expected
+// when it's one of a handful of major UK clearing banks, which secure
+// an enormous number of otherwise-unrelated companies, so this is a
+// much weaker signal than it would be for a smaller or private lender
+// -- check who the chargee actually is before treating this as
+// meaningful.
+func SharedChargees(entities []Entity) []Indicator {
+	return sharedValueIndicators(entities,
+		func(e Entity) []string { return e.Chargees },
+		normalizeText,
+		"shared_chargee",
+		"Multiple entities have a registered charge (mortgage/debenture) naming the same lender or chargeholder -- routine and low-signal for a major bank, more notable for a smaller or private lender",
+		1,
+	)
+}
+
 // Assess runs every structural heuristic over entities and combines the
 // result with extra indicators the caller already built from other
 // sources (e.g. sanctions-list hits, which aren't a comparison between
@@ -326,6 +354,7 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SharedEmails(entities)...)
 	indicators = append(indicators, SharedWebsites(entities)...)
 	indicators = append(indicators, SharedLinkedGroup(entities)...)
+	indicators = append(indicators, SharedChargees(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
 

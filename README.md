@@ -29,10 +29,11 @@ registered-agent/address-based relationship mapping).
 | `aucharity` | ACNC, via data.gov.au | Australian charities | none |
 | `ukcharity` | Charity Commission | England & Wales charities | `UK_CHARITY_API_KEY_PRIMARY` |
 | `sanctions` | US Consolidated Screening List | OFAC SDN + State/BIS restricted-party lists | `CSL_API_KEY_PRIMARY` |
+| `uksanctions` | OFSI (UK Sanctions List) | UK financial sanctions designations | none |
 | `companieshouse` | UK Companies House | UK company officers/directors + beneficial owners (PSCs) | `COMPANIES_HOUSE_API_KEY` |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Six independent public-data sources across three countries, unified
+Seven independent public-data sources across three countries, unified
 under one CLI and one `--json` output convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
@@ -71,12 +72,13 @@ Separately, for organizations that don't file with the SEC at all:
   Wales (requires your own free API key -- see Setup)
 - Searches the UK Companies House register by name, or fetches one
   company's profile plus its officers (directors, secretaries, current
-  and former) and persons with significant control (PSCs -- beneficial
-  owners, current and former) by exact company number -- the source of
-  real director and beneficial-ownership data for UK charities that
-  are also registered companies, since the Charity Commission API
-  itself only exposes trustees (requires your own free API key -- see
-  Setup)
+  and former), persons with significant control (PSCs -- beneficial
+  owners, current and former), and registered charges (mortgages/
+  debentures, with the lender/chargeholder named on each) by exact
+  company number -- the source of real director, beneficial-ownership,
+  and secured-lending data for UK charities that are also registered
+  companies, since the Charity Commission API itself only exposes
+  trustees (requires your own free API key -- see Setup)
 
 And separately, for sanctions screening:
 
@@ -87,6 +89,10 @@ And separately, for sanctions screening:
   lists in the same tool (requires your own free API key -- see Setup).
   A match is a lead to verify against the linked source-list entry, not
   a finding on its own.
+- Searches the UK Sanctions List by name -- HM Treasury's OFSI
+  designations under UK (post-Brexit) sanctions regulations, which
+  overlap heavily with the US lists above but not completely. Unlike
+  every other UK source in this project, this needs no API key at all.
 
 And on top of all of the above, structural risk heuristics:
 
@@ -101,7 +107,14 @@ And on top of all of the above, structural risk heuristics:
   House officers *and* current persons with significant control (PSCs)
   pulled in alongside its Charity Commission trustees -- otherwise a
   company's directors and beneficial owners would be invisible to this
-  tool entirely, since ukcharity itself only exposes trustees. UK charities
+  tool entirely, since ukcharity itself only exposes trustees. Each
+  current officer is also fanned out one hop further via Companies
+  House's per-person appointment record, pulling in every OTHER
+  company that same person directs or is secretary of register-wide --
+  not just the companies the original search terms happen to find.
+  This is how a shared director between two otherwise-unconnected
+  organizations shows up even when neither one's own name search would
+  ever surface the other. UK charities
   sharing a Charity Commission registered number under different
   suffixes (a main charity and its own linked/subsidiary charities) get
   a registry_linked_group indicator -- unlike every other one here,
@@ -116,11 +129,28 @@ And on top of all of the above, structural risk heuristics:
   that same check for names that only match once titles/honorifics are
   stripped and word order is ignored (different sources format the same
   person differently, and an exact match alone misses that) -- plus any
-  sanctions-list hit on any name or person found, and a separate flag
-  when a sanctions hit's own
-  country is on FATF's high-risk or increased-monitoring list (a
-  manually maintained snapshot refreshed after FATF's periodic plenary
-  meetings, not a live feed -- FATF doesn't publish these as an API).
+  hit against either the US sanctions screen or the UK Sanctions List
+  (the two overlap heavily but not completely, so both are checked) on
+  any name or person found, and a separate flag when a sanctions
+  hit's own country (or, for a UK hit, its sanctions regime, when
+  that regime happens to be named after a country) is on FATF's
+  high-risk or increased-monitoring list (a manually maintained
+  snapshot refreshed after FATF's periodic plenary meetings, not a
+  live feed -- FATF doesn't publish these as an API).
+  Officer/trustee names sourced from Companies House and the UK
+  Charity Commission are also checked against Companies House's
+  disqualified-directors register -- unlike every other indicator here
+  this is an already-adjudicated regulatory action, not a correlation,
+  so it's the highest-weighted indicator in the tool; it's still a
+  name-only match, though (the search has no date-of-birth/address
+  filter), so it's a lead to verify like a sanctions hit, not a
+  confirmed identity. UK charities' outstanding registered charges
+  (mortgages/debentures) are pulled in too, and two entities whose
+  charges name the same lender or chargeholder get a shared_chargee
+  indicator -- weighted lowest, alongside formation_cluster and
+  registry_linked_group, since a shared lender is routine and
+  low-signal when it's one of a handful of major UK clearing banks and
+  only more notable for a smaller or private lender.
   Each query term is also run against SEC's full-text index (see
   fulltext above) for a mention in some *other* company's filing --
   its own indicator, scored lowest of the bunch since a filing can
@@ -284,12 +314,19 @@ go run ./cmd/paper-trail sanctions "Example Name"
 # Same, with fuzzy name matching (more false positives, catches variants)
 go run ./cmd/paper-trail sanctions "Example Name" --fuzzy
 
+# Screen a name against the UK Sanctions List (OFSI) -- no API key needed
+go run ./cmd/paper-trail uksanctions "Example Name"
+
 # Search UK Companies House by name (requires COMPANIES_HOUSE_API_KEY -- see Setup)
 go run ./cmd/paper-trail companieshouse "Example Name"
 
 # Show one company's profile + officers + persons with significant
 # control (beneficial owners) by exact company number
 go run ./cmd/paper-trail companieshouse --number 04325234
+
+# Follow one officer to every other company they're linked to
+# register-wide, using the officer id shown in the output above
+go run ./cmd/paper-trail companieshouse --officer <officer id>
 
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
@@ -334,7 +371,7 @@ of the formatted console view.
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, companieshouse subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
@@ -343,6 +380,7 @@ internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not compa
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
 internal/graph/              # builds a node/edge relationship graph, exports JSON
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
+internal/ofsi/               # UK Sanctions List (OFSI) client -- no API key needed
 internal/risk/                # structural red-flag heuristics and scoring (calls no API itself)
 internal/riskcache/           # opt-in on-disk cache for risk --cache-ttl (see Usage below)
 internal/sanctions/          # US Consolidated Screening List client -- needs CSL_API_KEY_PRIMARY
@@ -360,6 +398,7 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://data.gov.au/data/api/3/action/datastore_search` (ACNC Australian charity register, via data.gov.au's CKAN API, no API key required)
 - `https://api.charitycommission.gov.uk/register/api/` (UK Register of Charities, requires a free registered API key)
 - `https://data.trade.gov/consolidated_screening_list/v1/search` (US Consolidated Screening List -- OFAC SDN + State/BIS restricted-party lists, requires a free registered API key)
+- `https://search-uk-sanctions-list.service.gov.uk/api/search/designations-minimal-open-search` (UK Sanctions List, maintained by HM Treasury's OFSI -- the same public API behind the official search tool, no API key required; not a documented/versioned public API, so it could change without notice)
 - `https://api.company-information.service.gov.uk/` (UK Companies House Public Data API -- company search, profile, and officers, requires a free registered API key)
 
 `ukcharity`, `sanctions`, and `companieshouse` are the three exceptions to this project's no-key model.

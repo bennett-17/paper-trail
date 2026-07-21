@@ -1,0 +1,38 @@
+{
+  "kind": "search#disqualified-officers",
+  "page_number": 1,
+  "items_per_page": 20,
+  "start_index": 0,
+  "total_results": 2,
+  "items": [
+    {
+      "kind": "searchresults#disqualified-officer",
+      "title": "Example Jane SAMPLE",
+      "description": "Born on 18 October 1987 - Disqualified",
+      "description_identifiers": ["born-on"],
+      "links": {
+        "self": "/disqualified-officers/natural/exampleNaturalId"
+      },
+      "address": {
+        "address_line_1": "26 Example Road",
+        "locality": "Sampletown",
+        "postal_code": "EX1 2MP",
+        "country": "United Kingdom"
+      }
+    },
+    {
+      "kind": "searchresults#disqualified-officer",
+      "title": "EXAMPLE CORPORATE OFFICER LTD",
+      "description": "Disqualified",
+      "links": {
+        "self": "/disqualified-officers/corporate/exampleCorporateId"
+      },
+      "address": {
+        "address_line_1": "1 Example Street",
+        "locality": "Sampleville",
+        "postal_code": "EX2 3MP",
+        "country": "United Kingdom"
+      }
+    }
+  ]
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/envfile"
 	"github.com/bennett-17/paper-trail/internal/graph"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
+	"github.com/bennett-17/paper-trail/internal/ofsi"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/riskcache"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
@@ -49,6 +50,8 @@ func main() {
 		runUKCharity(os.Args[2:])
 	case "sanctions":
 		runSanctions(os.Args[2:])
+	case "uksanctions":
+		runUKSanctions(os.Args[2:])
 	case "companieshouse":
 		runCompaniesHouse(os.Args[2:])
 	case "risk":
@@ -81,8 +84,10 @@ Usage:
   paper-trail ukcharity <query> [--json]
   paper-trail ukcharity --regno <n> [--suffix <n>] [--json]
   paper-trail sanctions <query> [--fuzzy] [--offset <n>] [--limit <n>] [--json]
+  paper-trail uksanctions <query> [--limit <n>] [--json]
   paper-trail companieshouse <query> [--limit <n>] [--json]
   paper-trail companieshouse --number <company number> [--json]
+  paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--cache-ttl <duration>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
@@ -135,16 +140,36 @@ CSL_API_KEY_SECONDARY as a rotation fallback) -- same no-keyless-option
 model as ukcharity. Register for a free account and subscribe to "Data
 Services Platform APIs" at https://developer.trade.gov to get your keys.
 
+uksanctions searches the UK Sanctions List, maintained by HM Treasury's
+Office of Financial Sanctions Implementation (OFSI) -- the UK's
+equivalent of sanctions above, covering designations under UK
+(post-Brexit) sanctions regulations rather than US ones; the two lists
+overlap heavily but not completely. Unlike every other UK source in
+this project, this needs no API key at all -- it's the same public,
+same-origin API behind the official search tool at
+https://search-uk-sanctions-list.service.gov.uk, not a documented
+public API with a stable contract, so it could change without notice.
+A match here is a lead to verify, not a finding on its own, same as
+sanctions above.
+
 companieshouse searches the UK Companies House register for companies
 by name, or --number fetches one company's profile plus its officers
-(directors, secretaries, current and former) and persons with
-significant control (PSCs -- beneficial owners, current and former)
-by exact company number. Officers and PSCs are different signals: a
-controlling shareholder isn't necessarily a listed director, and vice
-versa. This is the source of real director and beneficial-ownership
-data for UK charities that are also registered companies -- ukcharity
-only exposes trustees, and Companies House officers/PSCs are often the
-same people under a different governance role, sometimes not. Requires COMPANIES_HOUSE_API_KEY --
+(directors, secretaries, current and former), persons with
+significant control (PSCs -- beneficial owners, current and former),
+and registered charges (mortgages/debentures, with the lender/
+chargeholder named on each) by exact company number. Officers and PSCs
+are different signals: a controlling shareholder isn't necessarily a
+listed director, and vice versa; a charge is a lender/counterparty
+relationship, different again. This is the source of real director,
+beneficial-ownership, and secured-lending data for UK charities that
+are also registered companies -- ukcharity only exposes trustees, and
+Companies House officers/PSCs are often the same people under a
+different governance role, sometimes not.
+--officer looks up every company appointment for one specific officer
+by their stable per-person officer ID (shown alongside each name in
+--number output) -- this is how to follow a director from one company
+to every OTHER company they're linked to register-wide, which risk
+does automatically one hop deep for UK charities (see below). Requires COMPANIES_HOUSE_API_KEY --
 same no-keyless-option model as ukcharity and sanctions, but a single
 key, not a primary/secondary pair. Register for a free account at
 https://developer.company-information.service.gov.uk, create an
@@ -165,7 +190,16 @@ beneficial owners) are pulled in alongside its Charity Commission
 trustees -- often the same people under a different governance role,
 sometimes not, and either way a company's directors and beneficial
 owners are otherwise invisible to this tool since ukcharity itself
-only exposes trustees. UK charities
+only exposes trustees. Each current officer is also fanned out one hop
+further via Companies House's per-person appointment record: every
+OTHER company that same officer directs or is secretary of,
+register-wide, is pulled in too -- not just companies the query terms
+themselves happen to find. This is how a shared director between two
+otherwise-unconnected organizations shows up even when neither one's
+own name search would ever surface the other (confirmed live: an
+officer of a well-known charity's trading company turned out to also
+be an officer of several unrelated companies invisible to every other
+heuristic here). UK charities
 that share a Charity Commission registered number under different
 suffixes (a main charity and its own linked/subsidiary charities) get
 a registry_linked_group indicator -- unlike every other indicator
@@ -181,12 +215,31 @@ weaker, lower-scored version of that check for names that only match
 after stripping titles/honorifics and ignoring word order (e.g. "Prof.
 Doreen Cantrell FRS" vs. "CANTRELL, Doreen, Professor"), since
 different sources format the same person's name differently and an
-exact match alone misses that -- plus any sanctions-list hit, and,
-when a sanctions hit's own country is on
+exact match alone misses that -- plus any hit against either the US
+sanctions screen (sanctions_match) or the UK Sanctions List
+(uk_sanctions_match, via uksanctions above -- the two lists overlap
+heavily but not completely, so both are checked), and,
+when a sanctions hit's own country (or, for a UK hit, its sanctions
+regime, when that regime happens to be named after a country) is on
 FATF's high-risk or increased-monitoring list, a separate
 jurisdiction_risk indicator (FATF's lists are a manually maintained
 snapshot, refreshed after FATF's periodic plenaries, not a live feed -- see internal/risk/fatf.go
-for the date). Each query term is also searched against SEC's full-text
+for the date). Officer/trustee names sourced from Companies House and
+the UK Charity Commission are also checked against Companies House's
+disqualified-directors register (a disqualified_director indicator) --
+unlike every other indicator here this is an already-adjudicated
+regulatory action, not a correlation, so it's the highest-weighted
+indicator in the tool; it's still a name-only match though (the search
+has no date-of-birth/address filter), so it's a lead to verify like a
+sanctions hit, not a confirmed identity. UK charities' outstanding
+registered charges (mortgages/debentures) are pulled in too, and two
+entities whose charges name the same lender or chargeholder get a
+shared_chargee indicator -- weighted lowest, alongside
+formation_cluster and registry_linked_group, since a shared lender is
+routine and low-signal when it's one of a handful of major UK
+clearing banks (which secure an enormous number of otherwise-unrelated
+companies) and only more notable for a smaller or private lender.
+Each query term is also searched against SEC's full-text
 index (see fulltext above) for a mention in some *other* company's
 filing -- e.g. a related-party footnote -- with its own
 filing_mention indicator, scored lowest of all of these since a filing
@@ -822,29 +875,101 @@ func runSanctions(args []string) {
 	}
 }
 
-func runCompaniesHouse(args []string) {
-	fs := flag.NewFlagSet("companieshouse", flag.ExitOnError)
-	number := fs.String("number", "", "look up a specific company by exact company number, e.g. 04325234")
+func runUKSanctions(args []string) {
+	fs := flag.NewFlagSet("uksanctions", flag.ExitOnError)
 	limit := fs.Int("limit", 10, "max results to show")
 	asJSON := fs.Bool("json", false, "print raw JSON")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail companieshouse <query> [--limit <n>] [--json]  (or: paper-trail companieshouse --number <company number> [--json])"
+	const usage = "usage: paper-trail uksanctions <query> [--limit <n>] [--json]"
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+	query := positional[0]
+
+	client := ofsi.NewClient()
+	result, err := client.SearchDesignations(query, *limit)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("%d total match(es) on the UK Sanctions List, showing %d:\n\n", result.Total, len(result.Hits))
+	for _, h := range result.Hits {
+		fmt.Printf("%s  [%s]\n", h.Name, orDash(h.EntityType))
+		fmt.Printf("  Regime: %s\n", orDash(h.Regime))
+		if h.SanctionsImposed != "" {
+			fmt.Printf("  Sanctions imposed: %s\n", h.SanctionsImposed)
+		}
+		if h.DateDesignated != "" {
+			fmt.Printf("  Date designated: %s\n", h.DateDesignated)
+		}
+		fmt.Println()
+	}
+	if result.Total == 0 {
+		fmt.Println("No matches. A clean result here does not itself clear an entity -- it means no name/alias match on the UK Sanctions List.")
+	} else {
+		fmt.Println("A match here is a lead to verify against the official listing, not a finding on its own -- names collide, and this is not a determination of wrongdoing.")
+		if result.Total > len(result.Hits) {
+			fmt.Printf("%d more match(es) -- rerun with a higher --limit to see more.\n", result.Total-len(result.Hits))
+		}
+	}
+}
+
+func runCompaniesHouse(args []string) {
+	fs := flag.NewFlagSet("companieshouse", flag.ExitOnError)
+	number := fs.String("number", "", "look up a specific company by exact company number, e.g. 04325234")
+	officer := fs.String("officer", "", "list every company appointment for a specific officer, by the officer ID shown alongside each name in --number output")
+	limit := fs.Int("limit", 10, "max results to show")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail companieshouse <query> [--limit <n>] [--json]  (or: paper-trail companieshouse --number <company number> [--json])  (or: paper-trail companieshouse --officer <officer id> [--json])"
 	var query string
-	if *number == "" {
+	switch {
+	case *number != "" && *officer != "":
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	case *number != "" || *officer != "":
+		if len(positional) != 0 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(1)
+		}
+	default:
 		if len(positional) != 1 {
 			fmt.Fprintln(os.Stderr, usage)
 			os.Exit(1)
 		}
 		query = positional[0]
-	} else if len(positional) != 0 {
-		fmt.Fprintln(os.Stderr, usage)
-		os.Exit(1)
 	}
 
 	client, err := companieshouse.NewClient("")
 	exitOnErr(err)
+
+	if *officer != "" {
+		appointments, err := client.GetOfficerAppointments(*officer, *limit)
+		exitOnErr(err)
+
+		if *asJSON {
+			printJSON(appointments)
+			return
+		}
+
+		fmt.Printf("%d appointment(s):\n", len(appointments))
+		for _, a := range appointments {
+			status := "current"
+			if a.ResignedOn != "" {
+				status = "resigned " + a.ResignedOn
+			}
+			fmt.Printf("  %s (company %s, %s) -- %s (appointed %s, %s)\n", a.CompanyName, a.CompanyNumber, orDash(a.CompanyStatus), orDash(a.Role), orDash(a.AppointedOn), status)
+		}
+		return
+	}
 
 	if *number != "" {
 		company, err := client.GetCompany(*number)
@@ -853,13 +978,16 @@ func runCompaniesHouse(args []string) {
 		exitOnErr(err)
 		pscs, err := client.GetPersonsWithSignificantControl(*number, *limit)
 		exitOnErr(err)
+		charges, err := client.GetCharges(*number, *limit)
+		exitOnErr(err)
 
 		if *asJSON {
 			printJSON(struct {
 				companieshouse.Company
 				Officers []companieshouse.Officer `json:"officers"`
 				PSCs     []companieshouse.PSC     `json:"personsWithSignificantControl"`
-			}{company, officers, pscs})
+				Charges  []companieshouse.Charge  `json:"charges"`
+			}{company, officers, pscs, charges})
 			return
 		}
 
@@ -882,7 +1010,11 @@ func runCompaniesHouse(args []string) {
 			if o.ResignedOn != "" {
 				status = "resigned " + o.ResignedOn
 			}
-			fmt.Printf("  %s -- %s (appointed %s, %s)\n", o.Name, orDash(o.Role), orDash(o.AppointedOn), status)
+			line := fmt.Sprintf("  %s -- %s (appointed %s, %s)", o.Name, orDash(o.Role), orDash(o.AppointedOn), status)
+			if o.OfficerID != "" {
+				line += fmt.Sprintf(" [officer id: %s]", o.OfficerID)
+			}
+			fmt.Println(line)
 		}
 		fmt.Printf("\n%d person(s) with significant control:\n", len(pscs))
 		for _, p := range pscs {
@@ -891,6 +1023,14 @@ func runCompaniesHouse(args []string) {
 				status = "ceased " + p.CeasedOn
 			}
 			fmt.Printf("  %s -- %s (%s)\n", p.Name, strings.Join(p.NaturesOfControl, ", "), status)
+		}
+		fmt.Printf("\n%d charge(s):\n", len(charges))
+		for _, ch := range charges {
+			status := ch.Status
+			if ch.SatisfiedOn != "" {
+				status = "satisfied " + ch.SatisfiedOn
+			}
+			fmt.Printf("  %s -- %s, entitled: %s (%s)\n", orDash(ch.Classification), orDash(status), strings.Join(ch.PersonsEntitled, ", "), orDash(ch.DeliveredOn))
 		}
 		return
 	}
@@ -1188,6 +1328,8 @@ func runRisk(args []string) {
 					addrs = append(addrs, addr)
 				}
 				people := detail.Trustees
+				var currentOfficers []companieshouse.Officer
+				var chargees []string
 				if chClient != nil && detail.CompaniesHouseNumber != "" {
 					if officers, err := chClient.GetOfficers(detail.CompaniesHouseNumber, *limit); err != nil {
 						note("Companies House", "%s (company %s): %v", detail.Name, detail.CompaniesHouseNumber, err)
@@ -1195,6 +1337,7 @@ func runRisk(args []string) {
 						for _, o := range officers {
 							if o.ResignedOn == "" { // current officers only, matching Trustees above
 								people = append(people, o.Name)
+								currentOfficers = append(currentOfficers, o)
 							}
 						}
 					}
@@ -1209,6 +1352,20 @@ func runRisk(args []string) {
 						for _, p := range pscs {
 							if p.CeasedOn == "" { // active PSCs only, matching Trustees/officers above
 								people = append(people, p.Name)
+							}
+						}
+					}
+					// Charges (mortgages/debentures) surface a
+					// lender/counterparty relationship distinct from
+					// officers or PSCs -- outstanding charges only,
+					// since a satisfied (paid-off) one no longer
+					// reflects a live relationship.
+					if charges, err := chClient.GetCharges(detail.CompaniesHouseNumber, *limit); err != nil {
+						note("Companies House", "%s (company %s) charges: %v", detail.Name, detail.CompaniesHouseNumber, err)
+					} else {
+						for _, ch := range charges {
+							if ch.SatisfiedOn == "" {
+								chargees = append(chargees, ch.PersonsEntitled...)
 							}
 						}
 					}
@@ -1231,12 +1388,41 @@ func runRisk(args []string) {
 				if detail.Website != "" {
 					e.Websites = []string{detail.Website}
 				}
+				e.Chargees = chargees
 				// LinkedGroup is the registered number WITHOUT the
 				// suffix -- the key that groups a main charity together
 				// with its own linked/subsidiary charities.
 				e.LinkedGroup = fmt.Sprintf("%d", detail.RegisteredNumber)
 				e.FormedOn = detail.RegistrationDate
 				termEntities = append(termEntities, e)
+
+				// Officer appointment fan-out: each current officer
+				// carries a stable per-person OfficerID that links to
+				// every OTHER company they're a director/secretary of
+				// register-wide -- not just the ones a name search
+				// happens to find. This surfaces a shared director who
+				// never appears in either organization's own search
+				// results otherwise. Deliberately one hop only (the
+				// companies found this way aren't fanned out further)
+				// to keep the number of API calls bounded.
+				fannedOut := map[string]bool{}
+				for _, o := range currentOfficers {
+					if o.OfficerID == "" {
+						continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
+					}
+					appointments, err := chClient.GetOfficerAppointments(o.OfficerID, *limit)
+					if err != nil {
+						note("Companies House", "%s appointments for %s: %v", o.Name, detail.Name, err)
+						continue
+					}
+					for _, appt := range appointments {
+						if appt.ResignedOn != "" || sameCompanyNumber(appt.CompanyNumber, detail.CompaniesHouseNumber) || fannedOut[appt.CompanyNumber] {
+							continue // former appointments, the charity's own company itself, and dupes across officers
+						}
+						fannedOut[appt.CompanyNumber] = true
+						termEntities = append(termEntities, risk.NewEntity("companieshouse", appt.CompanyNumber, appt.CompanyName, nil, []string{o.Name}))
+					}
+				}
 			}
 			entities = append(entities, termEntities...)
 			cache.Set(cacheKey, termEntities)
@@ -1305,6 +1491,132 @@ func runRisk(args []string) {
 		for _, e := range entities {
 			for _, p := range e.People {
 				screen(p, e.Label())
+			}
+		}
+	}
+
+	// UK sanctions screen (OFSI) -- same scope as the US screen above
+	// (every query term, plus every distinct person name found), since
+	// the UK Sanctions List designates people/entities of any
+	// nationality, not just UK ones. Unlike every other UK source in
+	// this project, OFSI needs no API key at all (see internal/ofsi).
+	{
+		ofsiClient := ofsi.NewClient()
+		screened := map[string]bool{}
+		screen := func(name, screenedFor string) {
+			key := strings.ToLower(strings.TrimSpace(name))
+			if key == "" || screened[key] {
+				return
+			}
+			screened[key] = true
+			result, err := ofsiClient.SearchDesignations(name, 5)
+			if err != nil {
+				note("UK sanctions screen", "%q: %v", name, err)
+				return
+			}
+			wantName := risk.NormalizeNameFuzzy(name)
+			for _, hit := range result.Hits {
+				// Confirmed live: this search matches on individual
+				// name tokens (and apparently alias fields not
+				// visible in this minimal response), not the whole
+				// queried name -- an officer named "James Smith" can
+				// pull back an unrelated "GADET PETER" or "NYAKUNI
+				// JAMES" hit on "James" alone. Require the full token
+				// set to match (order/formatting-independent, same
+				// comparison used for shared_person_fuzzy and the
+				// disqualified-director check below) before treating a
+				// hit as plausibly the same person/entity. A short
+				// single-word org query (wantName == "") skips this
+				// filter and keeps every hit, same as the US screen.
+				if wantName != "" && risk.NormalizeNameFuzzy(hit.Name) != wantName {
+					continue
+				}
+				extra = append(extra, risk.Indicator{
+					Code:        "uk_sanctions_match",
+					Description: "Name matched the UK Sanctions List (OFSI)",
+					Weight:      5,
+					Entities:    []string{screenedFor},
+					Evidence:    fmt.Sprintf("%s -- %s (%s)", hit.Name, hit.Regime, hit.SanctionsImposed),
+				})
+
+				// Regime is a sanctions regime, not always literally a
+				// country (e.g. "Global Human Rights"), but many
+				// regimes are named after the country they target --
+				// checking it against FATF's list the same way the US
+				// screen checks hit.Country costs nothing and catches
+				// the cases where it does line up.
+				if listed, listName, weight := risk.FATFStatus(hit.Regime); listed {
+					extra = append(extra, risk.Indicator{
+						Code:        "jurisdiction_risk",
+						Description: "UK sanctions match's regime is a FATF-flagged jurisdiction",
+						Weight:      weight,
+						Entities:    []string{screenedFor},
+						Evidence:    fmt.Sprintf("%s -- %s", hit.Name, listName),
+					})
+				}
+			}
+		}
+
+		for _, query := range queries {
+			screen(query, fmt.Sprintf("search query: %q", query))
+		}
+		for _, e := range entities {
+			for _, p := range e.People {
+				screen(p, e.Label())
+			}
+		}
+	}
+
+	// Companies House disqualified directors -- unlike every other
+	// indicator here, a hit is an already-adjudicated regulatory action
+	// (a real company-law breach), not a correlation, so it's the
+	// highest-weighted indicator in this tool. Scoped to officer/
+	// trustee names sourced from Companies House and the UK Charity
+	// Commission specifically, since that's the register this actually
+	// covers -- screening every name from every source regardless of
+	// country would multiply API calls for a check that could never
+	// match a non-UK person anyway. Name-only search matching (the API
+	// has no free-text DOB/address filter) means a hit is still a lead
+	// to verify, not a confirmed identity match -- common names collide
+	// here just like on the sanctions lists.
+	if chClient != nil {
+		checked := map[string]bool{}
+		for _, e := range entities {
+			if e.Source != "companieshouse" && e.Source != "ukcharity" {
+				continue
+			}
+			for _, p := range e.People {
+				key := strings.ToLower(strings.TrimSpace(p))
+				if key == "" || checked[key] {
+					continue
+				}
+				checked[key] = true
+				hits, err := chClient.SearchDisqualifiedOfficers(p, 5)
+				if err != nil {
+					note("Companies House", "disqualified officer check for %q: %v", p, err)
+					continue
+				}
+				wantName := risk.NormalizeNameFuzzy(p)
+				for _, hit := range hits {
+					// Confirmed live: this search endpoint matches on
+					// individual name tokens, not the whole name --
+					// querying "Andrew Fleming" can return an unrelated
+					// "Andrew Bell" or "Andrew Axon" on first-name alone.
+					// Require the full token set to match (order/
+					// formatting-independent, same comparison used for
+					// shared_person_fuzzy) before treating a hit as
+					// plausibly the same person.
+					if wantName == "" || risk.NormalizeNameFuzzy(hit.Name) != wantName {
+						continue
+					}
+					extra = append(extra, risk.Indicator{
+						Code:        "disqualified_director",
+						Description: "Name matches a UK disqualified-directors register entry -- an adjudicated regulatory action, not a correlation, but still a name-only match; confirm identity (address/date of birth) before treating it as the same person",
+						Weight:      6,
+						Entities:    []string{e.Label()},
+						Evidence:    fmt.Sprintf("%s -- %s", hit.Name, hit.Description),
+					})
+				}
 			}
 		}
 	}
@@ -1471,6 +1783,15 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// sameCompanyNumber compares two Companies House numbers ignoring
+// leading-zero padding -- confirmed live, some sources (e.g. the UK
+// Charity Commission's CompaniesHouseNumber field) return numbers
+// unpadded while the Companies House API itself always zero-pads to 8
+// characters, so a naive string comparison would miss a match.
+func sameCompanyNumber(a, b string) bool {
+	return strings.TrimLeft(a, "0") == strings.TrimLeft(b, "0")
 }
 
 func moneyOrDash(v *int64) string {

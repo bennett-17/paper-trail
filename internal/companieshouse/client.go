@@ -107,7 +107,7 @@ func (c *Client) get(u string) ([]byte, error) {
 				"COMPANIES_HOUSE_API_KEY is a valid, active REST key", u,
 		)
 	case status == http.StatusNotFound:
-		return nil, newClientError("Companies House API returned 404 Not Found for %s -- no such company number", u)
+		return nil, newClientError("Companies House API returned 404 Not Found for %s -- no such company number or officer ID", u)
 	default:
 		return nil, newClientError("Companies House API returned HTTP %d for %s", status, u)
 	}
@@ -319,6 +319,14 @@ type Officer struct {
 	Role        string `json:"role,omitempty"`
 	AppointedOn string `json:"appointedOn,omitempty"`
 	ResignedOn  string `json:"resignedOn,omitempty"` // empty if currently serving
+	// OfficerID is a stable per-person identifier (confirmed live via
+	// each officer's links.officer.appointments field), distinct from
+	// this specific appointment. Pass it to GetOfficerAppointments to
+	// fan out to every other company this same person is linked to
+	// across the whole register -- not just the ones an initial name
+	// search happened to surface. Empty if the API didn't return a link
+	// (observed for some corporate officers).
+	OfficerID string `json:"officerId,omitempty"`
 }
 
 type officersResponse struct {
@@ -327,8 +335,25 @@ type officersResponse struct {
 		OfficerRole string `json:"officer_role"`
 		AppointedOn string `json:"appointed_on"`
 		ResignedOn  string `json:"resigned_on"`
+		Links       struct {
+			Officer struct {
+				Appointments string `json:"appointments"`
+			} `json:"officer"`
+		} `json:"links"`
 	} `json:"items"`
 	TotalResults int `json:"total_results"`
+}
+
+// officerIDFromAppointmentsLink extracts the officer ID out of a
+// links.officer.appointments path of the form
+// "/officers/{id}/appointments". Returns "" if the path doesn't match
+// that shape (e.g. no link was returned at all).
+func officerIDFromAppointmentsLink(path string) string {
+	const prefix, suffix = "/officers/", "/appointments"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
 }
 
 // GetOfficers fetches the officers (directors, secretaries, and other
@@ -360,6 +385,7 @@ func (c *Client) GetOfficers(number string, limit int) ([]Officer, error) {
 			Role:        item.OfficerRole,
 			AppointedOn: item.AppointedOn,
 			ResignedOn:  item.ResignedOn,
+			OfficerID:   officerIDFromAppointmentsLink(item.Links.Officer.Appointments),
 		})
 	}
 	return officers, nil
@@ -425,4 +451,200 @@ func (c *Client) GetPersonsWithSignificantControl(number string, limit int) ([]P
 		})
 	}
 	return pscs, nil
+}
+
+// DisqualifiedOfficer is a single disqualified-officer search hit.
+// Confirmed live: the search endpoint has no date-of-birth or address
+// filter, only a name query, so a hit here is a name-only match --
+// common names collide the same way they do on a sanctions list, and
+// this is a lead to verify, not a confirmed identity match.
+type DisqualifiedOfficer struct {
+	Name        string  `json:"name"`
+	Description string  `json:"description,omitempty"` // e.g. "Disqualified" or "Born March 1977 - Disqualified"
+	Address     Address `json:"address,omitempty"`
+}
+
+type disqualifiedOfficersSearchResponse struct {
+	Items []struct {
+		Title       string     `json:"title"`
+		Description string     `json:"description"`
+		Address     addressRaw `json:"address"`
+	} `json:"items"`
+	TotalResults int `json:"total_results"`
+}
+
+// SearchDisqualifiedOfficers searches the Companies House disqualified
+// officers register by name (natural persons and corporate officers
+// both, e.g. a company acting as a corporate director). limit caps how
+// many results come back (0 uses the API's own default page size).
+func (c *Client) SearchDisqualifiedOfficers(name string, limit int) ([]DisqualifiedOfficer, error) {
+	params := url.Values{}
+	params.Set("q", name)
+	if limit > 0 {
+		params.Set("items_per_page", strconv.Itoa(limit))
+	}
+	body, err := c.get(c.BaseURL + "/search/disqualified-officers?" + params.Encode())
+	if err != nil {
+		return nil, err
+	}
+
+	var resp disqualifiedOfficersSearchResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing disqualified officer search results: %v", err)
+	}
+
+	hits := make([]DisqualifiedOfficer, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		hits = append(hits, DisqualifiedOfficer{
+			Name:        item.Title,
+			Description: item.Description,
+			Address:     item.Address.toAddress(),
+		})
+	}
+	return hits, nil
+}
+
+// Charge is a single registered charge (mortgage/debenture) against a
+// company. PersonsEntitled is who benefits from the charge -- the
+// lender/chargeholder -- a counterparty relationship distinct from an
+// officer or PSC. Note: for a very common lender (a major clearing
+// bank), the same name will show up across an enormous number of
+// otherwise-unrelated companies -- see internal/risk's SharedChargees
+// for how that's handled.
+type Charge struct {
+	ChargeCode      string   `json:"chargeCode,omitempty"`
+	Classification  string   `json:"classification,omitempty"`
+	Status          string   `json:"status,omitempty"` // e.g. "outstanding", "fully-satisfied", "part-satisfied"
+	DeliveredOn     string   `json:"deliveredOn,omitempty"`
+	CreatedOn       string   `json:"createdOn,omitempty"`
+	SatisfiedOn     string   `json:"satisfiedOn,omitempty"` // empty if not (yet) satisfied
+	PersonsEntitled []string `json:"personsEntitled,omitempty"`
+	Particulars     string   `json:"particulars,omitempty"`
+}
+
+type chargesResponse struct {
+	Items []struct {
+		ChargeCode     string `json:"charge_code"`
+		Classification struct {
+			Description string `json:"description"`
+		} `json:"classification"`
+		Status      string `json:"status"`
+		DeliveredOn string `json:"delivered_on"`
+		CreatedOn   string `json:"created_on"`
+		SatisfiedOn string `json:"satisfied_on"`
+		Particulars struct {
+			Description string `json:"description"`
+		} `json:"particulars"`
+		PersonsEntitled []struct {
+			Name string `json:"name"`
+		} `json:"persons_entitled"`
+	} `json:"items"`
+	TotalCount int `json:"total_count"`
+}
+
+// GetCharges fetches the registered charges (mortgages/debentures)
+// against a company by its exact company number (zero-padded
+// automatically). limit caps how many come back (0 uses the API's own
+// default page size).
+func (c *Client) GetCharges(number string, limit int) ([]Charge, error) {
+	number = zeroPadCompanyNumber(number)
+	u := c.BaseURL + "/company/" + url.PathEscape(number) + "/charges"
+	if limit > 0 {
+		params := url.Values{}
+		params.Set("items_per_page", strconv.Itoa(limit))
+		u += "?" + params.Encode()
+	}
+	body, err := c.get(u)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp chargesResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing company charges: %v", err)
+	}
+
+	charges := make([]Charge, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		entitled := make([]string, 0, len(item.PersonsEntitled))
+		for _, pe := range item.PersonsEntitled {
+			if pe.Name != "" {
+				entitled = append(entitled, pe.Name)
+			}
+		}
+		charges = append(charges, Charge{
+			ChargeCode:      item.ChargeCode,
+			Classification:  item.Classification.Description,
+			Status:          item.Status,
+			DeliveredOn:     item.DeliveredOn,
+			CreatedOn:       item.CreatedOn,
+			SatisfiedOn:     item.SatisfiedOn,
+			PersonsEntitled: entitled,
+			Particulars:     item.Particulars.Description,
+		})
+	}
+	return charges, nil
+}
+
+// Appointment is one company appointment held by a single officer,
+// as returned by GetOfficerAppointments -- this is how paper-trail
+// follows a director from one company to every other company they're
+// linked to across the whole register, not just the ones an initial
+// name search happened to surface.
+type Appointment struct {
+	CompanyName   string `json:"companyName"`
+	CompanyNumber string `json:"companyNumber"`
+	CompanyStatus string `json:"companyStatus,omitempty"`
+	Role          string `json:"role,omitempty"`
+	AppointedOn   string `json:"appointedOn,omitempty"`
+	ResignedOn    string `json:"resignedOn,omitempty"` // empty if still serving
+}
+
+type appointmentsResponse struct {
+	Items []struct {
+		OfficerRole string `json:"officer_role"`
+		AppointedOn string `json:"appointed_on"`
+		ResignedOn  string `json:"resigned_on"`
+		AppointedTo struct {
+			CompanyName   string `json:"company_name"`
+			CompanyNumber string `json:"company_number"`
+			CompanyStatus string `json:"company_status"`
+		} `json:"appointed_to"`
+	} `json:"items"`
+	TotalResults int `json:"total_results"`
+}
+
+// GetOfficerAppointments fetches every company appointment held by a
+// single officer, identified by the stable OfficerID from an Officer
+// returned by GetOfficers (not a company number). limit caps how many
+// come back (0 uses the API's own default page size).
+func (c *Client) GetOfficerAppointments(officerID string, limit int) ([]Appointment, error) {
+	u := c.BaseURL + "/officers/" + url.PathEscape(officerID) + "/appointments"
+	if limit > 0 {
+		params := url.Values{}
+		params.Set("items_per_page", strconv.Itoa(limit))
+		u += "?" + params.Encode()
+	}
+	body, err := c.get(u)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp appointmentsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing officer appointments: %v", err)
+	}
+
+	appointments := make([]Appointment, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		appointments = append(appointments, Appointment{
+			CompanyName:   item.AppointedTo.CompanyName,
+			CompanyNumber: item.AppointedTo.CompanyNumber,
+			CompanyStatus: item.AppointedTo.CompanyStatus,
+			Role:          item.OfficerRole,
+			AppointedOn:   item.AppointedOn,
+			ResignedOn:    item.ResignedOn,
+		})
+	}
+	return appointments, nil
 }

@@ -190,6 +190,56 @@ func TestGetOfficersParsesCurrentAndFormer(t *testing.T) {
 	if officers[1].Name != "SAMPLE, John" || officers[1].ResignedOn != "2023-06-15" {
 		t.Errorf("officers[1] = %+v, want a resigned_on set (a former officer)", officers[1])
 	}
+	if officers[0].OfficerID != "exampleJaneOfficerId" {
+		t.Errorf("officers[0].OfficerID = %q, want it parsed out of links.officer.appointments", officers[0].OfficerID)
+	}
+	if officers[1].OfficerID != "exampleJohnOfficerId" {
+		t.Errorf("officers[1].OfficerID = %q, want it parsed out of links.officer.appointments", officers[1].OfficerID)
+	}
+}
+
+func TestOfficerIDFromAppointmentsLink(t *testing.T) {
+	cases := map[string]string{
+		"/officers/z_rLf8JlTMd8wKrovebh6e8B17c/appointments": "z_rLf8JlTMd8wKrovebh6e8B17c",
+		"":                        "",
+		"/something/else":         "",
+		"/officers//appointments": "",
+	}
+	for in, want := range cases {
+		if got := officerIDFromAppointmentsLink(in); got != want {
+			t.Errorf("officerIDFromAppointmentsLink(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestGetOfficerAppointmentsFansOutAcrossCompanies guards the actual
+// point of this endpoint: given one officer ID, it returns every
+// company appointment for that person register-wide, not just the
+// company used to discover them -- confirmed live against a real
+// director on the Companies House register with appointments at
+// multiple companies, including a dissolved one.
+func TestGetOfficerAppointmentsFansOutAcrossCompanies(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/exampleOfficerId/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_appointments.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	appointments, err := c.GetOfficerAppointments("exampleOfficerId", 0)
+	if err != nil {
+		t.Fatalf("GetOfficerAppointments: %v", err)
+	}
+	if len(appointments) != 2 {
+		t.Fatalf("got %d appointments, want 2", len(appointments))
+	}
+	if appointments[0].CompanyNumber != "05833630" || appointments[0].CompanyStatus != "active" || appointments[0].ResignedOn != "" {
+		t.Errorf("appointments[0] = %+v", appointments[0])
+	}
+	if appointments[1].CompanyNumber != "05397121" || appointments[1].CompanyStatus != "dissolved" || appointments[1].ResignedOn != "2019-03-31" {
+		t.Errorf("appointments[1] = %+v, want a resigned_on set", appointments[1])
+	}
 }
 
 func TestGetPersonsWithSignificantControlParsesCurrentAndFormer(t *testing.T) {
@@ -215,6 +265,80 @@ func TestGetPersonsWithSignificantControlParsesCurrentAndFormer(t *testing.T) {
 	}
 	if pscs[1].Name != "Mr John Sample" || pscs[1].CeasedOn != "2018-07-17" {
 		t.Errorf("pscs[1] = %+v, want a ceased_on set (a former PSC)", pscs[1])
+	}
+}
+
+func TestSearchDisqualifiedOfficersParsesNaturalAndCorporate(t *testing.T) {
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/disqualified-officers", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("q")
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_disqualified_officers.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	hits, err := c.SearchDisqualifiedOfficers("Example Sample", 5)
+	if err != nil {
+		t.Fatalf("SearchDisqualifiedOfficers: %v", err)
+	}
+	if gotQuery != "Example Sample" {
+		t.Errorf("q param = %q, want Example Sample", gotQuery)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("got %d hits, want 2", len(hits))
+	}
+	if hits[0].Name != "Example Jane SAMPLE" || hits[0].Description != "Born on 18 October 1987 - Disqualified" {
+		t.Errorf("hits[0] = %+v", hits[0])
+	}
+	if hits[1].Name != "EXAMPLE CORPORATE OFFICER LTD" {
+		t.Errorf("hits[1] = %+v, want the corporate-officer hit too (same search covers both)", hits[1])
+	}
+}
+
+func TestSearchDisqualifiedOfficersZeroResultsIsClean(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/disqualified-officers", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[],"total_results":0}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	hits, err := c.SearchDisqualifiedOfficers("no such person anywhere", 0)
+	if err != nil {
+		t.Fatalf("SearchDisqualifiedOfficers: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("hits = %+v, want a clean empty result", hits)
+	}
+}
+
+func TestGetChargesParsesOutstandingAndSatisfied(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/04325234/charges", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_charges.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	charges, err := c.GetCharges("4325234", 0)
+	if err != nil {
+		t.Fatalf("GetCharges: %v", err)
+	}
+	if len(charges) != 2 {
+		t.Fatalf("got %d charges, want 2", len(charges))
+	}
+	if charges[0].Status != "outstanding" || charges[0].SatisfiedOn != "" {
+		t.Errorf("charges[0] = %+v", charges[0])
+	}
+	if len(charges[0].PersonsEntitled) != 1 || charges[0].PersonsEntitled[0] != "Example Private Lender Ltd" {
+		t.Errorf("charges[0].PersonsEntitled = %v", charges[0].PersonsEntitled)
+	}
+	if charges[1].Status != "fully-satisfied" || charges[1].SatisfiedOn != "2012-09-12" {
+		t.Errorf("charges[1] = %+v, want a satisfied_on set", charges[1])
 	}
 }
 

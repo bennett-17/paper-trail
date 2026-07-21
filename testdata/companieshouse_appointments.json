@@ -1,0 +1,40 @@
+{
+  "name": "ST JOHN SMITH & CO LTD",
+  "kind": "personal-appointment",
+  "is_corporate_officer": true,
+  "active_count": 1,
+  "inactive_count": 1,
+  "resigned_count": 1,
+  "items": [
+    {
+      "name": "ST JOHN SMITH & CO LTD",
+      "officer_role": "corporate-director",
+      "appointed_on": "2006-05-31",
+      "appointed_to": {
+        "company_name": "EXAMPLE ACTIVE COMPANY LTD",
+        "company_number": "05833630",
+        "company_status": "active"
+      },
+      "links": {
+        "company": "/company/05833630"
+      }
+    },
+    {
+      "name": "ST JOHN SMITH & CO LTD",
+      "officer_role": "corporate-secretary",
+      "appointed_on": "2004-11-09",
+      "resigned_on": "2019-03-31",
+      "appointed_to": {
+        "company_name": "EXAMPLE DISSOLVED COMPANY LTD",
+        "company_number": "05397121",
+        "company_status": "dissolved"
+      },
+      "links": {
+        "company": "/company/05397121"
+      }
+    }
+  ],
+  "items_per_page": 35,
+  "start_index": 0,
+  "total_results": 2
+}

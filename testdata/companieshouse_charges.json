@@ -1,0 +1,49 @@
+{
+  "etag": "example-etag",
+  "total_count": 2,
+  "unfiltered_count": 2,
+  "satisfied_count": 1,
+  "part_satisfied_count": 0,
+  "items": [
+    {
+      "charge_code": "043252340002",
+      "classification": {
+        "type": "charge-description",
+        "description": "A registered charge"
+      },
+      "charge_number": 2,
+      "status": "outstanding",
+      "delivered_on": "2026-06-22",
+      "created_on": "2026-06-18",
+      "particulars": {
+        "type": "brief-description",
+        "description": "Example portfolio charge over a portfolio of securities."
+      },
+      "persons_entitled": [
+        {
+          "name": "Example Private Lender Ltd"
+        }
+      ]
+    },
+    {
+      "classification": {
+        "type": "charge-description",
+        "description": "Legal charge"
+      },
+      "charge_number": 1,
+      "status": "fully-satisfied",
+      "delivered_on": "2009-04-04",
+      "created_on": "2009-03-31",
+      "satisfied_on": "2012-09-12",
+      "particulars": {
+        "type": "short-particulars",
+        "description": "Example freehold property charge."
+      },
+      "persons_entitled": [
+        {
+          "name": "Example Bank PLC"
+        }
+      ]
+    }
+  ]
+}

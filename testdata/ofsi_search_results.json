@@ -1,0 +1,35 @@
+{
+  "TotalCount": 2,
+  "Hits": [
+    {
+      "Source": {
+        "OfsiID": "15068",
+        "DateDesignated": "2022-04-06",
+        "RegimeShortName": "Russia",
+        "EntityType": "Individual",
+        "DesignationSource": "UK",
+        "PrimaryFullName": "EXAMPLE Sergei Sergeevich",
+        "SanctionsImposed": "Asset freeze, Travel Ban",
+        "DocumentKey": "RUS1120",
+        "IDDocument": 4944647,
+        "TimestampCreated": "0001-01-01T00:00:00"
+      },
+      "Highlight": {}
+    },
+    {
+      "Source": {
+        "OfsiID": "16716",
+        "DateDesignated": "2024-12-17",
+        "RegimeShortName": "Global Human Rights",
+        "EntityType": "Entity",
+        "DesignationSource": "UK",
+        "PrimaryFullName": "EXAMPLE ENTITY LTD",
+        "SanctionsImposed": "Asset freeze, Director Disqualification Sanction",
+        "DocumentKey": "GHR0147",
+        "IDDocument": 4957580,
+        "TimestampCreated": "0001-01-01T00:00:00"
+      },
+      "Highlight": {}
+    }
+  ]
+}

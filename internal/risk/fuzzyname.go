@@ -56,6 +56,15 @@ func normalizeNameFuzzy(s string) string {
 	return strings.Join(tokens, " ")
 }
 
+// NormalizeNameFuzzy exports normalizeNameFuzzy for callers outside
+// this package that need to compare two names the same fuzzy way this
+// package does internally (e.g. filtering an external register's
+// name-only search results down to same-person matches instead of
+// same-token-somewhere matches).
+func NormalizeNameFuzzy(s string) string {
+	return normalizeNameFuzzy(s)
+}
+
 // SharedPeopleFuzzy flags groups of two or more distinct entities that
 // list what looks like the same individual once titles, honorifics,
 // and word order are normalized away, but that SharedPeople's exact
