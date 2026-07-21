@@ -1,0 +1,26 @@
+{
+  "items_per_page": 25,
+  "items": [
+    {
+      "name": "Mrs Jane Example",
+      "kind": "individual-person-with-significant-control",
+      "natures_of_control": ["ownership-of-shares-25-to-50-percent"],
+      "notified_on": "2017-06-30"
+    },
+    {
+      "name": "Mr John Sample",
+      "kind": "individual-person-with-significant-control",
+      "natures_of_control": ["ownership-of-shares-25-to-50-percent"],
+      "notified_on": "2016-07-24",
+      "ceased_on": "2018-07-17"
+    },
+    {
+      "kind": "statement",
+      "notified_on": "2020-01-01"
+    }
+  ],
+  "start_index": 0,
+  "total_results": 3,
+  "active_count": 1,
+  "ceased_count": 1
+}

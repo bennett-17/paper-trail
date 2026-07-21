@@ -10,8 +10,9 @@ operating out of Australia, the Charity Commission for England and
 Wales's Register of Charities for the UK, and the US Consolidated
 Screening List (OFAC's Specially Designated Nationals list plus State
 Department and Commerce/BIS restricted-party lists) for sanctions
-screening, and the UK's Companies House register for company officer
-and director data. A future phase will add
+screening, and the UK's Companies House register for company officer,
+director, and beneficial-ownership (persons with significant control)
+data. A future phase will add
 [OpenCorporates](https://opencorporates.com) data to extend coverage
 further (private companies, more non-US jurisdictions, and
 registered-agent/address-based relationship mapping).
@@ -28,7 +29,7 @@ registered-agent/address-based relationship mapping).
 | `aucharity` | ACNC, via data.gov.au | Australian charities | none |
 | `ukcharity` | Charity Commission | England & Wales charities | `UK_CHARITY_API_KEY_PRIMARY` |
 | `sanctions` | US Consolidated Screening List | OFAC SDN + State/BIS restricted-party lists | `CSL_API_KEY_PRIMARY` |
-| `companieshouse` | UK Companies House | UK company officers/directors | `COMPANIES_HOUSE_API_KEY` |
+| `companieshouse` | UK Companies House | UK company officers/directors + beneficial owners (PSCs) | `COMPANIES_HOUSE_API_KEY` |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
 Six independent public-data sources across three countries, unified
@@ -70,10 +71,12 @@ Separately, for organizations that don't file with the SEC at all:
   Wales (requires your own free API key -- see Setup)
 - Searches the UK Companies House register by name, or fetches one
   company's profile plus its officers (directors, secretaries, current
-  and former) by exact company number -- the source of real director
-  data for UK charities that are also registered companies, since the
-  Charity Commission API itself only exposes trustees (requires your
-  own free API key -- see Setup)
+  and former) and persons with significant control (PSCs -- beneficial
+  owners, current and former) by exact company number -- the source of
+  real director and beneficial-ownership data for UK charities that
+  are also registered companies, since the Charity Commission API
+  itself only exposes trustees (requires your own free API key -- see
+  Setup)
 
 And separately, for sanctions screening:
 
@@ -95,9 +98,10 @@ And on top of all of the above, structural risk heuristics:
   name, so a corporate restructuring can actually surface a shared
   address or officer instead of being invisible to every heuristic.
   A UK charity that's also a registered company gets its Companies
-  House officers pulled in alongside its Charity Commission trustees --
-  otherwise a company's directors would be invisible to this tool
-  entirely, since ukcharity itself only exposes trustees. UK charities
+  House officers *and* current persons with significant control (PSCs)
+  pulled in alongside its Charity Commission trustees -- otherwise a
+  company's directors and beneficial owners would be invisible to this
+  tool entirely, since ukcharity itself only exposes trustees. UK charities
   sharing a Charity Commission registered number under different
   suffixes (a main charity and its own linked/subsidiary charities) get
   a registry_linked_group indicator -- unlike every other one here,
@@ -283,7 +287,8 @@ go run ./cmd/paper-trail sanctions "Example Name" --fuzzy
 # Search UK Companies House by name (requires COMPANIES_HOUSE_API_KEY -- see Setup)
 go run ./cmd/paper-trail companieshouse "Example Name"
 
-# Show one company's profile + officers by exact company number
+# Show one company's profile + officers + persons with significant
+# control (beneficial owners) by exact company number
 go run ./cmd/paper-trail companieshouse --number 04325234
 
 # Cross-reference a name across every configured source and flag shared

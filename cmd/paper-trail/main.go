@@ -137,11 +137,14 @@ Services Platform APIs" at https://developer.trade.gov to get your keys.
 
 companieshouse searches the UK Companies House register for companies
 by name, or --number fetches one company's profile plus its officers
-(directors, secretaries, current and former) by exact company number.
-This is the source of real director data for UK charities that are
-also registered companies -- ukcharity only exposes trustees, and
-Companies House officers are often the same people under a different
-governance role, sometimes not. Requires COMPANIES_HOUSE_API_KEY --
+(directors, secretaries, current and former) and persons with
+significant control (PSCs -- beneficial owners, current and former)
+by exact company number. Officers and PSCs are different signals: a
+controlling shareholder isn't necessarily a listed director, and vice
+versa. This is the source of real director and beneficial-ownership
+data for UK charities that are also registered companies -- ukcharity
+only exposes trustees, and Companies House officers/PSCs are often the
+same people under a different governance role, sometimes not. Requires COMPANIES_HOUSE_API_KEY --
 same no-keyless-option model as ukcharity and sanctions, but a single
 key, not a primary/secondary pair. Register for a free account at
 https://developer.company-information.service.gov.uk, create an
@@ -157,10 +160,12 @@ own address/insider lookup too, not just a bare name, so a corporate
 restructuring can actually surface a shared address or officer instead
 of being invisible to every heuristic. For a UK charity that's also a
 registered company (has a CompaniesHouseNumber), its Companies House
-officers are pulled in alongside its Charity Commission trustees --
-often the same people under a different governance role, sometimes
-not, and either way a company's directors are otherwise invisible to
-this tool since ukcharity itself only exposes trustees. UK charities
+officers *and* current persons with significant control (PSCs --
+beneficial owners) are pulled in alongside its Charity Commission
+trustees -- often the same people under a different governance role,
+sometimes not, and either way a company's directors and beneficial
+owners are otherwise invisible to this tool since ukcharity itself
+only exposes trustees. UK charities
 that share a Charity Commission registered number under different
 suffixes (a main charity and its own linked/subsidiary charities) get
 a registry_linked_group indicator -- unlike every other indicator
@@ -846,12 +851,15 @@ func runCompaniesHouse(args []string) {
 		exitOnErr(err)
 		officers, err := client.GetOfficers(*number, *limit)
 		exitOnErr(err)
+		pscs, err := client.GetPersonsWithSignificantControl(*number, *limit)
+		exitOnErr(err)
 
 		if *asJSON {
 			printJSON(struct {
 				companieshouse.Company
 				Officers []companieshouse.Officer `json:"officers"`
-			}{company, officers})
+				PSCs     []companieshouse.PSC     `json:"personsWithSignificantControl"`
+			}{company, officers, pscs})
 			return
 		}
 
@@ -875,6 +883,14 @@ func runCompaniesHouse(args []string) {
 				status = "resigned " + o.ResignedOn
 			}
 			fmt.Printf("  %s -- %s (appointed %s, %s)\n", o.Name, orDash(o.Role), orDash(o.AppointedOn), status)
+		}
+		fmt.Printf("\n%d person(s) with significant control:\n", len(pscs))
+		for _, p := range pscs {
+			status := "active"
+			if p.CeasedOn != "" {
+				status = "ceased " + p.CeasedOn
+			}
+			fmt.Printf("  %s -- %s (%s)\n", p.Name, strings.Join(p.NaturesOfControl, ", "), status)
 		}
 		return
 	}
@@ -1179,6 +1195,20 @@ func runRisk(args []string) {
 						for _, o := range officers {
 							if o.ResignedOn == "" { // current officers only, matching Trustees above
 								people = append(people, o.Name)
+							}
+						}
+					}
+					// PSCs (beneficial owners) are a different signal
+					// than officers -- a controlling shareholder isn't
+					// necessarily a director, and vice versa -- so both
+					// get pulled in rather than one standing in for the
+					// other.
+					if pscs, err := chClient.GetPersonsWithSignificantControl(detail.CompaniesHouseNumber, *limit); err != nil {
+						note("Companies House", "%s (company %s) PSC: %v", detail.Name, detail.CompaniesHouseNumber, err)
+					} else {
+						for _, p := range pscs {
+							if p.CeasedOn == "" { // active PSCs only, matching Trustees/officers above
+								people = append(people, p.Name)
 							}
 						}
 					}

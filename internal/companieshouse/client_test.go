@@ -192,6 +192,32 @@ func TestGetOfficersParsesCurrentAndFormer(t *testing.T) {
 	}
 }
 
+func TestGetPersonsWithSignificantControlParsesCurrentAndFormer(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/04325234/persons-with-significant-control", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_psc.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	pscs, err := c.GetPersonsWithSignificantControl("04325234", 0)
+	if err != nil {
+		t.Fatalf("GetPersonsWithSignificantControl: %v", err)
+	}
+	// The fixture has 3 items; the third is a "statement" entry with no
+	// name and must be dropped, not returned as a blank-named PSC.
+	if len(pscs) != 2 {
+		t.Fatalf("got %d PSCs, want 2 (the nameless statement entry should be dropped): %+v", len(pscs), pscs)
+	}
+	if pscs[0].Name != "Mrs Jane Example" || pscs[0].CeasedOn != "" {
+		t.Errorf("pscs[0] = %+v", pscs[0])
+	}
+	if pscs[1].Name != "Mr John Sample" || pscs[1].CeasedOn != "2018-07-17" {
+		t.Errorf("pscs[1] = %+v, want a ceased_on set (a former PSC)", pscs[1])
+	}
+}
+
 func TestGet401ReturnsActionableError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

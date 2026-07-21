@@ -364,3 +364,65 @@ func (c *Client) GetOfficers(number string, limit int) ([]Officer, error) {
 	}
 	return officers, nil
 }
+
+// PSC is a single Person with Significant Control -- a beneficial
+// owner, not necessarily a listed officer -- current or former.
+// Confirmed live: an entry with no Name is a PSC "statement" (e.g. "no
+// individual or entity with significant control has been identified"),
+// not an actual person or company, so GetPersonsWithSignificantControl
+// drops those rather than returning a blank name.
+type PSC struct {
+	Name             string   `json:"name"`
+	Kind             string   `json:"kind,omitempty"` // e.g. "individual-person-with-significant-control", "corporate-entity-person-with-significant-control"
+	NaturesOfControl []string `json:"naturesOfControl,omitempty"`
+	NotifiedOn       string   `json:"notifiedOn,omitempty"`
+	CeasedOn         string   `json:"ceasedOn,omitempty"` // empty if still active
+}
+
+type pscResponse struct {
+	Items []struct {
+		Name             string   `json:"name"`
+		Kind             string   `json:"kind"`
+		NaturesOfControl []string `json:"natures_of_control"`
+		NotifiedOn       string   `json:"notified_on"`
+		CeasedOn         string   `json:"ceased_on"`
+	} `json:"items"`
+	TotalResults int `json:"total_results"`
+}
+
+// GetPersonsWithSignificantControl fetches the beneficial owners (PSCs,
+// current and former) of a company by its exact company number. limit
+// caps how many come back (0 uses the API's own default page size).
+func (c *Client) GetPersonsWithSignificantControl(number string, limit int) ([]PSC, error) {
+	number = zeroPadCompanyNumber(number)
+	u := c.BaseURL + "/company/" + url.PathEscape(number) + "/persons-with-significant-control"
+	if limit > 0 {
+		params := url.Values{}
+		params.Set("items_per_page", strconv.Itoa(limit))
+		u += "?" + params.Encode()
+	}
+	body, err := c.get(u)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp pscResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing persons with significant control: %v", err)
+	}
+
+	pscs := make([]PSC, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		if item.Name == "" {
+			continue // a PSC "statement" (e.g. none identified), not an actual person/company
+		}
+		pscs = append(pscs, PSC{
+			Name:             item.Name,
+			Kind:             item.Kind,
+			NaturesOfControl: item.NaturesOfControl,
+			NotifiedOn:       item.NotifiedOn,
+			CeasedOn:         item.CeasedOn,
+		})
+	}
+	return pscs, nil
+}
