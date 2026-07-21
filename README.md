@@ -23,7 +23,7 @@ registered-agent/address-based relationship mapping).
 |---|---|---|---|
 | `lookup` | SEC EDGAR | US public companies | `EDGAR_USER_AGENT` |
 | `filings` | SEC EDGAR | US public companies | `EDGAR_USER_AGENT` |
-| `graph` | SEC EDGAR (Form 3/4/5) | US public companies | `EDGAR_USER_AGENT` |
+| `graph` | SEC EDGAR (Form 3/4/5, Schedule 13D/13G) | US public companies | `EDGAR_USER_AGENT` |
 | `fulltext` | SEC EDGAR full-text search | US filings, 2001+ | `EDGAR_USER_AGENT` |
 | `nonprofit` | IRS Form 990, via ProPublica | US 501(c) organizations | none |
 | `aucharity` | ACNC, via data.gov.au | Australian charities | none |
@@ -53,8 +53,10 @@ Given a company name or ticker, Paper Trail:
   SIC code/industry, filer status
 - Lists recent filings, optionally filtered by form type
 - Extracts insider relationships from Form 3/4/5 filings (officers,
-  directors, and 10%+ owners who filed on behalf of the company) to begin
-  building an entity relationship graph
+  directors, and 10%+ owners who filed on behalf of the company), plus
+  beneficial-ownership relationships from Schedule 13D/13G filings
+  (5%+ institutional/activist owners, not necessarily officers or
+  directors at all) to begin building an entity relationship graph
 - Searches filing *content* (not just company names) via SEC's full-text
   search, and cross-references related CIKs after a corporate restructuring
 - Outputs everything as structured JSON, and a relationship graph
@@ -108,6 +110,13 @@ And on top of all of the above, structural risk heuristics:
   check) get their own address/insider lookup too, not just a bare
   name, so a corporate restructuring can actually surface a shared
   address or officer instead of being invisible to every heuristic.
+  Each EDGAR company also gets its Schedule 13D/13G filers pulled in --
+  5%+ beneficial owners, a different signal than Form 3/4/5 insiders
+  since a 13D/13G filer (often an institutional or activist investor)
+  isn't necessarily an officer or director at all; two entities
+  sharing the same filer get a shared_beneficial_owner indicator,
+  weighted lowest since a handful of major index funds hold 5%+ stakes
+  in an enormous number of otherwise-unrelated public companies.
   A UK charity that's also a registered company gets its Companies
   House officers *and* current persons with significant control (PSCs)
   pulled in alongside its Charity Commission trustees -- otherwise a
@@ -129,7 +138,15 @@ And on top of all of the above, structural risk heuristics:
   addresses). Unlike shared_address, this flags one entity's own
   address in isolation, using the whole register as the comparison
   set, rather than needing a second entity already found at the same
-  address. UK charities
+  address. That same company's own dated name-change history is also
+  checked for two or more renames within a short span -- a
+  frequent_renaming indicator (confirmed live against Tesco PLC's real
+  two-rename history, correctly not flagged since those spanned 36
+  years, versus a simulated fast-renaming pattern of 3 renames within
+  18 months, which is), since a single rebrand decades apart is
+  routine but several renames in quick succession is a known
+  reputation-laundering/shell-company pattern, not itself proof of
+  one. UK charities
   sharing a Charity Commission registered number under different
   suffixes (a main charity and its own linked/subsidiary charities) get
   a registry_linked_group indicator -- unlike every other one here,
@@ -179,7 +196,12 @@ And on top of all of the above, structural risk heuristics:
   on one date rather than anything having been newly formed together
   (confirmed live: Australia's ACNC register launched 3 December 2012,
   and that exact date shows up as the "registration date" for charities
-  that existed long before it). Phone/email are UK-only today, website
+  that existed long before it). US nonprofits' multi-year Form 990
+  filing history is also checked for the largest year-over-year swing
+  in revenue or assets -- a financial_anomaly indicator flags anything
+  5x or larger, same low weight as formation_cluster, since a dramatic
+  swing is just as often a one-time grant or a program winding down as
+  anything else. Phone/email are UK-only today, website
   is UK+AU; AU entities have no officer/trustee data (see above) and so
   can only ever match on shared address or website, never shared
   person. Passing
@@ -197,7 +219,11 @@ And on top of all of the above, structural risk heuristics:
   its own, since every point is already counted by the indicators that
   produced it; it's a reorganization of that evidence, surfacing a
   pattern a flat indicator list makes easy to miss. It's a
-  lead-generation report, not a finding.
+  lead-generation report, not a finding. `--diff <path>` compares a run
+  against a previously saved `--output --json` report and shows only
+  what's new -- entities, indicators, and the score change -- for
+  re-checking the same watchlist over time without manually spotting
+  what changed in a wall of repeated output.
 
 ## Why
 
@@ -290,7 +316,8 @@ go run ./cmd/paper-trail lookup "Apple Inc"
 # List recent filings for a resolved CIK
 go run ./cmd/paper-trail filings --cik 0000320193 --form 4 --limit 20
 
-# Build a relationship graph from Form 3/4/5 filers and export to JSON
+# Build a relationship graph from Form 3/4/5 insiders and Schedule
+# 13D/13G beneficial owners, and export to JSON
 go run ./cmd/paper-trail graph "Apple Inc" --output apple_graph.json
 
 # Search filing *content* (not just company names) for a name or phrase
@@ -375,6 +402,11 @@ go run ./cmd/paper-trail risk "Example Name" --cache-ttl 24h
 # Read a watchlist of names from a file instead of retyping them --
 # one per line, blank lines and #-prefixed comments ignored
 go run ./cmd/paper-trail risk --input-file watchlist.txt
+
+# Re-check the same watchlist later and see only what's new since a
+# previously saved --output --json report
+go run ./cmd/paper-trail risk --input-file watchlist.txt --output today.json --json
+go run ./cmd/paper-trail risk --input-file watchlist.txt --diff today.json
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,

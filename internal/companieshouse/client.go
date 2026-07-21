@@ -251,15 +251,28 @@ func (c *Client) SearchCompanies(name string, limit int) (SearchResult, error) {
 	return SearchResult{Total: resp.TotalResults, Companies: hits}, nil
 }
 
+// PreviousName is one entry in a company's dated name-change history --
+// confirmed live against a real example (Tesco PLC), which carries
+// two: "TESCO STORES (HOLDINGS) LIMITED" (1947-1981) and "TESCO STORES
+// (HOLDINGS) PUBLIC LIMITED COMPANY" (1981-1983) before its current
+// name. Empty CeasedOn would mean still in use, but that can't happen
+// here -- these are by definition names the company no longer uses.
+type PreviousName struct {
+	Name          string `json:"name"`
+	EffectiveFrom string `json:"effectiveFrom,omitempty"`
+	CeasedOn      string `json:"ceasedOn,omitempty"`
+}
+
 // Company is a company's public profile.
 type Company struct {
-	CompanyNumber    string   `json:"companyNumber"`
-	Name             string   `json:"name"`
-	Status           string   `json:"status,omitempty"`
-	Type             string   `json:"type,omitempty"`
-	IncorporatedOn   string   `json:"incorporatedOn,omitempty"`
-	RegisteredOffice Address  `json:"registeredOffice,omitempty"`
-	SICCodes         []string `json:"sicCodes,omitempty"`
+	CompanyNumber    string         `json:"companyNumber"`
+	Name             string         `json:"name"`
+	Status           string         `json:"status,omitempty"`
+	Type             string         `json:"type,omitempty"`
+	IncorporatedOn   string         `json:"incorporatedOn,omitempty"`
+	RegisteredOffice Address        `json:"registeredOffice,omitempty"`
+	SICCodes         []string       `json:"sicCodes,omitempty"`
+	PreviousNames    []PreviousName `json:"previousNames,omitempty"`
 }
 
 type companyResponse struct {
@@ -270,6 +283,11 @@ type companyResponse struct {
 	DateOfCreation          string     `json:"date_of_creation"`
 	RegisteredOfficeAddress addressRaw `json:"registered_office_address"`
 	SICCodes                []string   `json:"sic_codes"`
+	PreviousCompanyNames    []struct {
+		Name          string `json:"name"`
+		EffectiveFrom string `json:"effective_from"`
+		CeasedOn      string `json:"ceased_on"`
+	} `json:"previous_company_names"`
 }
 
 // zeroPadCompanyNumber left-pads a company number to Companies House's
@@ -301,6 +319,15 @@ func (c *Client) GetCompany(number string) (Company, error) {
 		return Company{}, newClientError("parsing company profile: %v", err)
 	}
 
+	previousNames := make([]PreviousName, 0, len(resp.PreviousCompanyNames))
+	for _, pn := range resp.PreviousCompanyNames {
+		previousNames = append(previousNames, PreviousName{
+			Name:          pn.Name,
+			EffectiveFrom: pn.EffectiveFrom,
+			CeasedOn:      pn.CeasedOn,
+		})
+	}
+
 	return Company{
 		CompanyNumber:    resp.CompanyNumber,
 		Name:             resp.CompanyName,
@@ -309,6 +336,7 @@ func (c *Client) GetCompany(number string) (Company, error) {
 		IncorporatedOn:   resp.DateOfCreation,
 		RegisteredOffice: resp.RegisteredOfficeAddress.toAddress(),
 		SICCodes:         resp.SICCodes,
+		PreviousNames:    previousNames,
 	}, nil
 }
 

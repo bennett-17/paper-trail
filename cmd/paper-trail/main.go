@@ -72,8 +72,8 @@ Usage:
   paper-trail lookup <query> [--json]
   paper-trail lookup --cik <cik> [--json]
   paper-trail filings --cik <cik> [--form <form>] [--limit <n>] [--json]
-  paper-trail graph <query> [--output <path>] [--include-insiders=false]
-  paper-trail graph --cik <cik> [--output <path>] [--include-insiders=false]
+  paper-trail graph <query> [--output <path>] [--include-insiders=false] [--include-beneficial-owners=false]
+  paper-trail graph --cik <cik> [--output <path>] [--include-insiders=false] [--include-beneficial-owners=false]
   paper-trail fulltext <query> [--forms <f1,f2>] [--ciks <cik1,cik2>]
                                 [--start <date>] [--end <date>]
                                 [--offset <n>] [--limit <n>] [--json]
@@ -88,7 +88,7 @@ Usage:
   paper-trail companieshouse <query> [--limit <n>] [--json]
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--cache-ttl <duration>] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -197,7 +197,15 @@ retyping them each time. For SEC EDGAR this includes any
 related CIKs (see lookup's "Related CIKs" check) -- each one gets its
 own address/insider lookup too, not just a bare name, so a corporate
 restructuring can actually surface a shared address or officer instead
-of being invisible to every heuristic. For a UK charity that's also a
+of being invisible to every heuristic. Each EDGAR company also gets
+its Schedule 13D/13G filers pulled in -- 5%+ beneficial owners, a
+different signal than Form 3/4/5 insiders since a 13D/13G filer (often
+an institutional or activist investor) isn't necessarily an officer or
+director at all; two entities sharing the same filer get a
+shared_beneficial_owner indicator, weighted lowest like shared_chargee
+since a handful of major index funds hold 5%+ stakes in an enormous
+number of otherwise-unrelated public companies -- low-signal for one
+of those, more notable for a smaller or activist investor. For a UK charity that's also a
 registered company (has a CompaniesHouseNumber), its Companies House
 officers *and* current persons with significant control (PSCs --
 beneficial owners) are pulled in alongside its Charity Commission
@@ -224,7 +232,14 @@ addresses). Unlike shared_address, this doesn't need a second entity
 already found at the same address -- it flags one entity's own
 address in isolation using the whole register as the comparison set,
 so it's a lead about that entity specifically, not a connection
-between two entities in this report. UK charities
+between two entities in this report. That same company's own dated
+name-change history is also checked for two or more renames within a
+short span -- a frequent_renaming indicator (confirmed live against
+Tesco PLC's real two-rename history, correctly not flagged since
+those spanned 36 years, versus a simulated fast-renaming pattern of
+3 renames within 18 months, which is), since a single rebrand decades
+apart is routine but several renames in quick succession is a known
+reputation-laundering/shell-company pattern, not itself proof of one. UK charities
 that share a Charity Commission registered number under different
 suffixes (a main charity and its own linked/subsidiary charities) get
 a registry_linked_group indicator -- unlike every other indicator
@@ -278,7 +293,16 @@ migrated pre-existing entities on one date (confirmed live against
 Australia's ACNC, whose 3 December 2012 launch date shows up as the
 "registration date" for charities that existed long before). Phone/
 email/website are only available from UK charity records today (AU
-also has website). ACNC (Australia) has no free
+also has website). US nonprofits' multi-year Form 990 filing history
+(already fetched for the org's own profile) is also checked for the
+largest year-over-year swing in revenue or assets, in either
+direction -- a financial_anomaly indicator flags anything 5x or
+larger, same low weight as formation_cluster, since a dramatic swing
+is just as often a one-time grant, a capital campaign, or a program
+winding down as anything else; confirmed live against real early-stage
+nonprofits showing a 7.5x and a 360x jump in their first couple of
+years, both plausible ordinary growth, not evidence of anything.
+ACNC (Australia) has no free
 officer/trustee data (see aucharity above), so AU entities can only
 ever match on shared address or website, never shared person. Passing
 multiple terms (e.g. two related organization names in different
@@ -329,8 +353,13 @@ Unset by default: every run is fully live, since that's this tool's
 whole point, and caching is something you opt into, not something that
 silently happens to you. Sanctions screening and full-text mentions are
 never cached even with --cache-ttl set -- that data is time-sensitive
-in a way registration data isn't, so it's always checked fresh. A
-source with no credentials configured
+in a way registration data isn't, so it's always checked fresh.
+--diff <path> compares this run against a previously saved --output
+--json report (see --output above), printing what's new since then:
+entities that weren't in the old report, indicators that weren't in
+the old report, and the plain score change -- useful for re-checking
+the same watchlist (see --input-file above) over time without having
+to manually spot what changed in a wall of repeated output. A source with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it
 flags patterns worth checking by hand, not a finding, and it is not a
@@ -539,11 +568,12 @@ func runGraph(args []string) {
 	fs := flag.NewFlagSet("graph", flag.ExitOnError)
 	output := fs.String("output", "", "write graph JSON to this path instead of stdout")
 	includeInsiders := fs.Bool("include-insiders", true, "include Form 3/4/5 insider-filer relationships")
+	includeBeneficialOwners := fs.Bool("include-beneficial-owners", true, "include Schedule 13D/13G beneficial-ownership relationships")
 	cikFlag := fs.String("cik", "", "look up by exact CIK, bypassing name/ticker resolution")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail graph <query> [--output <path>] [--include-insiders=false]  (or: paper-trail graph --cik <cik> ...)"
+	const usage = "usage: paper-trail graph <query> [--output <path>] [--include-insiders=false] [--include-beneficial-owners=false]  (or: paper-trail graph --cik <cik> ...)"
 	var query string
 	if *cikFlag == "" {
 		if len(positional) != 1 {
@@ -567,6 +597,11 @@ func runGraph(args []string) {
 		insiderRels, err := client.GetInsiderRelationships(cik, company.Name, 50)
 		exitOnErr(err)
 		relationships = append(relationships, insiderRels...)
+	}
+	if *includeBeneficialOwners {
+		ownerRels, err := client.GetBeneficialOwners(cik, company.Name, 50)
+		exitOnErr(err)
+		relationships = append(relationships, ownerRels...)
 	}
 
 	g := graph.Build(company, relationships)
@@ -1132,7 +1167,17 @@ func edgarEntityFromCompany(client *edgar.Client, company edgar.Company, limit i
 			people = append(people, r.TargetName)
 		}
 	}
-	return risk.NewEntity("edgar", company.CIK, company.Name, addrs, people)
+	e := risk.NewEntity("edgar", company.CIK, company.Name, addrs, people)
+	// Beneficial owners (Schedule 13D/13G filers) are a different
+	// signal than insiders -- a 5%+ institutional/activist owner isn't
+	// necessarily an officer or director at all -- so this is its own
+	// field, not merged into People.
+	if owners, err := client.GetBeneficialOwners(company.CIK, company.Name, limit); err == nil {
+		for _, o := range owners {
+			e.BeneficialOwners = append(e.BeneficialOwners, o.TargetName)
+		}
+	}
+	return e
 }
 
 // mailDropAddressThreshold is how many companies register-wide must
@@ -1144,6 +1189,68 @@ func edgarEntityFromCompany(client *edgar.Client, company edgar.Company, limit i
 // 1,000 sits comfortably above any genuine single-business address
 // observed and well below actual mail-drop scale.
 const mailDropAddressThreshold = 1000
+
+// riskReportJSON is the shape of a risk --json report -- named (not
+// anonymous) so --diff can decode a previously saved one back in for
+// comparison against a new run.
+type riskReportJSON struct {
+	Queries  []string      `json:"queries"`
+	Entities []risk.Entity `json:"entities"`
+	Notes    []string      `json:"notes"`
+	Score    risk.Score    `json:"score"`
+}
+
+// riskReportDiff summarizes what changed between a previous risk
+// --json report and a new run: entities that weren't in the old
+// report, indicators that weren't in the old report, and the plain
+// score delta. Comparison is by Label()/indicator identity, not a
+// byte-for-byte diff -- an indicator's Entities/Evidence together
+// with its Code is treated as its identity, since two different
+// indicators can share a Code (e.g. two separate shared_address
+// matches) but never share all three.
+type riskReportDiff struct {
+	NewEntities   []risk.Entity    `json:"newEntities"`
+	NewIndicators []risk.Indicator `json:"newIndicators"`
+	ScoreBefore   int              `json:"scoreBefore"`
+	ScoreAfter    int              `json:"scoreAfter"`
+}
+
+func indicatorIdentity(ind risk.Indicator) string {
+	return ind.Code + "|" + strings.Join(ind.Entities, ";") + "|" + ind.Evidence
+}
+
+// diffRiskReports compares a freshly computed report against a
+// previously saved one (see --diff).
+func diffRiskReports(previous riskReportJSON, entities []risk.Entity, score risk.Score) riskReportDiff {
+	seenEntities := map[string]bool{}
+	for _, e := range previous.Entities {
+		seenEntities[e.Label()] = true
+	}
+	var newEntities []risk.Entity
+	for _, e := range entities {
+		if !seenEntities[e.Label()] {
+			newEntities = append(newEntities, e)
+		}
+	}
+
+	seenIndicators := map[string]bool{}
+	for _, ind := range previous.Score.Indicators {
+		seenIndicators[indicatorIdentity(ind)] = true
+	}
+	var newIndicators []risk.Indicator
+	for _, ind := range score.Indicators {
+		if !seenIndicators[indicatorIdentity(ind)] {
+			newIndicators = append(newIndicators, ind)
+		}
+	}
+
+	return riskReportDiff{
+		NewEntities:   newEntities,
+		NewIndicators: newIndicators,
+		ScoreBefore:   previous.Score.Total,
+		ScoreAfter:    score.Total,
+	}
+}
 
 // runRisk queries every configured source for candidates matching
 // query, normalizes whatever address/officer data each source exposes
@@ -1163,10 +1270,11 @@ func runRisk(args []string) {
 	graphMLPath := fs.String("graph-graphml", "", "additionally write the graph (same nodes/edges as --graph) as GraphML, for import into Gephi/yEd or other graph-analysis tools")
 	cacheTTLFlag := fs.String("cache-ttl", "", "cache entities per source/query/limit on disk for this long (e.g. 24h) and reuse them within that window instead of re-fetching; unset disables caching entirely (always live, the default)")
 	inputFile := fs.String("input-file", "", "read additional query terms from this file, one per line (blank lines and lines starting with # are ignored) -- combined with any <query> arguments given directly")
+	diffPath := fs.String("diff", "", "compare this run against a previously saved --output --json report, showing newly appeared entities/indicators and the score change")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -1179,6 +1287,24 @@ func runRisk(args []string) {
 	if len(queries) < 1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
+	}
+
+	// Loaded and validated up front (before any live source is
+	// queried) so a bad --diff path fails fast instead of after every
+	// API call has already run.
+	var previousReport *riskReportJSON
+	if *diffPath != "" {
+		data, err := os.ReadFile(*diffPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --diff %q: %v\n", *diffPath, err)
+			os.Exit(1)
+		}
+		var r riskReportJSON
+		if err := json.Unmarshal(data, &r); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --diff %q is not a valid risk --json report: %v\n", *diffPath, err)
+			os.Exit(1)
+		}
+		previousReport = &r
 	}
 
 	// Caching is opt-in: this tool's whole point is checking *current*
@@ -1294,6 +1420,23 @@ func runRisk(args []string) {
 			e := risk.NewEntity("nonprofit", profile.Organization.EIN, profile.Organization.Name, addrs, nil)
 			e.FormedOn = profile.Organization.RulingDate
 			termEntities = append(termEntities, e)
+
+			// Financial anomaly: the multi-year filing history is
+			// already fetched above (profile.Filings) but otherwise
+			// only used for the org's own metadata -- a large
+			// year-over-year swing in revenue or assets, in either
+			// direction, is worth a second look even though it often
+			// has an innocuous explanation (a one-time major grant, a
+			// capital campaign, a program winding down).
+			if desc := financialAnomaly(profile.Filings); desc != "" {
+				extra = append(extra, risk.Indicator{
+					Code:        "financial_anomaly",
+					Description: "A large year-over-year swing in reported revenue or assets -- often innocuous (a one-time grant, a capital campaign, a program winding down), but worth checking against the underlying Form 990 for what changed",
+					Weight:      1,
+					Entities:    []string{e.Label()},
+					Evidence:    desc,
+				})
+			}
 		}
 		entities = append(entities, termEntities...)
 		cache.Set(cacheKey, termEntities)
@@ -1442,6 +1585,22 @@ func runRisk(args []string) {
 								chargees = append(chargees, ch.PersonsEntitled...)
 							}
 						}
+					}
+					// Frequent renaming: a company's own dated name-
+					// change history (previous_company_names). A single
+					// rename decades ago is a normal rebrand; several
+					// within a few years is a known reputation-
+					// laundering/shell-company pattern.
+					if company, err := chClient.GetCompany(detail.CompaniesHouseNumber); err != nil {
+						note("Companies House", "%s (company %s) profile: %v", detail.Name, detail.CompaniesHouseNumber, err)
+					} else if desc := frequentRenaming(company.PreviousNames); desc != "" {
+						extra = append(extra, risk.Indicator{
+							Code:        "frequent_renaming",
+							Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
+							Weight:      2,
+							Entities:    []string{fmt.Sprintf("companieshouse: %s (%s)", company.Name, company.CompanyNumber)},
+							Evidence:    desc,
+						})
 					}
 				}
 				// ID includes the suffix -- confirmed a real bug fetching
@@ -1798,6 +1957,13 @@ func runRisk(args []string) {
 	cache.Save() // no-op if --cache-ttl wasn't set
 
 	score := risk.Assess(entities, extra)
+	report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score}
+
+	var diff *riskReportDiff
+	if previousReport != nil {
+		d := diffRiskReports(*previousReport, entities, score)
+		diff = &d
+	}
 
 	var w io.Writer = os.Stdout
 	if *output != "" {
@@ -1810,12 +1976,14 @@ func runRisk(args []string) {
 	if *asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		enc.Encode(struct {
-			Queries  []string      `json:"queries"`
-			Entities []risk.Entity `json:"entities"`
-			Notes    []string      `json:"notes"`
-			Score    risk.Score    `json:"score"`
-		}{queries, entities, notes, score})
+		if diff != nil {
+			enc.Encode(struct {
+				riskReportJSON
+				Diff *riskReportDiff `json:"diff"`
+			}{report, diff})
+		} else {
+			enc.Encode(report)
+		}
 	} else {
 		quoted := make([]string, len(queries))
 		for i, q := range queries {
@@ -1850,6 +2018,21 @@ func runRisk(args []string) {
 			}
 		}
 		fmt.Fprintln(w, "This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
+
+		if diff != nil {
+			fmt.Fprintf(w, "\nDiff against %s:\n", *diffPath)
+			fmt.Fprintf(w, "  Score: %d -> %d (%+d)\n", diff.ScoreBefore, diff.ScoreAfter, diff.ScoreAfter-diff.ScoreBefore)
+			fmt.Fprintf(w, "  %d new entit(ies):\n", len(diff.NewEntities))
+			for _, e := range diff.NewEntities {
+				fmt.Fprintf(w, "    %s\n", e.Label())
+			}
+			fmt.Fprintf(w, "  %d new indicator(s):\n", len(diff.NewIndicators))
+			for _, ind := range diff.NewIndicators {
+				fmt.Fprintf(w, "    +%d  %s\n", ind.Weight, ind.Description)
+				fmt.Fprintf(w, "         Entities: %s\n", strings.Join(ind.Entities, "; "))
+				fmt.Fprintf(w, "         Evidence: %s\n", ind.Evidence)
+			}
+		}
 	}
 
 	if *output != "" {
@@ -1898,6 +2081,92 @@ func orDash(s string) string {
 // characters, so a naive string comparison would miss a match.
 func sameCompanyNumber(a, b string) bool {
 	return strings.TrimLeft(a, "0") == strings.TrimLeft(b, "0")
+}
+
+// financialAnomalyRatio is how large a year-over-year multiple in
+// revenue or assets must be (in either direction) before it's
+// flagged -- chosen to catch dramatic swings (5x+) while ignoring
+// ordinary year-to-year fluctuation.
+const financialAnomalyRatio = 5.0
+
+// financialAnomaly scans a nonprofit's own multi-year Form 990 filing
+// history (newest first, as ProPublica returns it) for the largest
+// year-over-year swing in revenue or assets, returning a human-
+// readable description of the biggest one found, or "" if nothing
+// crosses financialAnomalyRatio. Only filings with both years'
+// figures published are compared -- a missing value (IRS hasn't
+// extracted that filing's line items) isn't itself a swing to zero.
+func financialAnomaly(filings []nonprofit.Filing) string {
+	var best string
+	var bestRatio float64
+	check := func(label string, newer, older *int64, newYear, oldYear int) {
+		if newer == nil || older == nil || *older == 0 || *newer == 0 {
+			return
+		}
+		ratio := float64(*newer) / float64(*older)
+		if ratio < 1 {
+			ratio = 1 / ratio
+		}
+		if ratio < financialAnomalyRatio || ratio <= bestRatio {
+			return
+		}
+		bestRatio = ratio
+		direction := "increase"
+		if *newer < *older {
+			direction = "decrease"
+		}
+		best = fmt.Sprintf("%s: $%d (%d) -> $%d (%d), a %.1fx %s", label, *older, oldYear, *newer, newYear, ratio, direction)
+	}
+	for i := 0; i+1 < len(filings); i++ {
+		newer, older := filings[i], filings[i+1]
+		check("Total revenue", newer.TotalRevenue, older.TotalRevenue, newer.TaxYear, older.TaxYear)
+		check("Total assets", newer.TotalAssets, older.TotalAssets, newer.TaxYear, older.TaxYear)
+	}
+	return best
+}
+
+// frequentRenamingWindow is how short a span between a company's
+// oldest and most recent name change can be before multiple renames
+// within it are flagged. A company renamed once decades ago (a normal
+// rebrand) isn't unusual; renamed several times within a few years is
+// a known reputation-laundering/shell-company pattern.
+const frequentRenamingWindow = 3 * 365 * 24 * time.Hour // ~3 years
+
+// frequentRenaming looks at a company's previous-name history
+// (confirmed live via Companies House's previous_company_names field,
+// e.g. Tesco PLC's two recorded renames) for two or more renames whose
+// combined span -- the oldest previous name's start date to the most
+// recent rename -- fits within frequentRenamingWindow, returning a
+// description of that if found, or "" otherwise. Dates that fail to
+// parse are skipped rather than treated as zero.
+func frequentRenaming(previousNames []companieshouse.PreviousName) string {
+	if len(previousNames) < 2 {
+		return ""
+	}
+	var oldest, mostRecent time.Time
+	have := false
+	for _, pn := range previousNames {
+		from, err1 := time.Parse("2006-01-02", pn.EffectiveFrom)
+		ceased, err2 := time.Parse("2006-01-02", pn.CeasedOn)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if !have || from.Before(oldest) {
+			oldest = from
+		}
+		if !have || ceased.After(mostRecent) {
+			mostRecent = ceased
+		}
+		have = true
+	}
+	if !have {
+		return ""
+	}
+	span := mostRecent.Sub(oldest)
+	if span <= 0 || span > frequentRenamingWindow {
+		return ""
+	}
+	return fmt.Sprintf("%d name changes between %s and %s (~%.0f days)", len(previousNames), oldest.Format("2006-01-02"), mostRecent.Format("2006-01-02"), span.Hours()/24)
 }
 
 func moneyOrDash(v *int64) string {

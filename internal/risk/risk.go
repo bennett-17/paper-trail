@@ -45,6 +45,17 @@ type Entity struct {
 	// otherwise-unrelated companies.
 	Chargees []string `json:"chargees,omitempty"`
 
+	// BeneficialOwners are Schedule 13D/13G filers -- institutional or
+	// activist investors disclosing 5%+ beneficial ownership of a
+	// public company's stock -- currently only populated for SEC EDGAR
+	// entities. Distinct from People: a beneficial owner isn't
+	// necessarily an officer or director at all, often a passive
+	// institutional investor. See SharedBeneficialOwners for why this
+	// needs the same caution as SharedChargees: a handful of major
+	// index funds/asset managers hold 5%+ stakes in an enormous number
+	// of otherwise-unrelated public companies.
+	BeneficialOwners []string `json:"beneficialOwners,omitempty"`
+
 	// FormedOn is a registration/incorporation/ruling date, in whatever
 	// raw format the source returns it (see parseFormationDate) -- used
 	// only by FormationClusters. Not every source exposes one (EDGAR
@@ -340,6 +351,23 @@ func SharedChargees(entities []Entity) []Indicator {
 	)
 }
 
+// SharedBeneficialOwners flags groups of two or more distinct entities
+// with the same Schedule 13D/13G filer (a 5%+ beneficial owner) --
+// weighted the same as SharedChargees and for the same reason: a
+// handful of major index funds/asset managers hold 5%+ stakes in an
+// enormous number of otherwise-unrelated public companies, so this is
+// routine and low-signal for one of those, and more notable for a
+// smaller or activist investor.
+func SharedBeneficialOwners(entities []Entity) []Indicator {
+	return sharedValueIndicators(entities,
+		func(e Entity) []string { return e.BeneficialOwners },
+		normalizeText,
+		"shared_beneficial_owner",
+		"Multiple entities have the same Schedule 13D/13G filer (5%+ beneficial owner) -- routine and low-signal for a major index fund or asset manager, more notable for a smaller or activist investor",
+		1,
+	)
+}
+
 // Assess runs every structural heuristic over entities and combines the
 // result with extra indicators the caller already built from other
 // sources (e.g. sanctions-list hits, which aren't a comparison between
@@ -355,6 +383,7 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SharedWebsites(entities)...)
 	indicators = append(indicators, SharedLinkedGroup(entities)...)
 	indicators = append(indicators, SharedChargees(entities)...)
+	indicators = append(indicators, SharedBeneficialOwners(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
 

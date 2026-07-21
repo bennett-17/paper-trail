@@ -1,0 +1,25 @@
+{
+  "hits": {
+    "total": {"value": 2, "relation": "eq"},
+    "hits": [
+      {
+        "_id": "0001086364-24-006980:us0378331005_021224.txt",
+        "_source": {
+          "ciks": ["0000320193", "0001364742"],
+          "display_names": ["Example Public Co.  (AAPL)  (CIK 0000320193)", "Example Asset Manager Inc.  (CIK 0001364742)"],
+          "form": "SC 13G/A",
+          "file_date": "2024-02-12"
+        }
+      },
+      {
+        "_id": "0000932471-16-011528:appleinc.htm",
+        "_source": {
+          "ciks": ["0000320193", "0000102909"],
+          "display_names": ["Example Public Co.  (AAPL)  (CIK 0000320193)", "Example Index Fund Group  (CIK 0000102909)"],
+          "form": "SC 13G",
+          "file_date": "2016-02-10"
+        }
+      }
+    ]
+  }
+}

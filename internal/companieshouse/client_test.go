@@ -111,6 +111,30 @@ func TestGetCompanyParsesProfile(t *testing.T) {
 	}
 }
 
+func TestGetCompanyParsesPreviousNames(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/04325234", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_company_renamed.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	company, err := c.GetCompany("04325234")
+	if err != nil {
+		t.Fatalf("GetCompany: %v", err)
+	}
+	if len(company.PreviousNames) != 2 {
+		t.Fatalf("got %d previous names, want 2", len(company.PreviousNames))
+	}
+	if company.PreviousNames[0].Name != "EXAMPLE STORES (HOLDINGS) PUBLIC LIMITED COMPANY" || company.PreviousNames[0].CeasedOn != "1983-08-25" {
+		t.Errorf("PreviousNames[0] = %+v", company.PreviousNames[0])
+	}
+	if company.PreviousNames[1].EffectiveFrom != "1947-11-27" {
+		t.Errorf("PreviousNames[1].EffectiveFrom = %q, want 1947-11-27", company.PreviousNames[1].EffectiveFrom)
+	}
+}
+
 // TestGetCompanyZeroPadsNumber guards against a real bug found live:
 // the UK Charity Commission's CompaniesHouseNumber field returns
 // company numbers without leading zeros (e.g. "4325234"), but this API

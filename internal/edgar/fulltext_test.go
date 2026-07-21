@@ -60,6 +60,51 @@ func TestSearchFullTextParsesAndLimitsResults(t *testing.T) {
 	}
 }
 
+// TestGetBeneficialOwnersExtractsFilerCIKsExcludingSubject guards the
+// actual point of this function: given the subject company's own CIK,
+// it should return only the OTHER party from each hit (the beneficial
+// owner), never the subject company itself, deduplicated across hits.
+func TestGetBeneficialOwnersExtractsFilerCIKsExcludingSubject(t *testing.T) {
+	var gotForms, gotCIKs string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fulltext-search", func(w http.ResponseWriter, r *http.Request) {
+		gotForms = r.URL.Query().Get("forms")
+		gotCIKs = r.URL.Query().Get("ciks")
+		fmt.Fprint(w, mustReadFixture(t, "beneficial_owners_search_results.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	edges, err := c.GetBeneficialOwners("0000320193", "Example Public Co.", 10)
+	if err != nil {
+		t.Fatalf("GetBeneficialOwners: %v", err)
+	}
+	if gotForms != beneficialOwnershipForms {
+		t.Errorf("forms param = %q, want %q", gotForms, beneficialOwnershipForms)
+	}
+	if gotCIKs != "0000320193" {
+		t.Errorf("ciks param = %q, want 0000320193", gotCIKs)
+	}
+	if len(edges) != 2 {
+		t.Fatalf("got %d edges, want 2 (one per distinct beneficial owner, subject company excluded)", len(edges))
+	}
+	for _, e := range edges {
+		if e.SourceCIK != "0000320193" || e.TargetCIK == "0000320193" {
+			t.Errorf("edge = %+v, want source=subject and target=the OTHER party, never the subject itself", e)
+		}
+		if e.RelationshipType != "beneficial_owner_5pct" {
+			t.Errorf("RelationshipType = %q, want beneficial_owner_5pct", e.RelationshipType)
+		}
+	}
+	if edges[0].TargetCIK != "0001364742" || edges[0].TargetName != "Example Asset Manager Inc.  (CIK 0001364742)" {
+		t.Errorf("edges[0] = %+v", edges[0])
+	}
+	if edges[1].TargetCIK != "0000102909" {
+		t.Errorf("edges[1].TargetCIK = %q, want 0000102909", edges[1].TargetCIK)
+	}
+}
+
 func TestSearchFullTextNoResults(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fulltext-search", func(w http.ResponseWriter, r *http.Request) {

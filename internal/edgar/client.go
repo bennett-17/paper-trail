@@ -672,6 +672,56 @@ func (c *Client) GetInsiderRelationships(cik, companyName string, limit int) ([]
 	return edges, nil
 }
 
+// beneficialOwnershipForms are Schedule 13D/13G filings -- 5%+
+// beneficial-ownership disclosures -- as opposed to Form 3/4/5, which
+// covers officers/directors/10%+ owners who file as company insiders
+// on their own initiative. A 13D/13G filer is often a passive
+// institutional investor (an index fund, asset manager) or an
+// activist investor crossing the 5% threshold, and isn't necessarily
+// an officer or director at all -- a relationship type otherwise
+// invisible to this project.
+const beneficialOwnershipForms = "SC 13D,SC 13D/A,SC 13G,SC 13G/A"
+
+// GetBeneficialOwners finds every distinct Schedule 13D/13G filer
+// disclosing 5%+ beneficial ownership of a company's stock, via
+// EDGAR's full-text search scoped to that company's CIK and these
+// specific form types. Confirmed live: each hit's ciks/displayNames
+// arrays already name both the subject company and the beneficial
+// owner(s) directly, so unlike GetInsiderRelationships this needs no
+// per-filing document fetch to identify who's involved.
+func (c *Client) GetBeneficialOwners(cik, companyName string, limit int) ([]Relationship, error) {
+	cik10 := zeroPadCIK(cik)
+	hits, _, err := c.SearchFullText("", beneficialOwnershipForms, cik10, "", "", 0, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]bool{}
+	edges := make([]Relationship, 0, len(hits))
+	for _, h := range hits {
+		for i, otherCIK := range h.CIKs {
+			if otherCIK == cik10 || seen[otherCIK] {
+				continue
+			}
+			seen[otherCIK] = true
+			name := otherCIK
+			if i < len(h.DisplayNames) {
+				name = h.DisplayNames[i]
+			}
+			edges = append(edges, Relationship{
+				SourceCIK:               cik10,
+				SourceName:              companyName,
+				TargetCIK:               otherCIK,
+				TargetName:              name,
+				RelationshipType:        "beneficial_owner_5pct",
+				EvidenceForm:            h.Form,
+				EvidenceAccessionNumber: h.AccessionNumber,
+			})
+		}
+	}
+	return edges, nil
+}
+
 // fetchReportingOwners looks up the reporting owner(s) named in the Form
 // 3/4/5 filing at filingHref (an absolute URL to that filing's -index.htm
 // page, as given in SEC's Atom feed). Results are cached on disk keyed by
