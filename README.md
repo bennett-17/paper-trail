@@ -43,7 +43,12 @@ dependencies.
 
 Given a company name or ticker, Paper Trail:
 
-- Resolves the company to its SEC Central Index Key (CIK)
+- Resolves the company to its SEC Central Index Key (CIK) -- checking
+  the public-company ticker list first, then falling back to a Form D
+  search (private placements/funds filed under a Reg D exemption) for
+  anything that isn't there, since a private company or fund gets a
+  CIK but never a ticker. This widens coverage beyond public companies
+  automatically, with no separate command needed.
 - Pulls its EDGAR submissions record: current and former names, addresses,
   SIC code/industry, filer status
 - Lists recent filings, optionally filtered by form type
@@ -114,7 +119,17 @@ And on top of all of the above, structural risk heuristics:
   not just the companies the original search terms happen to find.
   This is how a shared director between two otherwise-unconnected
   organizations shows up even when neither one's own name search would
-  ever surface the other. UK charities
+  ever surface the other. Each UK charity's own registered postcode is
+  also checked against Companies House's advanced search for how many
+  companies register-wide share it -- a mail_drop_address indicator
+  fires when that count is unusually high, consistent with a
+  company-formation-agent mail-drop address rather than a genuine
+  operating address (confirmed live: a known mail-drop address had
+  roughly 190,000 companies registered at it, versus 5-70 for ordinary
+  addresses). Unlike shared_address, this flags one entity's own
+  address in isolation, using the whole register as the comparison
+  set, rather than needing a second entity already found at the same
+  address. UK charities
   sharing a Charity Commission registered number under different
   suffixes (a main charity and its own linked/subsidiary charities) get
   a registry_linked_group indicator -- unlike every other one here,
@@ -348,10 +363,18 @@ go run ./cmd/paper-trail risk "Example Name" --graph risk_graph.json
 # CDN, works fully offline -- just open it in a browser
 go run ./cmd/paper-trail risk "Example Name" --html risk_graph.html
 
+# Or export as a CSV edge list or GraphML, for Gephi/yEd or a spreadsheet
+go run ./cmd/paper-trail risk "Example Name" --graph-csv risk_graph.csv
+go run ./cmd/paper-trail risk "Example Name" --graph-graphml risk_graph.graphml
+
 # Cache resolved entities on disk for 24h and reuse them across repeated
 # or overlapping scans instead of re-fetching (opt-in -- every run is
 # fully live by default; sanctions/full-text checks are never cached)
 go run ./cmd/paper-trail risk "Example Name" --cache-ttl 24h
+
+# Read a watchlist of names from a file instead of retyping them --
+# one per line, blank lines and #-prefixed comments ignored
+go run ./cmd/paper-trail risk --input-file watchlist.txt
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -378,7 +401,7 @@ internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOU
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
-internal/graph/              # builds a node/edge relationship graph, exports JSON
+internal/graph/              # builds a node/edge relationship graph, exports JSON/HTML/CSV/GraphML
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
 internal/ofsi/               # UK Sanctions List (OFSI) client -- no API key needed
 internal/risk/                # structural red-flag heuristics and scoring (calls no API itself)
@@ -449,10 +472,16 @@ applies to its output.
       evidence-linked risk score combining those heuristics with
       `sanctions` hits; done ahead of Phase 2
 - [x] Phase 5: Graph visualization front end -- `risk --graph` exports
-      the node/edge JSON for external graph tools, and `risk --html`
+      the node/edge JSON for external graph tools, `risk --html`
       renders the same graph as a self-contained, interactive,
       force-directed HTML viewer (drag, click-to-highlight, zoom) with
-      no server or external dependency
+      no server or external dependency, and `--graph-csv`/
+      `--graph-graphml` export the same graph for Gephi/yEd or a
+      spreadsheet
+- [x] Phase 6: private-company coverage -- name resolution (`lookup`,
+      `risk`) falls back to a Form D search for companies/funds that
+      have a CIK but no ticker, widening coverage past public
+      companies; done ahead of Phase 2
 
 ## Disclaimer
 

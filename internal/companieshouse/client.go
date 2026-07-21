@@ -586,6 +586,52 @@ func (c *Client) GetCharges(number string, limit int) ([]Charge, error) {
 	return charges, nil
 }
 
+// CountCompaniesAtLocation returns how many companies register-wide
+// have a registered office matching the given location text (a
+// postcode works well and is what this project uses). This is a
+// density check, not a specific-company lookup: confirmed live, a
+// known company-formation-agent mail-drop address (71-75 Shelton
+// Street, WC2H 9JQ) returns roughly 190,000 companies, versus 5-70
+// for ordinary single-business addresses -- a real, well-known
+// shell-company tell (registered-agent address clustering), distinct
+// from this project's shared_address check, which needs two entities
+// already found at the same address rather than flagging one
+// entity's address in isolation. A location with no matches returns 0
+// (confirmed live: the API 404s rather than returning a clean empty
+// result, unlike its own /search/companies endpoint).
+func (c *Client) CountCompaniesAtLocation(location string) (int, error) {
+	u := c.BaseURL + "/advanced-search/companies?" + url.Values{
+		"location": {location},
+		"size":     {"1"}, // only the total count is needed, not the matches themselves
+	}.Encode()
+
+	status, body, err := c.doGetWithRetry(u)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case status >= 200 && status < 300:
+		// fall through to parse below
+	case status == http.StatusNotFound:
+		return 0, nil
+	case status == http.StatusUnauthorized:
+		return 0, newClientError(
+			"Companies House API returned 401 Unauthorized for %s -- check that "+
+				"COMPANIES_HOUSE_API_KEY is a valid, active REST key", u,
+		)
+	default:
+		return 0, newClientError("Companies House API returned HTTP %d for %s", status, u)
+	}
+
+	var resp struct {
+		Hits int `json:"hits"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return 0, newClientError("parsing advanced search results: %v", err)
+	}
+	return resp.Hits, nil
+}
+
 // Appointment is one company appointment held by a single officer,
 // as returned by GetOfficerAppointments -- this is how paper-trail
 // follows a director from one company to every other company they're

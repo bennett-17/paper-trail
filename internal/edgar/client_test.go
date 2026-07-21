@@ -119,6 +119,37 @@ func TestResolveCIKNoMatch(t *testing.T) {
 	}
 }
 
+// TestResolveCIKFallsBackToFormDForPrivateFilers guards the actual
+// point of the fallback: a private company/fund that has a CIK but
+// never a ticker (confirmed live against a real Form D filer) is
+// invisible to the ticker map entirely, but ResolveCIK should still
+// find it via Form D full-text search rather than failing outright.
+func TestResolveCIKFallsBackToFormDForPrivateFilers(t *testing.T) {
+	var gotForms string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tickers.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{}`)
+	})
+	mux.HandleFunc("/fulltext-search", func(w http.ResponseWriter, r *http.Request) {
+		gotForms = r.URL.Query().Get("forms")
+		fmt.Fprint(w, mustReadFixture(t, "formd_search_results.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	cik, err := c.ResolveCIK("Example Private Fund")
+	if err != nil {
+		t.Fatalf("ResolveCIK: %v", err)
+	}
+	if cik != "0001931731" {
+		t.Errorf("got CIK %s, want 0001931731", cik)
+	}
+	if gotForms != "D,D/A" {
+		t.Errorf("forms param = %q, want D,D/A (should search Form D specifically, not all filings)", gotForms)
+	}
+}
+
 func TestResolveCIKAmbiguous(t *testing.T) {
 	ambiguous := `{
 		"0": {"cik_str": 1, "ticker": "AAA", "title": "Alpha Corp"},

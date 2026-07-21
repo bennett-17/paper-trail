@@ -342,6 +342,51 @@ func TestGetChargesParsesOutstandingAndSatisfied(t *testing.T) {
 	}
 }
 
+func TestCountCompaniesAtLocationParsesHits(t *testing.T) {
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/advanced-search/companies", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("location")
+		fmt.Fprint(w, `{"hits":190797,"items":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	count, err := c.CountCompaniesAtLocation("WC2H 9JQ")
+	if err != nil {
+		t.Fatalf("CountCompaniesAtLocation: %v", err)
+	}
+	if gotQuery != "WC2H 9JQ" {
+		t.Errorf("location param = %q, want WC2H 9JQ", gotQuery)
+	}
+	if count != 190797 {
+		t.Errorf("count = %d, want 190797", count)
+	}
+}
+
+// TestCountCompaniesAtLocationTreats404AsZero guards a real quirk
+// found live: unlike /search/companies (which returns a clean
+// zero-result 200), this endpoint 404s for a location with no
+// matches -- that's a legitimate "no companies here", not an error.
+func TestCountCompaniesAtLocationTreats404AsZero(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/advanced-search/companies", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	count, err := c.CountCompaniesAtLocation("ZZ99 9ZZ")
+	if err != nil {
+		t.Fatalf("CountCompaniesAtLocation: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
 func TestGet401ReturnsActionableError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

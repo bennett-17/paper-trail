@@ -88,11 +88,21 @@ Usage:
   paper-trail companieshouse <query> [--limit <n>] [--json]
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
-  paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--cache-ttl <duration>] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--cache-ttl <duration>] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
 former identity surfaced by lookup's "Related CIKs" check.
+
+Name resolution (lookup and risk's EDGAR source) checks the SEC's
+public-company ticker list first, then falls back to a Form D search
+(private placements/funds filed under a Reg D exemption) for anything
+that isn't there -- a private company or fund gets a CIK the moment it
+electronically files anything, including a Form D, but never a ticker,
+so it's otherwise invisible to every command here. This widens
+coverage beyond public companies without a separate command: any
+<query> that matches no ticker or public-company name is automatically
+checked against Form D filers by name before failing.
 
 fulltext searches filing *content* (not just company names) via SEC's
 EDGAR full-text search -- e.g. finding an organization or person named
@@ -179,7 +189,11 @@ risk runs one or more <query> terms against every source above that's
 configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a
 sanctions screen), normalizes whatever address/officer/contact data each
 source exposes, and flags structural patterns across the *combined*
-pool of everything every term found. For SEC EDGAR this includes any
+pool of everything every term found. --input-file reads additional
+terms from a file, one per line (blank lines and #-prefixed comment
+lines are ignored) -- combined with any <query> arguments given
+directly -- for re-running the same watchlist of names without
+retyping them each time. For SEC EDGAR this includes any
 related CIKs (see lookup's "Related CIKs" check) -- each one gets its
 own address/insider lookup too, not just a bare name, so a corporate
 restructuring can actually surface a shared address or officer instead
@@ -199,7 +213,18 @@ otherwise-unconnected organizations shows up even when neither one's
 own name search would ever surface the other (confirmed live: an
 officer of a well-known charity's trading company turned out to also
 be an officer of several unrelated companies invisible to every other
-heuristic here). UK charities
+heuristic here). Each UK charity's own registered postcode is also
+checked against Companies House's advanced search for how many
+companies register-wide share it -- a mail_drop_address indicator
+fires when that count is unusually high, consistent with a company-
+formation-agent mail-drop address rather than a genuine operating
+address (confirmed live: a known mail-drop address had roughly
+190,000 companies registered at it, versus 5-70 for ordinary
+addresses). Unlike shared_address, this doesn't need a second entity
+already found at the same address -- it flags one entity's own
+address in isolation using the whole register as the comparison set,
+so it's a lead about that entity specifically, not a connection
+between two entities in this report. UK charities
 that share a Charity Commission registered number under different
 suffixes (a main charity and its own linked/subsidiary charities) get
 a registry_linked_group indicator -- unlike every other indicator
@@ -288,7 +313,15 @@ file -- no server, no CDN, works fully offline -- that lays out a
 force-directed graph in the browser: drag nodes, click one to
 highlight what it connects to and why (each edge shows its indicator
 code and evidence on hover or in the click detail panel), scroll to
-zoom. --cache-ttl <duration> (e.g. "24h") caches the entities resolved
+zoom. --graph-csv writes the same nodes/edges as a single denormalized
+edge-list CSV (each endpoint's label/type included directly on the
+row), readable in a spreadsheet or importable into a dedicated
+graph-analysis tool like Gephi or yEd. --graph-graphml writes the same
+nodes/edges as GraphML, a plain-XML graph interchange format those
+same tools can open directly with node/edge attributes intact (label,
+type, weight, evidence) -- more capable than the CSV for that purpose,
+at the cost of not being human-readable in a spreadsheet.
+--cache-ttl <duration> (e.g. "24h") caches the entities resolved
 per source/query/limit on disk and reuses them within that window
 instead of re-fetching -- useful when checking overlapping lists of
 names repeatedly, since this tool's own usage does that constantly.
@@ -360,6 +393,26 @@ func splitPositional(fs *flag.FlagSet, args []string) (flagArgs, positional []st
 		}
 	}
 	return flagArgs, positional
+}
+
+// readQueryTermsFile reads risk --input-file: one query term per
+// line, skipping blank lines and lines starting with # (comments),
+// for re-running a watchlist of names without retyping them as CLI
+// arguments each time.
+func readQueryTermsFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var terms []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		terms = append(terms, line)
+	}
+	return terms, nil
 }
 
 func newClientOrExit() *edgar.Client {
@@ -1082,6 +1135,16 @@ func edgarEntityFromCompany(client *edgar.Client, company edgar.Company, limit i
 	return risk.NewEntity("edgar", company.CIK, company.Name, addrs, people)
 }
 
+// mailDropAddressThreshold is how many companies register-wide must
+// share a postcode before it's flagged as a likely company-formation-
+// agent mail-drop address, not a genuine operating address. Chosen
+// from live observation: ordinary single-business UK postcodes ran
+// 5-70 companies (with one small-business address at 637, likely a
+// shared office park), while a known mail-drop address ran ~190,000 --
+// 1,000 sits comfortably above any genuine single-business address
+// observed and well below actual mail-drop scale.
+const mailDropAddressThreshold = 1000
+
 // runRisk queries every configured source for candidates matching
 // query, normalizes whatever address/officer data each source exposes
 // into risk.Entity values, and runs the structural heuristics over the
@@ -1096,16 +1159,27 @@ func runRisk(args []string) {
 	output := fs.String("output", "", "write results to this file instead of stdout")
 	graphPath := fs.String("graph", "", "additionally write a node/edge graph JSON (entities as nodes, indicators as edges) to this path")
 	htmlPath := fs.String("html", "", "additionally write a self-contained, offline-viewable HTML graph (same nodes/edges as --graph) to this path")
+	csvPath := fs.String("graph-csv", "", "additionally write the graph (same nodes/edges as --graph) as a denormalized edge-list CSV, for spreadsheets or import into Gephi/yEd")
+	graphMLPath := fs.String("graph-graphml", "", "additionally write the graph (same nodes/edges as --graph) as GraphML, for import into Gephi/yEd or other graph-analysis tools")
 	cacheTTLFlag := fs.String("cache-ttl", "", "cache entities per source/query/limit on disk for this long (e.g. 24h) and reuse them within that window instead of re-fetching; unset disables caching entirely (always live, the default)")
+	inputFile := fs.String("input-file", "", "read additional query terms from this file, one per line (blank lines and lines starting with # are ignored) -- combined with any <query> arguments given directly")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk <query> [<query> ...] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--cache-ttl <duration>] [--json]"
-	if len(positional) < 1 {
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--json]"
+	queries := positional
+	if *inputFile != "" {
+		fromFile, err := readQueryTermsFile(*inputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --input-file %q: %v\n", *inputFile, err)
+			os.Exit(1)
+		}
+		queries = append(queries, fromFile...)
+	}
+	if len(queries) < 1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
 	}
-	queries := positional
 
 	// Caching is opt-in: this tool's whole point is checking *current*
 	// public registry state, so silently reusing stale data by default
@@ -1394,6 +1468,30 @@ func runRisk(args []string) {
 				// with its own linked/subsidiary charities.
 				e.LinkedGroup = fmt.Sprintf("%d", detail.RegisteredNumber)
 				e.FormedOn = detail.RegistrationDate
+
+				// Mail-drop address density check -- confirmed live: a
+				// known company-formation-agent mail-drop address
+				// (71-75 Shelton Street, WC2H 9JQ) has ~190,000
+				// companies registered at it, versus 5-70 for ordinary
+				// single-business addresses. Unlike shared_address,
+				// this doesn't need a second entity already found at
+				// the same address -- it flags this one entity's own
+				// address in isolation, using the whole Companies
+				// House register as the comparison set.
+				if chClient != nil && detail.Postcode != "" {
+					if count, err := chClient.CountCompaniesAtLocation(detail.Postcode); err != nil {
+						note("Companies House", "%s address density check: %v", detail.Name, err)
+					} else if count >= mailDropAddressThreshold {
+						extra = append(extra, risk.Indicator{
+							Code:        "mail_drop_address",
+							Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way)",
+							Weight:      2,
+							Entities:    []string{e.Label()},
+							Evidence:    fmt.Sprintf("%d companies registered at postcode %s", count, detail.Postcode),
+						})
+					}
+				}
+
 				termEntities = append(termEntities, e)
 
 				// Officer appointment fan-out: each current officer
@@ -1758,7 +1856,7 @@ func runRisk(args []string) {
 		fmt.Printf("Wrote risk assessment (%d entities, score %d) to %s\n", len(entities), score.Total, *output)
 	}
 
-	if *graphPath != "" || *htmlPath != "" {
+	if *graphPath != "" || *htmlPath != "" || *csvPath != "" || *graphMLPath != "" {
 		g := graph.BuildFromRisk(entities, score)
 		if *graphPath != "" {
 			exitOnErr(graph.WriteJSON(g, *graphPath))
@@ -1767,6 +1865,14 @@ func runRisk(args []string) {
 		if *htmlPath != "" {
 			exitOnErr(graph.WriteHTML(g, *htmlPath))
 			fmt.Printf("Wrote HTML graph viewer (%d nodes, %d edges) to %s -- open it directly in a browser\n", len(g.Nodes), len(g.Edges), *htmlPath)
+		}
+		if *csvPath != "" {
+			exitOnErr(graph.WriteCSV(g, *csvPath))
+			fmt.Printf("Wrote graph edge-list CSV (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *csvPath)
+		}
+		if *graphMLPath != "" {
+			exitOnErr(graph.WriteGraphML(g, *graphMLPath))
+			fmt.Printf("Wrote GraphML (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphMLPath)
 		}
 	}
 }

@@ -1,0 +1,16 @@
+{
+  "hits": {
+    "total": {"value": 1, "relation": "eq"},
+    "hits": [
+      {
+        "_id": "0001931731-24-000001:primary_doc.xml",
+        "_source": {
+          "ciks": ["0001931731"],
+          "display_names": ["EXAMPLE PRIVATE FUND, LP  (CIK 0001931731)"],
+          "form": "D/A",
+          "file_date": "2024-01-04"
+        }
+      }
+    ]
+  }
+}

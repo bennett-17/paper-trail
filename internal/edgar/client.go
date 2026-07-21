@@ -215,7 +215,14 @@ func (c *Client) ResolveCIK(query string) (string, error) {
 	}
 	switch len(candidates) {
 	case 0:
-		return "", newClientError("no company found matching %q", query)
+		// The ticker map (company_tickers.json) only covers public
+		// companies with a ticker -- a private company or fund that
+		// files Form D under a Reg D exemption gets a CIK but never a
+		// ticker, so it's invisible to everything above. Confirmed
+		// live: EDGAR's full-text search does index Form D content by
+		// filer name, so that's used as a fallback here rather than
+		// failing outright.
+		return c.resolveCIKViaFormD(query)
 	case 1:
 		for _, cik := range candidates {
 			return cik, nil
@@ -231,6 +238,54 @@ func (c *Client) ResolveCIK(query string) (string, error) {
 	return "", newClientError(
 		"%q matched %d companies (e.g. %s, ...). Be more specific or use a ticker.",
 		query, len(candidates), strings.Join(names, ", "),
+	)
+}
+
+// resolveCIKViaFormD is ResolveCIK's fallback for private companies/
+// funds that have never had a ticker: it searches Form D and Form D/A
+// filings (private-placement notices filed under a Reg D exemption)
+// for the query as a filer name, rather than searching filing
+// *content* generally the way SearchFullText's own callers do.
+func (c *Client) resolveCIKViaFormD(query string) (string, error) {
+	hits, _, err := c.SearchFullText(fmt.Sprintf("%q", query), "D,D/A", "", "", "", 0, 10)
+	if err != nil {
+		return "", newClientError("no company found matching %q, and checking Form D private-placement filings also failed: %v", query, err)
+	}
+
+	seen := map[string]bool{}
+	var cikOrder []string
+	nameByCIK := map[string]string{}
+	for _, h := range hits {
+		for i, cik := range h.CIKs {
+			if seen[cik] {
+				continue
+			}
+			seen[cik] = true
+			cikOrder = append(cikOrder, cik)
+			if i < len(h.DisplayNames) {
+				nameByCIK[cik] = h.DisplayNames[i]
+			} else {
+				nameByCIK[cik] = cik
+			}
+		}
+	}
+
+	switch len(cikOrder) {
+	case 0:
+		return "", newClientError("no company found matching %q (checked both the SEC ticker/name list and Form D private-placement filings)", query)
+	case 1:
+		return cikOrder[0], nil
+	}
+	names := make([]string, 0, 5)
+	for _, cik := range cikOrder {
+		names = append(names, nameByCIK[cik])
+		if len(names) == 5 {
+			break
+		}
+	}
+	return "", newClientError(
+		"%q matched %d private Form D filer(s) (e.g. %s, ...) and no ticker/public company -- be more specific",
+		query, len(cikOrder), strings.Join(names, ", "),
 	)
 }
 
