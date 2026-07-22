@@ -315,6 +315,17 @@ And on top of all of the above, structural risk heuristics:
   resurface as "new" later) and the total score/confidence band are
   recomputed without it. Use this to permanently dismiss a lead you've
   already reviewed and cleared, across every future run.
+  `--fail-on <band>` (LOW, MEDIUM, or HIGH) makes the process exit
+  non-zero if the final confidence band reaches that level or higher
+  -- the report is still written/printed either way, only the exit
+  status changes -- so a scan can gate a CI pipeline, cron job, or
+  pre-merge check instead of requiring someone to read the output.
+  `--summary` replaces the full report with one compact line (or one
+  small object with `--json`) -- score, confidence, entity/indicator
+  counts, plus hidden/excluded counts and a short diff summary if
+  either applies -- for scripting/dashboards. Combine with `--fail-on`
+  and `--quiet` for a silent CI check that only prints one line and
+  exits non-zero on a real hit.
 
 ## Why
 
@@ -491,6 +502,10 @@ go run ./cmd/paper-trail risk "Example Name" --html risk_graph.html
 go run ./cmd/paper-trail risk "Example Name" --graph-csv risk_graph.csv
 go run ./cmd/paper-trail risk "Example Name" --graph-graphml risk_graph.graphml
 
+# Or just a flat CSV of every entity found -- not a graph/edge list at
+# all, for when you only want a spreadsheet of the results themselves
+go run ./cmd/paper-trail risk "Example Name" --entities-csv entities.csv
+
 # Cache resolved entities on disk for 24h and reuse them across repeated
 # or overlapping scans instead of re-fetching (opt-in -- every run is
 # fully live by default; sanctions/full-text checks are never cached)
@@ -512,6 +527,14 @@ go run ./cmd/paper-trail risk --input-file watchlist.txt --exclude "Example Corp
 # previously saved --output --json report
 go run ./cmd/paper-trail risk --input-file watchlist.txt --output today.json --json
 go run ./cmd/paper-trail risk --input-file watchlist.txt --diff today.json
+
+# Use as a CI/cron gate -- exits non-zero if confidence reaches HIGH,
+# so a pipeline step can alert without anyone reading the output
+go run ./cmd/paper-trail risk --input-file watchlist.txt --fail-on HIGH --quiet
+
+# Or print one compact line instead of the full report -- pairs well
+# with --fail-on for a monitoring job that only needs the headline
+go run ./cmd/paper-trail risk --input-file watchlist.txt --summary --quiet
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -633,9 +656,10 @@ applies to its output.
       the node/edge JSON for external graph tools, `risk --html`
       renders the same graph as a self-contained, interactive,
       force-directed HTML viewer (drag, click-to-highlight, zoom) with
-      no server or external dependency, and `--graph-csv`/
-      `--graph-graphml` export the same graph for Gephi/yEd or a
-      spreadsheet
+      no server or external dependency, `--graph-csv`/`--graph-graphml`
+      export the same graph for Gephi/yEd or a spreadsheet, and
+      `--entities-csv` exports a flat entity list (not a graph/edge
+      list at all) for a plain spreadsheet of what was found
 - [x] Phase 6: private-company coverage -- name resolution (`lookup`,
       `risk`) falls back to a Form D search for companies/funds that
       have a CIK but no ticker, widening coverage past public

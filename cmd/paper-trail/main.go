@@ -82,7 +82,7 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--summary] [--quiet] [--json]
   paper-trail completion bash|zsh
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
@@ -431,6 +431,12 @@ nodes/edges as GraphML, a plain-XML graph interchange format those
 same tools can open directly with node/edge attributes intact (label,
 type, weight, evidence) -- more capable than the CSV for that purpose,
 at the cost of not being human-readable in a spreadsheet.
+--entities-csv is different from all three of the above: it's a flat
+list of every entity found (source, id, name, formed-on date,
+addresses, people, phones, emails, websites, chargees, beneficial
+owners -- list fields semicolon-joined into one cell), not a graph or
+edge list at all, for someone who just wants a spreadsheet of what was
+found without touching JSON or a graph structure.
 Every source above (and, once entities are resolved, every cross-check
 against them) runs concurrently rather than one after another, since
 they're independent APIs each with their own rate limiting -- a
@@ -486,6 +492,23 @@ are recomputed without it. Use this to permanently dismiss a lead
 you've already reviewed and cleared (e.g. --exclude "Example Corp" for
 a known, legitimate shared registered-agent address), across every
 future run, not just this one.
+--fail-on <band> (LOW, MEDIUM, or HIGH) makes the process exit non-zero
+if the final confidence band (after --exclude, --top, etc. above have
+all been applied) reaches that level or higher -- so a scan can be
+dropped into a CI pipeline, cron job, or pre-merge check as a gate,
+instead of requiring someone to actually read the output every time.
+The full report is still written/printed either way; --fail-on only
+changes the exit status, e.g. "--fail-on HIGH" only fails on HIGH,
+while "--fail-on LOW" fails on any confidence level at all (LOW is the
+lowest band, so everything meets or exceeds it).
+--summary replaces the full indicator-by-indicator report with a
+single compact line (text) or a single small object (--json) --
+score, confidence, and entity/indicator counts, plus how many were
+hidden/excluded and a short --diff summary if either applies -- for
+scripting/dashboards/monitoring where the full report is too verbose.
+It's independent of --fail-on: use them together for a completely
+silent CI check (--summary --fail-on HIGH --quiet exits non-zero on a
+real hit and prints nothing at all beyond the one summary line).
 A source with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it

@@ -231,6 +231,41 @@ func parseExcludeTerms(flagValue, filePath string) ([]string, error) {
 	return terms, nil
 }
 
+// confidenceBandRank orders risk.Score's confidence bands (LOW <
+// MEDIUM < HIGH) for --fail-on comparison. Case-insensitive lookup --
+// callers normalize with strings.ToUpper first.
+var confidenceBandRank = map[string]int{
+	"LOW":    1,
+	"MEDIUM": 2,
+	"HIGH":   3,
+}
+
+// validateFailOn checks a --fail-on value up front (before any live
+// source is queried), matching the fail-fast treatment --diff and
+// --exclude-file already get for their own inputs.
+func validateFailOn(value string) error {
+	if value == "" {
+		return nil
+	}
+	if _, ok := confidenceBandRank[strings.ToUpper(value)]; !ok {
+		return fmt.Errorf("must be LOW, MEDIUM, or HIGH, got %q", value)
+	}
+	return nil
+}
+
+// shouldFailOn reports whether confidence meets or exceeds the
+// --fail-on threshold. threshold == "" (the default) never fails.
+// Assumes threshold was already validated by validateFailOn -- an
+// unrecognized confidence value (shouldn't happen; risk.Assess only
+// ever produces LOW/MEDIUM/HIGH) is treated as rank 0, i.e. never
+// triggers a failure on its own.
+func shouldFailOn(confidence, threshold string) bool {
+	if threshold == "" {
+		return false
+	}
+	return confidenceBandRank[strings.ToUpper(confidence)] >= confidenceBandRank[strings.ToUpper(threshold)]
+}
+
 // diffRiskReports compares a freshly computed report against a
 // previously saved one (see --diff).
 func diffRiskReports(previous riskReportJSON, entities []risk.Entity, score risk.Score) riskReportDiff {
@@ -293,6 +328,57 @@ func (p *progressReporter) report(source, format string, a ...any) {
 	fmt.Fprintf(p.w, "[+%5.1fs] %s: %s\n", time.Since(p.start).Seconds(), source, fmt.Sprintf(format, a...))
 }
 
+// riskSummaryJSON is --summary --json's compact alternative to the
+// full riskReportJSON -- just the headline numbers, for scripting/
+// dashboards where the full indicator-by-indicator report is too
+// verbose.
+type riskSummaryJSON struct {
+	Queries            []string        `json:"queries"`
+	Total              int             `json:"total"`
+	Confidence         string          `json:"confidence"`
+	EntityCount        int             `json:"entityCount"`
+	IndicatorCount     int             `json:"indicatorCount"`
+	HiddenIndicators   int             `json:"hiddenIndicators,omitempty"`
+	ExcludedIndicators int             `json:"excludedIndicators,omitempty"`
+	Diff               *riskReportDiff `json:"diff,omitempty"`
+}
+
+// writeSummary implements --summary: a compact one-line (text) or
+// single small object (--json) alternative to the full report.
+func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJSON bool) {
+	if asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		enc.Encode(riskSummaryJSON{
+			Queries:            report.Queries,
+			Total:              report.Score.Total,
+			Confidence:         report.Score.Confidence,
+			EntityCount:        len(report.Entities),
+			IndicatorCount:     len(report.Score.Indicators),
+			HiddenIndicators:   report.HiddenIndicators,
+			ExcludedIndicators: report.ExcludedIndicators,
+			Diff:               diff,
+		})
+		return
+	}
+
+	line := fmt.Sprintf("Score: %d (%s) -- %d indicator(s), %d entit(ies)", report.Score.Total, report.Score.Confidence, len(report.Score.Indicators), len(report.Entities))
+	var extras []string
+	if report.HiddenIndicators > 0 {
+		extras = append(extras, fmt.Sprintf("%d hidden", report.HiddenIndicators))
+	}
+	if report.ExcludedIndicators > 0 {
+		extras = append(extras, fmt.Sprintf("%d excluded", report.ExcludedIndicators))
+	}
+	if diff != nil {
+		extras = append(extras, fmt.Sprintf("vs baseline: %d->%d, %d new indicator(s)", diff.ScoreBefore, diff.ScoreAfter, len(diff.NewIndicators)))
+	}
+	if len(extras) > 0 {
+		line += " (" + strings.Join(extras, "; ") + ")"
+	}
+	fmt.Fprintln(w, line)
+}
+
 // runRisk queries every configured source for candidates matching
 // query, normalizes whatever address/officer data each source exposes
 // into risk.Entity values, and runs the structural heuristics over the
@@ -308,6 +394,7 @@ func runRisk(args []string) {
 	graphPath := fs.String("graph", "", "additionally write a node/edge graph JSON (entities as nodes, indicators as edges) to this path")
 	htmlPath := fs.String("html", "", "additionally write a self-contained, offline-viewable HTML graph (same nodes/edges as --graph) to this path")
 	csvPath := fs.String("graph-csv", "", "additionally write the graph (same nodes/edges as --graph) as a denormalized edge-list CSV, for spreadsheets or import into Gephi/yEd")
+	entitiesCSVPath := fs.String("entities-csv", "", "additionally write a flat CSV of every entity found (source, id, name, addresses, people, phones, emails, websites, chargees, beneficial owners) to this path -- unlike --graph-csv, this is the entity list itself, not the indicator relationships between them")
 	graphMLPath := fs.String("graph-graphml", "", "additionally write the graph (same nodes/edges as --graph) as GraphML, for import into Gephi/yEd or other graph-analysis tools")
 	cacheTTLFlag := fs.String("cache-ttl", "", "cache entities per source/query/limit on disk for this long (e.g. 24h) and reuse them within that window instead of re-fetching; unset disables caching entirely (always live, the default)")
 	inputFile := fs.String("input-file", "", "read additional query terms from this file, one per line (blank lines and lines starting with # are ignored) -- combined with any <query> arguments given directly; pass - to read from stdin instead of a file")
@@ -318,10 +405,12 @@ func runRisk(args []string) {
 	indicatorFilter := fs.String("indicator", "", "show only indicators matching these comma-separated codes, e.g. disqualified_director,sanctions_match (empty shows all, the default) -- Total still reflects every indicator found")
 	excludeFlag := fs.String("exclude", "", "comma-separated terms -- any indicator whose evidence or entity labels contain one of these (case-insensitive) is permanently removed from the report, including Total/Confidence, not just hidden from display -- for dismissing leads you've already reviewed and cleared")
 	excludeFile := fs.String("exclude-file", "", "read additional --exclude terms from this file too, one per line (blank lines and lines starting with # are ignored)")
+	failOn := fs.String("fail-on", "", "exit with a non-zero status if the final confidence band reaches this level or higher (LOW, MEDIUM, or HIGH) -- lets a scan act as a gate in CI/cron/pre-merge automation instead of requiring someone to read the output")
+	summary := fs.Bool("summary", false, "print (or, with --json, encode) a compact one-line/one-object summary -- score, confidence, and entity/indicator counts -- instead of the full report, for scripting/dashboards/monitoring where the full indicator-by-indicator report is too verbose")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -357,6 +446,11 @@ func runRisk(args []string) {
 	excludeTerms, err := parseExcludeTerms(*excludeFlag, *excludeFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: --exclude-file %q: %v\n", *excludeFile, err)
+		os.Exit(1)
+	}
+
+	if err := validateFailOn(*failOn); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --fail-on %v\n", err)
 		os.Exit(1)
 	}
 
@@ -555,7 +649,9 @@ func runRisk(args []string) {
 		w = f
 	}
 
-	if *asJSON {
+	if *summary {
+		writeSummary(w, report, diff, *asJSON)
+	} else if *asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		if diff != nil {
@@ -639,6 +735,11 @@ func runRisk(args []string) {
 		fmt.Printf("Wrote risk assessment (%d entities, score %d) to %s\n", len(entities), score.Total, *output)
 	}
 
+	if *entitiesCSVPath != "" {
+		exitOnErr(risk.WriteEntitiesCSV(entities, *entitiesCSVPath))
+		fmt.Printf("Wrote entity list CSV (%d entities) to %s\n", len(entities), *entitiesCSVPath)
+	}
+
 	if *graphPath != "" || *htmlPath != "" || *csvPath != "" || *graphMLPath != "" {
 		g := graph.BuildFromRisk(entities, score)
 		if *graphPath != "" {
@@ -657,6 +758,14 @@ func runRisk(args []string) {
 			exitOnErr(graph.WriteGraphML(g, *graphMLPath))
 			fmt.Printf("Wrote GraphML (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphMLPath)
 		}
+	}
+
+	// Checked last, after every output/graph file has already been
+	// written -- --fail-on signals failure via exit status, it doesn't
+	// suppress the report itself, so a CI system that captures the
+	// output artifact on failure still gets one.
+	if shouldFailOn(score.Confidence, *failOn) {
+		os.Exit(1)
 	}
 }
 

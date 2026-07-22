@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,6 +251,47 @@ func TestParseExcludeTermsMissingFileReturnsError(t *testing.T) {
 	}
 }
 
+func TestValidateFailOnAcceptsKnownBandsCaseInsensitively(t *testing.T) {
+	for _, v := range []string{"LOW", "low", "Medium", "HIGH", ""} {
+		if err := validateFailOn(v); err != nil {
+			t.Errorf("validateFailOn(%q) = %v, want nil", v, err)
+		}
+	}
+}
+
+func TestValidateFailOnRejectsUnknownValue(t *testing.T) {
+	if err := validateFailOn("SEVERE"); err == nil {
+		t.Error("expected an error for an unrecognized --fail-on value")
+	}
+}
+
+func TestShouldFailOnEmptyThresholdNeverFails(t *testing.T) {
+	for _, c := range []string{"LOW", "MEDIUM", "HIGH"} {
+		if shouldFailOn(c, "") {
+			t.Errorf("shouldFailOn(%q, \"\") = true, want false (no threshold set)", c)
+		}
+	}
+}
+
+func TestShouldFailOnComparesRankNotExactMatch(t *testing.T) {
+	cases := []struct {
+		confidence, threshold string
+		want                  bool
+	}{
+		{"HIGH", "MEDIUM", true},  // exceeds threshold
+		{"HIGH", "HIGH", true},    // meets threshold exactly
+		{"MEDIUM", "HIGH", false}, // below threshold
+		{"LOW", "LOW", true},      // meets lowest threshold exactly
+		{"medium", "LOW", true},   // case-insensitive
+	}
+	for _, c := range cases {
+		got := shouldFailOn(c.confidence, c.threshold)
+		if got != c.want {
+			t.Errorf("shouldFailOn(%q, %q) = %v, want %v", c.confidence, c.threshold, got, c.want)
+		}
+	}
+}
+
 func TestIndicatorIdentityDistinguishesDifferentEvidenceOnSameCode(t *testing.T) {
 	a := risk.Indicator{Code: "shared_address", Entities: []string{"edgar: Example Corp (1)", "ukcharity: Example Trust (2)"}, Evidence: "123 Main St"}
 	b := risk.Indicator{Code: "shared_address", Entities: []string{"edgar: Example Corp (1)", "ukcharity: Example Trust (2)"}, Evidence: "456 Other Ave"}
@@ -346,4 +388,64 @@ func TestProgressReporterWritesToItsWriter(t *testing.T) {
 func TestNilProgressReporterIsANoOp(t *testing.T) {
 	var p *progressReporter
 	p.report("source", "message") // must not panic
+}
+
+func TestWriteSummaryTextMode(t *testing.T) {
+	report := riskReportJSON{
+		Queries:  []string{"Example Corp"},
+		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
+		Score: risk.Score{
+			Total:      8,
+			Confidence: "HIGH",
+			Indicators: []risk.Indicator{{Code: "a"}, {Code: "b"}, {Code: "c"}},
+		},
+	}
+	var buf bytes.Buffer
+	writeSummary(&buf, report, nil, false)
+	out := buf.String()
+	if !strings.Contains(out, "Score: 8 (HIGH)") {
+		t.Errorf("output %q doesn't contain the score/confidence", out)
+	}
+	if !strings.Contains(out, "3 indicator(s)") || !strings.Contains(out, "1 entit(ies)") {
+		t.Errorf("output %q doesn't contain the indicator/entity counts", out)
+	}
+}
+
+func TestWriteSummaryTextModeIncludesHiddenExcludedAndDiff(t *testing.T) {
+	report := riskReportJSON{
+		Score:              risk.Score{Total: 3, Confidence: "LOW"},
+		HiddenIndicators:   2,
+		ExcludedIndicators: 1,
+	}
+	diff := &riskReportDiff{ScoreBefore: 1, ScoreAfter: 3, NewIndicators: []risk.Indicator{{Code: "a"}}}
+	var buf bytes.Buffer
+	writeSummary(&buf, report, diff, false)
+	out := buf.String()
+	if !strings.Contains(out, "2 hidden") {
+		t.Errorf("output %q doesn't mention hidden count", out)
+	}
+	if !strings.Contains(out, "1 excluded") {
+		t.Errorf("output %q doesn't mention excluded count", out)
+	}
+	if !strings.Contains(out, "vs baseline: 1->3, 1 new indicator(s)") {
+		t.Errorf("output %q doesn't mention the diff", out)
+	}
+}
+
+func TestWriteSummaryJSONMode(t *testing.T) {
+	report := riskReportJSON{
+		Queries:  []string{"Example Corp"},
+		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
+		Score:    risk.Score{Total: 8, Confidence: "HIGH", Indicators: []risk.Indicator{{Code: "a"}}},
+	}
+	var buf bytes.Buffer
+	writeSummary(&buf, report, nil, true)
+
+	var got riskSummaryJSON
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshaling output: %v", err)
+	}
+	if got.Total != 8 || got.Confidence != "HIGH" || got.EntityCount != 1 || got.IndicatorCount != 1 {
+		t.Errorf("got %+v, want Total=8 Confidence=HIGH EntityCount=1 IndicatorCount=1", got)
+	}
 }
