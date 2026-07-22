@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -430,6 +431,16 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SharedBeneficialOwners(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
+
+	// Sorted most-significant-first (stable, so indicators of equal
+	// weight keep the order they were computed in above) -- otherwise
+	// a high-weight indicator like disqualified_director (6) could
+	// print below a dozen weight-1 formation_cluster hits, buried
+	// exactly the way Corroborations (already sorted this way) exists
+	// to avoid for corroborated pairs specifically.
+	sort.SliceStable(indicators, func(i, j int) bool {
+		return indicators[i].Weight > indicators[j].Weight
+	})
 
 	total := 0
 	for _, ind := range indicators {

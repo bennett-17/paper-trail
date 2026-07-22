@@ -245,7 +245,9 @@ And on top of all of the above, structural risk heuristics:
   each run only compares within its own results. Every point in the
   resulting score is a plain sum of named, evidence-linked indicators --
   never a bare number, and never a claim about money laundering, tax
-  evasion, or terrorism financing specifically. A separate
+  evasion, or terrorism financing specifically -- sorted highest-weight
+  first so the most significant findings lead the report instead of
+  being buried in a long flat list. A separate
   "Corroborated pairs" section calls out any two entities connected by
   two or more *different kinds* of indicator (a shared address alone
   is common and often innocuous; the same two entities also sharing an
@@ -265,7 +267,12 @@ And on top of all of the above, structural risk heuristics:
   against a previously saved `--output --json` report and shows only
   what's new -- entities, indicators, and the score change -- for
   re-checking the same watchlist over time without manually spotting
-  what changed in a wall of repeated output.
+  what changed in a wall of repeated output. `--top <n>` shows only the
+  `<n>` highest-weight indicators, noting how many were hidden -- the
+  total score and confidence band still reflect every indicator found,
+  and `--diff` still compares against the full set regardless of
+  `--top`, so truncation never hides a genuinely new indicator from a
+  diff.
 
 ## Why
 
@@ -465,10 +472,24 @@ go build -o paper-trail ./cmd/paper-trail
 Every command supports `--json` to print machine-readable output instead
 of the formatted console view.
 
+### Shell completion
+
+`paper-trail completion bash|zsh` prints a completion script for
+subcommands and their flags to stdout:
+
+```bash
+# bash -- add to ~/.bashrc, or drop into a directory your
+# bash-completion setup sources (e.g. /etc/bash_completion.d/)
+source <(paper-trail completion bash)
+
+# zsh -- add to ~/.zshrc, or save as _paper-trail somewhere on $fpath
+source <(paper-trail completion zsh)
+```
+
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, risk, completion subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY

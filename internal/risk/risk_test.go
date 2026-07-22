@@ -223,6 +223,39 @@ func TestSharedBeneficialOwnersFlagsSameFiler(t *testing.T) {
 	}
 }
 
+// TestAssessSortsIndicatorsByWeightDescending guards a real gap found
+// live: without this, a high-weight indicator (e.g. a sanctions match
+// or disqualified-director hit) could print anywhere in a long report,
+// including below a dozen weight-1 hits, exactly the kind of "easy to
+// miss" problem Corroborations already avoids for corroborated pairs.
+func TestAssessSortsIndicatorsByWeightDescending(t *testing.T) {
+	entities := []Entity{
+		NewEntity("edgar", "1", "Example Corp", []string{"123 Main St"}, []string{"Jane Example"}),
+		NewEntity("ukcharity", "283127", "Example Trust", []string{"123 Main St"}, []string{"Jane Example"}),
+	}
+	// shared_address (2) and shared_person (3) fire from the entities
+	// above; extra adds a lower-weight and a higher-weight indicator on
+	// either side of them, so a correctly sorted result isn't just
+	// "whatever order Assess happened to compute things in".
+	extra := []Indicator{
+		{Code: "filing_mention", Weight: 1, Entities: []string{"search query: \"Example\""}, Evidence: "low weight"},
+		{Code: "disqualified_director", Weight: 6, Entities: []string{"edgar: Example Corp (1)"}, Evidence: "high weight"},
+	}
+
+	score := Assess(entities, extra)
+	if len(score.Indicators) < 4 {
+		t.Fatalf("got %d indicators, want at least 4: %+v", len(score.Indicators), score.Indicators)
+	}
+	for i := 1; i < len(score.Indicators); i++ {
+		if score.Indicators[i-1].Weight < score.Indicators[i].Weight {
+			t.Fatalf("Indicators not sorted by weight descending at index %d: %+v", i, score.Indicators)
+		}
+	}
+	if score.Indicators[0].Code != "disqualified_director" {
+		t.Errorf("Indicators[0].Code = %q, want disqualified_director (the highest-weight indicator present)", score.Indicators[0].Code)
+	}
+}
+
 func TestAssessSumsWeightsAcrossAllIndicators(t *testing.T) {
 	entities := []Entity{
 		NewEntity("edgar", "1", "Example Corp", []string{"123 Main St"}, []string{"Jane Example"}),
