@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -438,7 +439,7 @@ func TestWriteSummaryTextMode(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	writeSummary(&buf, report, nil, false)
+	writeSummary(&buf, report, nil, false, false)
 	out := buf.String()
 	if !strings.Contains(out, "Score: 8 (HIGH -- disqualified_director indicator at weight 6)") {
 		t.Errorf("output %q doesn't contain the score/confidence/reason", out)
@@ -456,7 +457,7 @@ func TestWriteSummaryTextModeIncludesHiddenExcludedAndDiff(t *testing.T) {
 	}
 	diff := &riskReportDiff{ScoreBefore: 1, ScoreAfter: 3, NewIndicators: []risk.Indicator{{Code: "a"}}}
 	var buf bytes.Buffer
-	writeSummary(&buf, report, diff, false)
+	writeSummary(&buf, report, diff, false, false)
 	out := buf.String()
 	if !strings.Contains(out, "2 hidden") {
 		t.Errorf("output %q doesn't mention hidden count", out)
@@ -476,7 +477,7 @@ func TestWriteSummaryJSONMode(t *testing.T) {
 		Score:    risk.Score{Total: 8, Confidence: "HIGH", ConfidenceReason: "sanctions_match indicator at weight 5", Indicators: []risk.Indicator{{Code: "a"}}},
 	}
 	var buf bytes.Buffer
-	writeSummary(&buf, report, nil, true)
+	writeSummary(&buf, report, nil, true, false)
 
 	var got riskSummaryJSON
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
@@ -589,5 +590,209 @@ func TestSendWebhookAlertNonOKStatusIsAnError(t *testing.T) {
 
 	if err := sendWebhookAlert(srv.URL+"/", riskSummaryJSON{}); err == nil {
 		t.Fatal("expected an error for a non-2xx webhook response")
+	}
+}
+
+// TestColorDisabledByFlagOrEnvExplicitFlag guards --no-color as an
+// unconditional override, independent of the NO_COLOR env var or
+// whether the output would otherwise look like a terminal (that half
+// is colorEnabled's job, tested separately below).
+func TestColorDisabledByFlagOrEnvExplicitFlag(t *testing.T) {
+	if !colorDisabledByFlagOrEnv(true) {
+		t.Error("colorDisabledByFlagOrEnv(true) = false, want true")
+	}
+}
+
+// TestColorDisabledByFlagOrEnvNoColorVar guards the NO_COLOR
+// convention (https://no-color.org): any non-empty value disables
+// color regardless of its content.
+func TestColorDisabledByFlagOrEnvNoColorVar(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	if !colorDisabledByFlagOrEnv(false) {
+		t.Error("colorDisabledByFlagOrEnv(false) with NO_COLOR set = false, want true")
+	}
+}
+
+func TestColorDisabledByFlagOrEnvNeitherSet(t *testing.T) {
+	t.Setenv("NO_COLOR", "") // ensure a clean slate regardless of the outer environment
+	os.Unsetenv("NO_COLOR")
+	if colorDisabledByFlagOrEnv(false) {
+		t.Error("colorDisabledByFlagOrEnv(false) with nothing set = true, want false")
+	}
+}
+
+// TestColorEnabledDisabledForNonTerminalWriter guards the common real
+// case: writing to a plain file (e.g. --output, or stdout redirected
+// to a file/pipe in a script) should never emit escape codes, since
+// they're noise there, not information.
+func TestColorEnabledDisabledForNonTerminalWriter(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "not-a-terminal")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer f.Close()
+
+	if colorEnabled(f, false) {
+		t.Error("colorEnabled for a plain file = true, want false")
+	}
+}
+
+// TestColorEnabledDisabledForNonFileWriter guards a non-*os.File
+// io.Writer (e.g. a bytes.Buffer, which is what most of this file's
+// other tests use) -- there's no terminal to check, so this must
+// default to disabled, not panic on the failed type assertion.
+func TestColorEnabledDisabledForNonFileWriter(t *testing.T) {
+	var buf bytes.Buffer
+	if colorEnabled(&buf, false) {
+		t.Error("colorEnabled for a bytes.Buffer = true, want false")
+	}
+}
+
+func TestColorizeWrapsOnlyWhenEnabled(t *testing.T) {
+	if got := colorize("HIGH", ansiRed, false); got != "HIGH" {
+		t.Errorf("colorize with enabled=false = %q, want unchanged", got)
+	}
+	got := colorize("HIGH", ansiRed, true)
+	want := ansiRed + "HIGH" + ansiReset
+	if got != want {
+		t.Errorf("colorize with enabled=true = %q, want %q", got, want)
+	}
+}
+
+func TestConfidenceColorMapsAllThreeBands(t *testing.T) {
+	cases := map[string]string{"HIGH": ansiRed, "MEDIUM": ansiYellow, "LOW": ansiGreen}
+	for band, want := range cases {
+		if got := confidenceColor(band); got != want {
+			t.Errorf("confidenceColor(%q) = %q, want %q", band, got, want)
+		}
+	}
+}
+
+func TestWeightColorMatchesConfidenceBandThresholds(t *testing.T) {
+	// Same thresholds internal/risk's own confidenceBand uses (5+
+	// high, 3+ moderate) -- an indicator's color should match the
+	// same scale that produced the confidence band shown above it.
+	cases := []struct {
+		weight int
+		want   string
+	}{
+		{6, ansiRed}, {5, ansiRed}, {4, ansiYellow}, {3, ansiYellow}, {2, ansiGreen}, {1, ansiGreen},
+	}
+	for _, c := range cases {
+		if got := weightColor(c.weight); got != c.want {
+			t.Errorf("weightColor(%d) = %q, want %q", c.weight, got, c.want)
+		}
+	}
+}
+
+func TestParseConfigFileLinesSkipsBlankLinesAndComments(t *testing.T) {
+	content := "limit = 10\n\n# a comment\ncache-ttl = 24h\n#another comment\nquiet = true\n"
+	values, warnings := parseConfigFileLines(content)
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none", warnings)
+	}
+	want := map[string]string{"limit": "10", "cache-ttl": "24h", "quiet": "true"}
+	if len(values) != len(want) {
+		t.Fatalf("got %v, want %v", values, want)
+	}
+	for k, v := range want {
+		if values[k] != v {
+			t.Errorf("values[%q] = %q, want %q", k, values[k], v)
+		}
+	}
+}
+
+func TestParseConfigFileLinesTrimsWhitespaceAroundKeyAndValue(t *testing.T) {
+	values, _ := parseConfigFileLines("  limit   =   10  \n")
+	if values["limit"] != "10" {
+		t.Errorf("values[limit] = %q, want 10", values["limit"])
+	}
+}
+
+func TestParseConfigFileLinesWarnsOnMalformedLine(t *testing.T) {
+	values, warnings := parseConfigFileLines("limit 10\n")
+	if len(values) != 0 {
+		t.Errorf("values = %v, want none parsed from a line with no '='", values)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly 1", warnings)
+	}
+}
+
+func TestApplyConfigFileDefaultsMissingFileIsNotAnError(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.Int("limit", 5, "")
+	warnings := applyConfigFileDefaults(fs, map[string]bool{}, filepath.Join(t.TempDir(), "does-not-exist"))
+	if warnings != nil {
+		t.Errorf("warnings = %v, want nil for a missing config file", warnings)
+	}
+}
+
+func TestApplyConfigFileDefaultsSetsUnsetFlags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".paper-trailrc")
+	if err := os.WriteFile(path, []byte("limit = 10\nquiet = true\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	limit := fs.Int("limit", 5, "")
+	quiet := fs.Bool("quiet", false, "")
+
+	warnings := applyConfigFileDefaults(fs, map[string]bool{}, path)
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none", warnings)
+	}
+	if *limit != 10 {
+		t.Errorf("limit = %d, want 10 (from the config file)", *limit)
+	}
+	if !*quiet {
+		t.Error("quiet = false, want true (from the config file)")
+	}
+}
+
+// TestApplyConfigFileDefaultsExplicitFlagWins guards the core
+// precedence rule: a flag actually passed on the command line must
+// never be overridden by the config file.
+func TestApplyConfigFileDefaultsExplicitFlagWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".paper-trailrc")
+	if err := os.WriteFile(path, []byte("limit = 10\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	limit := fs.Int("limit", 5, "")
+	fs.Parse([]string{"-limit=99"}) // simulates the user explicitly passing --limit 99
+
+	explicitlySet := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicitlySet[f.Name] = true })
+	applyConfigFileDefaults(fs, explicitlySet, path)
+
+	if *limit != 99 {
+		t.Errorf("limit = %d, want 99 (the explicit CLI value, not the config file's 10)", *limit)
+	}
+}
+
+func TestApplyConfigFileDefaultsWarnsOnUnrecognizedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".paper-trailrc")
+	if err := os.WriteFile(path, []byte("not-a-real-flag = 10\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+
+	warnings := applyConfigFileDefaults(fs, map[string]bool{}, path)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "not-a-real-flag") {
+		t.Errorf("warnings = %v, want exactly 1 mentioning the unrecognized key", warnings)
+	}
+}
+
+func TestApplyConfigFileDefaultsWarnsOnBadValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".paper-trailrc")
+	if err := os.WriteFile(path, []byte("limit = not-a-number\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.Int("limit", 5, "")
+
+	warnings := applyConfigFileDefaults(fs, map[string]bool{}, path)
+	if len(warnings) != 1 {
+		t.Errorf("warnings = %v, want exactly 1 for a value the int flag rejects", warnings)
 	}
 }

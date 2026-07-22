@@ -340,6 +340,19 @@ And on top of all of the above, structural risk heuristics:
   platform's current docs); any other URL gets the full compact
   summary as the POST body. A failed send is a warning, not a change
   to the exit status -- `--fail-on` already communicates that.
+  The text report (not `--json`) colors the confidence band and each
+  indicator's weight (red 5+, yellow 3-4, green below), auto-disabled
+  when the `NO_COLOR` env var is set or output isn't an interactive
+  terminal (redirected to a file, piped, or a real file via `--output`)
+  -- `--no-color` disables it unconditionally too.
+
+`~/.paper-trailrc` sets defaults for any `risk` flag above without
+retyping them every run: one `flag-name = value` pair per line (blank
+lines and `#`-prefixed comments ignored, same format as
+`--input-file`), e.g. `limit = 10` or `quiet = true`. A flag actually
+passed on the command line always overrides the config file; an
+unrecognized flag or a rejected value is a warning, not a fatal error,
+and the file itself is entirely optional.
 
 ## Why
 
@@ -554,6 +567,13 @@ go run ./cmd/paper-trail risk --input-file watchlist.txt --summary --quiet
 # own message format automatically, or a plain JSON summary to any
 # other URL for a custom integration to parse
 go run ./cmd/paper-trail risk --input-file watchlist.txt --fail-on HIGH --webhook https://hooks.slack.com/services/... --quiet
+
+# Set defaults for flags you always use -- explicit CLI flags still override
+cat > ~/.paper-trailrc <<'RCEOF'
+limit = 10
+cache-ttl = 24h
+RCEOF
+go run ./cmd/paper-trail risk "Example Name"
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -573,6 +593,11 @@ of the formatted console view.
 `paper-trail version` (also `-v`/`--version`) prints the module version
 and VCS commit, derived automatically from Go's own build info -- no
 separate version-injection build step to remember.
+
+Pushing a `v*` tag (e.g. `v0.1.0`) triggers `.github/workflows/release.yml`,
+which cross-compiles binaries for linux/darwin/windows (amd64 and arm64,
+except windows/amd64 only) and attaches them to a GitHub Release for that
+tag -- no separate build tooling, just `go build` with `GOOS`/`GOARCH` set.
 
 ### Shell completion
 
@@ -639,6 +664,16 @@ hit SEC's rate limits. `.github/workflows/ci.yml` runs `gofmt -l`, `go vet`,
 `-race` matters here specifically: `risk` runs several sources and, within
 each source, several query terms concurrently, and the race detector has
 already caught one real bug in that concurrency (see git history).
+
+`internal/risk` also has Go's native fuzz tests (`go test -fuzz`, stdlib
+since 1.18) for the text-normalization functions that handle real, messy
+data from live third-party registers -- entity names/addresses aren't
+input this program controls. CI runs each for a short, fixed duration on
+every push as a regression smoke test; run one for longer yourself with:
+
+```bash
+go test ./internal/risk/... -run=^$ -fuzz=FuzzFoldDiacritics -fuzztime=60s
+```
 
 `cmd/smoketest` is a separate, manually-run tool for validating against
 the *live* API once you have a working `EDGAR_USER_AGENT` set:

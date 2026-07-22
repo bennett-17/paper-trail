@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -377,7 +378,7 @@ type riskSummaryJSON struct {
 
 // writeSummary implements --summary: a compact one-line (text) or
 // single small object (--json) alternative to the full report.
-func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJSON bool) {
+func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJSON, colorOn bool) {
 	if asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -395,7 +396,8 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 		return
 	}
 
-	line := fmt.Sprintf("Score: %d (%s -- %s) -- %d indicator(s), %d entit(ies)", report.Score.Total, report.Score.Confidence, report.Score.ConfidenceReason, len(report.Score.Indicators), len(report.Entities))
+	coloredConfidence := colorize(report.Score.Confidence, confidenceColor(report.Score.Confidence), colorOn)
+	line := fmt.Sprintf("Score: %d (%s -- %s) -- %d indicator(s), %d entit(ies)", report.Score.Total, coloredConfidence, report.Score.ConfidenceReason, len(report.Score.Indicators), len(report.Entities))
 	var extras []string
 	if report.HiddenIndicators > 0 {
 		extras = append(extras, fmt.Sprintf("%d hidden", report.HiddenIndicators))
@@ -480,6 +482,145 @@ func sendWebhookAlert(url string, summary riskSummaryJSON) error {
 	return nil
 }
 
+const (
+	ansiRed    = "\x1b[31m"
+	ansiYellow = "\x1b[33m"
+	ansiGreen  = "\x1b[32m"
+	ansiReset  = "\x1b[0m"
+)
+
+// colorDisabledByFlagOrEnv reports whether --no-color or the NO_COLOR
+// env var (https://no-color.org -- any non-empty value disables,
+// regardless of its content) rules out color, independent of whether
+// the output is actually a terminal. Split out from colorEnabled below
+// so this half is unit-testable without needing a real terminal to
+// exercise the flag/env-var logic specifically.
+func colorDisabledByFlagOrEnv(noColorFlag bool) bool {
+	return noColorFlag || os.Getenv("NO_COLOR") != ""
+}
+
+// colorEnabled decides whether the text report should emit ANSI color:
+// disabled by an explicit --no-color, by the NO_COLOR env var, or when
+// w isn't an interactive terminal (redirected to a file, piped to
+// another program, or a real file opened via --output) -- escape
+// codes in a file or another program's input are noise, not
+// information, the same reasoning --quiet already applies to progress
+// output.
+func colorEnabled(w io.Writer, noColorFlag bool) bool {
+	if colorDisabledByFlagOrEnv(noColorFlag) {
+		return false
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// colorize wraps s in ansiCode/ansiReset when enabled is true,
+// otherwise returns s unchanged.
+func colorize(s, ansiCode string, enabled bool) string {
+	if !enabled {
+		return s
+	}
+	return ansiCode + s + ansiReset
+}
+
+// confidenceColor maps a confidence band to the same red/yellow/green
+// scale a reader would expect from any traffic-light-style status.
+func confidenceColor(band string) string {
+	switch band {
+	case "HIGH":
+		return ansiRed
+	case "MEDIUM":
+		return ansiYellow
+	default:
+		return ansiGreen
+	}
+}
+
+// weightColor uses the same weight thresholds internal/risk's own
+// confidenceBand does (5+ high, 3+ moderate), so an indicator's color
+// in the report matches the same scale that produced the confidence
+// band above it.
+func weightColor(weight int) string {
+	switch {
+	case weight >= 5:
+		return ansiRed
+	case weight >= 3:
+		return ansiYellow
+	default:
+		return ansiGreen
+	}
+}
+
+// configFilePath returns the default config file location
+// (~/.paper-trailrc), or an error if the home directory can't be
+// determined.
+func configFilePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".paper-trailrc"), nil
+}
+
+// parseConfigFileLines parses "key = value" pairs out of a config
+// file's contents, one per line (blank lines and #-prefixed comments
+// ignored, same format as --input-file/--exclude-file). Returns the
+// parsed pairs plus a warning for each malformed line (missing "="),
+// rather than failing the whole file over one bad line.
+func parseConfigFileLines(data string) (values map[string]string, warnings []string) {
+	values = map[string]string{}
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("ignoring malformed line %q (want key = value)", line))
+			continue
+		}
+		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return values, warnings
+}
+
+// applyConfigFileDefaults reads path (a missing file is not an error --
+// a config file is optional) and, for every "key = value" pair found,
+// sets that flag in fs to value UNLESS the user explicitly passed that
+// flag on the command line (explicitlySet) -- an explicit CLI flag
+// always wins over the config file. Returns warnings for a malformed
+// line, a key that doesn't name a real flag, or a value the flag
+// itself rejects; the caller decides how to report them, rather than
+// any of this being treated as fatal.
+func applyConfigFileDefaults(fs *flag.FlagSet, explicitlySet map[string]bool, path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	values, warnings := parseConfigFileLines(string(data))
+	for key, value := range values {
+		if explicitlySet[key] {
+			continue
+		}
+		f := fs.Lookup(key)
+		if f == nil {
+			warnings = append(warnings, fmt.Sprintf("%q is not a recognized flag, ignoring", key))
+			continue
+		}
+		if err := fs.Set(key, value); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%q: %v", key, err))
+		}
+	}
+	return warnings
+}
+
 // runRisk queries every configured source for candidates matching
 // query, normalizes whatever address/officer data each source exposes
 // into risk.Entity values, and runs the structural heuristics over the
@@ -501,6 +642,7 @@ func runRisk(args []string) {
 	inputFile := fs.String("input-file", "", "read additional query terms from this file, one per line (blank lines and lines starting with # are ignored) -- combined with any <query> arguments given directly; pass - to read from stdin instead of a file")
 	diffPath := fs.String("diff", "", "compare this run against a previously saved --output --json report, showing newly appeared entities/indicators and the score change")
 	quiet := fs.Bool("quiet", false, "suppress progress output (written to stderr as the scan runs; never affects --json or --output)")
+	noColor := fs.Bool("no-color", false, "disable ANSI color in the text report, even on a terminal -- color is already auto-disabled when the NO_COLOR env var is set or output isn't a terminal (redirected to a file or another program)")
 	top := fs.Int("top", 0, "show only the N highest-weight indicators (0 shows all, the default) -- Total still reflects every indicator found; only which ones are listed is limited, for a large scan's report to lead with what matters most without scrolling a long flat list")
 	minWeight := fs.Int("min-weight", 0, "show only indicators with weight >= this (0 shows all, the default) -- Total still reflects every indicator found")
 	indicatorFilter := fs.String("indicator", "", "show only indicators matching these comma-separated codes, e.g. disqualified_director,sanctions_match (empty shows all, the default) -- Total still reflects every indicator found")
@@ -513,7 +655,19 @@ func runRisk(args []string) {
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--quiet] [--json]"
+	// Config file defaults apply only to flags the user didn't
+	// explicitly pass -- fs.Visit (unlike fs.VisitAll) only calls back
+	// for flags actually set on the command line, so this has to run
+	// after Parse above, not before.
+	explicitlySet := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicitlySet[f.Name] = true })
+	if path, err := configFilePath(); err == nil {
+		for _, w := range applyConfigFileDefaults(fs, explicitlySet, path) {
+			fmt.Fprintf(os.Stderr, "Warning: %s: %s\n", path, w)
+		}
+	}
+
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -758,7 +912,7 @@ func runRisk(args []string) {
 	}
 
 	if *summary {
-		writeSummary(w, report, diff, *asJSON)
+		writeSummary(w, report, diff, *asJSON, colorEnabled(w, *noColor))
 	} else if *asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -790,12 +944,15 @@ func runRisk(args []string) {
 		if excludedCount > 0 {
 			fmt.Fprintf(w, "\n%d indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.\n", excludedCount)
 		}
-		fmt.Fprintf(w, "\nRisk score: %d (confidence: %s -- %s)\n\n", score.Total, score.Confidence, score.ConfidenceReason)
+		colorOn := colorEnabled(w, *noColor)
+		coloredConfidence := colorize(score.Confidence, confidenceColor(score.Confidence), colorOn)
+		fmt.Fprintf(w, "\nRisk score: %d (confidence: %s -- %s)\n\n", score.Total, coloredConfidence, score.ConfidenceReason)
 		if len(score.Indicators) == 0 {
 			fmt.Fprintln(w, "No structural indicators found among the entities located.")
 		}
 		for _, ind := range score.Indicators {
-			fmt.Fprintf(w, "+%d  %s\n", ind.Weight, ind.Description)
+			weightStr := colorize(fmt.Sprintf("+%d", ind.Weight), weightColor(ind.Weight), colorOn)
+			fmt.Fprintf(w, "%s  %s\n", weightStr, ind.Description)
 			fmt.Fprintf(w, "     Entities: %s\n", strings.Join(ind.Entities, "; "))
 			fmt.Fprintf(w, "     Evidence: %s\n\n", ind.Evidence)
 		}

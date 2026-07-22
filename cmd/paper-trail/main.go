@@ -85,7 +85,7 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
 
@@ -533,6 +533,23 @@ URL gets the full compact summary (the same shape --summary --json
 prints) as the POST body, for a custom integration to parse. A failed
 send is reported as a warning but never changes the exit status --
 --fail-on's own exit code already communicates the failure state.
+The text report (not --json) colors the confidence band and each
+indicator's weight (red 5+, yellow 3-4, green below -- the same scale
+confidenceBand itself uses), auto-disabled when the NO_COLOR env var
+is set (https://no-color.org) or output isn't an interactive terminal
+(redirected to a file, piped to another program, or a real file via
+--output) -- escape codes in a file or another program's input are
+noise, not information. --no-color disables it unconditionally too.
+
+~/.paper-trailrc sets defaults for any risk flag above without
+retyping them every run: one "flag-name = value" pair per line (blank
+lines and #-prefixed comments ignored, same format as --input-file),
+e.g. "limit = 10" or "quiet = true". A flag actually passed on the
+command line always overrides the config file, never the other way
+around; an unrecognized flag name or a value a flag rejects is a
+warning, not a fatal error, and a missing/absent config file is just
+the default (nothing) -- it's entirely optional.
+
 A source with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it

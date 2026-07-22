@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history (not just the tagged commit) so Go's own VCS
+          # stamping -- what `paper-trail version` reports -- resolves
+          # the tag name correctly instead of falling back to a
+          # pseudo-version (confirmed live: building at an untagged
+          # commit reports "v0.0.0-<timestamp>-<hash>", while building
+          # exactly at a tag reports the tag itself).
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build cross-platform binaries
+        run: |
+          mkdir -p dist
+          targets=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+          )
+          for target in "${targets[@]}"; do
+            read -r goos goarch <<< "$target"
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+            name="paper-trail-${goos}-${goarch}"
+            out="dist/${name}${ext}"
+            echo "Building $out"
+            GOOS="$goos" GOARCH="$goarch" go build -o "$out" ./cmd/paper-trail
+            if [ "$goos" = "windows" ]; then
+              (cd dist && zip "${name}.zip" "$(basename "$out")" && rm "$(basename "$out")")
+            else
+              (cd dist && tar -czf "${name}.tar.gz" "$(basename "$out")" && rm "$(basename "$out")")
+            fi
+          done
+          ls -la dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

@@ -33,3 +33,15 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+      - name: Fuzz smoke test
+        # Short, fixed-duration runs, not exhaustive fuzzing -- just
+        # enough to catch an obvious regression in the text-
+        # normalization functions that process real, messy live-API
+        # data (entity names/addresses aren't input this program
+        # controls).
+        run: |
+          go test ./internal/risk/... -run=^$ -fuzz=FuzzFoldDiacritics -fuzztime=5s
+          go test ./internal/risk/... -run=^$ -fuzz=FuzzNormalizeText -fuzztime=5s
+          go test ./internal/risk/... -run=^$ -fuzz=FuzzTokenizeName -fuzztime=5s
+          go test ./internal/risk/... -run=^$ -fuzz=FuzzNormalizeAddressFuzzy -fuzztime=5s
