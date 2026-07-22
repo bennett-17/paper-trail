@@ -89,7 +89,7 @@ Usage:
   paper-trail companieshouse <query> [--limit <n>] [--json]
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--quiet] [--json]
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -256,7 +256,13 @@ weaker, lower-scored version of that check for names that only match
 after stripping titles/honorifics and ignoring word order (e.g. "Prof.
 Doreen Cantrell FRS" vs. "CANTRELL, Doreen, Professor"), since
 different sources format the same person's name differently and an
-exact match alone misses that -- plus any hit against either the US
+exact match alone misses that -- addresses get the same treatment
+(shared_address_fuzzy), stripping suite/unit/floor/room numbers so two
+entities at the same building under different specific offices still
+match (e.g. "123 Main St, Suite 200" vs. "123 Main St, Suite 450"),
+confirmed live catching two real same-building matches a 25-org scan's
+exact matcher missed entirely, one of them differing only in a bare
+address vs. one with a suite number appended -- plus any hit against either the US
 sanctions screen (sanctions_match) or the UK Sanctions List
 (uk_sanctions_match, via uksanctions above -- the two lists overlap
 heavily but not completely, so both are checked), and,
@@ -353,7 +359,12 @@ large multi-term scan against many sources finishes substantially
 faster than running each source in sequence would, with identical
 results (confirmed live: a 25-term scan produced byte-identical
 entities/indicators/score before and after this change, in under a
-third of the wall-clock time).
+third of the wall-clock time). While a scan runs, progress lines
+("[+12.3s] SEC EDGAR: term 4/25: ...") stream to stderr as each source
+processes each query term (and, for UK charities, each individual
+charity, since that step's own Companies House cascade is the slowest
+part of a scan) -- never to stdout or a --output file, so it can never
+corrupt a --json report. --quiet suppresses these lines entirely.
 --cache-ttl <duration> (e.g. "24h") caches the entities resolved
 per source/query/limit on disk and reuses them within that window
 instead of re-fetching -- useful when checking overlapping lists of
@@ -1261,6 +1272,35 @@ func diffRiskReports(previous riskReportJSON, entities []risk.Entity, score risk
 	}
 }
 
+// progressReporter writes short "[+12.3s] source: message" progress
+// lines to stderr as a long risk scan runs -- never to stdout/
+// --output, so it can never corrupt a --json report or a file being
+// written. Safe for concurrent use across every phase 1/2 goroutine
+// (mutex-protected, since multiple sources report at once once
+// runRisk's queries are parallelized). A nil *progressReporter is a
+// deliberate no-op (see report below), so every call site can call
+// progress.report(...) unconditionally -- no "if progress != nil"
+// scattered through every gather/screen function -- and --quiet is
+// implemented simply by never constructing one.
+type progressReporter struct {
+	mu    sync.Mutex
+	w     io.Writer
+	start time.Time
+}
+
+func newProgressReporter(w io.Writer) *progressReporter {
+	return &progressReporter{w: w, start: time.Now()}
+}
+
+func (p *progressReporter) report(source, format string, a ...any) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fmt.Fprintf(p.w, "[+%5.1fs] %s: %s\n", time.Since(p.start).Seconds(), source, fmt.Sprintf(format, a...))
+}
+
 // runRisk queries every configured source for candidates matching
 // query, normalizes whatever address/officer data each source exposes
 // into risk.Entity values, and runs the structural heuristics over the
@@ -1280,10 +1320,11 @@ func runRisk(args []string) {
 	cacheTTLFlag := fs.String("cache-ttl", "", "cache entities per source/query/limit on disk for this long (e.g. 24h) and reuse them within that window instead of re-fetching; unset disables caching entirely (always live, the default)")
 	inputFile := fs.String("input-file", "", "read additional query terms from this file, one per line (blank lines and lines starting with # are ignored) -- combined with any <query> arguments given directly")
 	diffPath := fs.String("diff", "", "compare this run against a previously saved --output --json report, showing newly appeared entities/indicators and the score change")
+	quiet := fs.Bool("quiet", false, "suppress progress output (written to stderr as the scan runs; never affects --json or --output)")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -1332,6 +1373,11 @@ func runRisk(args []string) {
 		}
 		cacheTTL = d
 		cache = riskcache.New()
+	}
+
+	var progress *progressReporter
+	if !*quiet {
+		progress = newProgressReporter(os.Stderr)
 	}
 
 	var entities []risk.Entity
@@ -1383,23 +1429,23 @@ func runRisk(args []string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			edgarEntities, edgarNotes = gatherEDGAREntities(edgarClient, queries, *limit, cache, cacheTTL)
+			edgarEntities, edgarNotes = gatherEDGAREntities(edgarClient, queries, *limit, cache, cacheTTL, progress)
 		}()
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, *limit, cache, cacheTTL)
+		npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, *limit, cache, cacheTTL, progress)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		acncEntities, acncNotes = gatherACNCEntities(queries, *limit, cache, cacheTTL)
+		acncEntities, acncNotes = gatherACNCEntities(queries, *limit, cache, cacheTTL, progress)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, *limit, cache, cacheTTL)
+		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, *limit, cache, cacheTTL, progress)
 	}()
 	wg.Wait()
 
@@ -1429,22 +1475,22 @@ func runRisk(args []string) {
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
-		usExtra, usNotes = screenUSSanctions(queries, entities)
+		usExtra, usNotes = screenUSSanctions(queries, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
-		ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities)
+		ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
-		dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities)
+		dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
-		ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, *limit)
+		ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, *limit, progress)
 	}()
 	wg2.Wait()
 
@@ -1584,9 +1630,10 @@ func runRisk(args []string) {
 // company (including any related CIKs after a corporate
 // restructuring) and its Form 3/4/5 insiders / Schedule 13D/13G
 // beneficial owners.
-func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration) (entities []risk.Entity, notes []string) {
+func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string) {
 	note := func(format string, a ...any) { notes = append(notes, "SEC EDGAR: "+fmt.Sprintf(format, a...)) }
-	for _, query := range queries {
+	for i, query := range queries {
+		progress.report("SEC EDGAR", "term %d/%d: %q", i+1, len(queries), query)
 		cacheKey := riskcache.Key("edgar", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
 			entities = append(entities, cached...)
@@ -1635,10 +1682,11 @@ func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int,
 // gatherNonprofitEntities resolves every query term against IRS Form
 // 990 data (via ProPublica) and flags a large year-over-year swing in
 // an organization's own multi-year revenue/asset history.
-func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
 	note := func(format string, a ...any) { notes = append(notes, "IRS Form 990: "+fmt.Sprintf(format, a...)) }
 	npClient := nonprofit.NewClient()
-	for _, query := range queries {
+	for i, query := range queries {
+		progress.report("IRS Form 990", "term %d/%d: %q", i+1, len(queries), query)
 		cacheKey := riskcache.Key("nonprofit", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
 			entities = append(entities, cached...)
@@ -1704,11 +1752,12 @@ func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache
 // AU entities are address-only and so never contribute to the
 // shared_person check; foundAUEntity tracks whether to note that
 // once, rather than once per query term.
-func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration) (entities []risk.Entity, notes []string) {
+func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string) {
 	note := func(format string, a ...any) { notes = append(notes, "ACNC (Australia): "+fmt.Sprintf(format, a...)) }
 	auClient := aucharity.NewClient()
 	foundAUEntity := false
-	for _, query := range queries {
+	for i, query := range queries {
+		progress.report("ACNC (Australia)", "term %d/%d: %q", i+1, len(queries), query)
 		cacheKey := riskcache.Key("aucharity", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
 			entities = append(entities, cached...)
@@ -1763,7 +1812,7 @@ func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cac
 // be nil (Companies House client creation failed) -- every use below
 // already guards for that, matching the pre-refactor behavior of
 // simply skipping that data rather than erroring.
-func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
 	note := func(format string, a ...any) {
 		notes = append(notes, "UK Charity Commission: "+fmt.Sprintf(format, a...))
 	}
@@ -1775,7 +1824,8 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 		return nil, nil, notes
 	}
 
-	for _, query := range queries {
+	for qi, query := range queries {
+		progress.report("UK Charity Commission", "term %d/%d: %q", qi+1, len(queries), query)
 		// Cached under "ukcharity" but covers the Companies House
 		// officer lookups below too, since those are already baked
 		// into each cached entity's People field -- no separate
@@ -1801,6 +1851,13 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			if i >= limit {
 				break
 			}
+			// This is the slowest step in a scan: each charity that's
+			// also a registered company triggers a whole cascade of
+			// Companies House calls below (officers, PSCs, charges,
+			// mail-drop check, renaming history, officer fan-out), so
+			// it gets its own progress line rather than just one per
+			// query term.
+			progress.report("UK Charity Commission", "  %s (%d/%d for %q)", c.Name, i+1, min(len(charities), limit), query)
 			detail, err := ukClient.GetCharityDetail(c.RegisteredNumber, c.Suffix)
 			if err != nil {
 				continue
@@ -1955,7 +2012,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 // screenUSSanctions screens every query term itself, plus every
 // distinct person name gathered from entities (deduplicated), against
 // the US Consolidated Screening List.
-func screenUSSanctions(queries []string, entities []risk.Entity) (extra []risk.Indicator, notes []string) {
+func screenUSSanctions(queries []string, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
 	note := func(format string, a ...any) { notes = append(notes, "Sanctions screen: "+fmt.Sprintf(format, a...)) }
 	sanctionsClient, err := sanctions.NewClient("", "")
 	if err != nil {
@@ -1970,6 +2027,7 @@ func screenUSSanctions(queries []string, entities []risk.Entity) (extra []risk.I
 			return
 		}
 		screened[key] = true
+		progress.report("US sanctions screen", "checking %q (%d so far)", name, len(screened))
 		result, err := sanctionsClient.SearchEntities(name, false, 0, 5)
 		if err != nil {
 			note("%q: %v", name, err)
@@ -2028,7 +2086,7 @@ func screenUSSanctions(queries []string, entities []risk.Entity) (extra []risk.I
 // (every query term, plus every distinct person name found) against
 // the UK Sanctions List (OFSI) -- which designates people/entities of
 // any nationality, not just UK ones.
-func screenUKSanctions(queries []string, entities []risk.Entity) (extra []risk.Indicator, notes []string) {
+func screenUKSanctions(queries []string, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
 	note := func(format string, a ...any) {
 		notes = append(notes, "UK sanctions screen: "+fmt.Sprintf(format, a...))
 	}
@@ -2040,6 +2098,7 @@ func screenUKSanctions(queries []string, entities []risk.Entity) (extra []risk.I
 			return
 		}
 		screened[key] = true
+		progress.report("UK sanctions screen", "checking %q (%d so far)", name, len(screened))
 		result, err := ofsiClient.SearchDesignations(name, 5)
 		if err != nil {
 			note("%q: %v", name, err)
@@ -2106,7 +2165,7 @@ func screenUKSanctions(queries []string, entities []risk.Entity) (extra []risk.I
 // indicator here, a hit is an already-adjudicated regulatory action (a
 // real company-law breach), not a correlation, so it's the
 // highest-weighted indicator in this tool.
-func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []risk.Entity) (extra []risk.Indicator, notes []string) {
+func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
 	if chClient == nil {
 		return nil, nil
 	}
@@ -2122,6 +2181,7 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 				continue
 			}
 			checked[key] = true
+			progress.report("Disqualified directors", "checking %q (%d so far)", p, len(checked))
 			hits, err := chClient.SearchDisqualifiedOfficers(p, 5)
 			if err != nil {
 				note("disqualified officer check for %q: %v", p, err)
@@ -2162,7 +2222,7 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 // executive's own Form 3/4 filings at every company they sit on the
 // board of, each counted as a separate "mention"), burying the
 // indicators worth actually looking at.
-func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, entities []risk.Entity, limit int) (extra []risk.Indicator, notes []string) {
+func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, entities []risk.Entity, limit int, progress *progressReporter) (extra []risk.Indicator, notes []string) {
 	if edgarClient == nil {
 		return nil, nil
 	}
@@ -2184,6 +2244,7 @@ func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, en
 			return
 		}
 		mentioned[key] = true
+		progress.report("SEC EDGAR full-text", "checking %q (%d so far)", name, len(mentioned))
 		hits, _, err := edgarClient.SearchFullText(fmt.Sprintf("%q", name), "", "", "", "", 0, limit)
 		if err != nil {
 			note("%q: %v", name, err)

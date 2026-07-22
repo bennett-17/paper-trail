@@ -113,7 +113,9 @@ And on top of all of the above, structural risk heuristics:
   than running each source in sequence would, with identical results
   (confirmed live: a 25-term scan produced byte-identical output
   before and after this change, in under a third of the wall-clock
-  time). For SEC EDGAR, any related CIKs (see lookup's "Related CIKs"
+  time). Progress lines stream to stderr as a scan runs (never to
+  stdout or a `--output` file, so a `--json` report is never at risk)
+  -- `--quiet` suppresses them. For SEC EDGAR, any related CIKs (see lookup's "Related CIKs"
   check) get their own address/insider lookup too, not just a bare
   name, so a corporate restructuring can actually surface a shared
   address or officer instead of being invisible to every heuristic.
@@ -167,7 +169,12 @@ And on top of all of the above, structural risk heuristics:
   "interlocking directorate"), plus a weaker, lower-scored version of
   that same check for names that only match once titles/honorifics are
   stripped and word order is ignored (different sources format the same
-  person differently, and an exact match alone misses that) -- plus any
+  person differently, and an exact match alone misses that). Addresses
+  get the same treatment, stripping suite/unit/floor/room numbers so
+  two entities at the same building under different specific offices
+  still match (e.g. "123 Main St, Suite 200" vs. "123 Main St, Suite
+  450") -- confirmed live catching two real same-building matches a
+  25-org scan's exact matcher missed entirely -- plus any
   hit against either the US sanctions screen or the UK Sanctions List
   (the two overlap heavily but not completely, so both are checked) on
   any name or person found, and a separate flag when a sanctions
