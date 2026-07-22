@@ -5,7 +5,9 @@
       "name": "Mrs Jane Example",
       "kind": "individual-person-with-significant-control",
       "natures_of_control": ["ownership-of-shares-25-to-50-percent"],
-      "notified_on": "2017-06-30"
+      "notified_on": "2017-06-30",
+      "nationality": "British",
+      "country_of_residence": "England"
     },
     {
       "name": "Mr John Sample",

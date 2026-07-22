@@ -273,6 +273,15 @@ type Company struct {
 	RegisteredOffice Address        `json:"registeredOffice,omitempty"`
 	SICCodes         []string       `json:"sicCodes,omitempty"`
 	PreviousNames    []PreviousName `json:"previousNames,omitempty"`
+	// AccountsOverdue and LastAccountsType are both confirmed live:
+	// accounts.overdue is a plain boolean, and a company whose last
+	// filed accounts were for a period of no significant trading shows
+	// up as accounts.last_accounts.type == "dormant" -- company_status
+	// itself stays "active" for a dormant company (confirmed live
+	// against a real dormant holding company), so status alone isn't
+	// enough to catch this.
+	AccountsOverdue  bool   `json:"accountsOverdue,omitempty"`
+	LastAccountsType string `json:"lastAccountsType,omitempty"`
 }
 
 type companyResponse struct {
@@ -288,6 +297,12 @@ type companyResponse struct {
 		EffectiveFrom string `json:"effective_from"`
 		CeasedOn      string `json:"ceased_on"`
 	} `json:"previous_company_names"`
+	Accounts struct {
+		Overdue      bool `json:"overdue"`
+		LastAccounts struct {
+			Type string `json:"type"`
+		} `json:"last_accounts"`
+	} `json:"accounts"`
 }
 
 // zeroPadCompanyNumber left-pads a company number to Companies House's
@@ -337,6 +352,8 @@ func (c *Client) GetCompany(number string) (Company, error) {
 		RegisteredOffice: resp.RegisteredOfficeAddress.toAddress(),
 		SICCodes:         resp.SICCodes,
 		PreviousNames:    previousNames,
+		AccountsOverdue:  resp.Accounts.Overdue,
+		LastAccountsType: resp.Accounts.LastAccounts.Type,
 	}, nil
 }
 
@@ -355,15 +372,23 @@ type Officer struct {
 	// search happened to surface. Empty if the API didn't return a link
 	// (observed for some corporate officers).
 	OfficerID string `json:"officerId,omitempty"`
+	// Nationality and CountryOfResidence are both confirmed live on
+	// real officer records (e.g. "British" / "England"). Neither is
+	// guaranteed present -- a corporate officer (another company
+	// acting as director/secretary) has no nationality at all.
+	Nationality        string `json:"nationality,omitempty"`
+	CountryOfResidence string `json:"countryOfResidence,omitempty"`
 }
 
 type officersResponse struct {
 	Items []struct {
-		Name        string `json:"name"`
-		OfficerRole string `json:"officer_role"`
-		AppointedOn string `json:"appointed_on"`
-		ResignedOn  string `json:"resigned_on"`
-		Links       struct {
+		Name               string `json:"name"`
+		OfficerRole        string `json:"officer_role"`
+		AppointedOn        string `json:"appointed_on"`
+		ResignedOn         string `json:"resigned_on"`
+		Nationality        string `json:"nationality"`
+		CountryOfResidence string `json:"country_of_residence"`
+		Links              struct {
 			Officer struct {
 				Appointments string `json:"appointments"`
 			} `json:"officer"`
@@ -409,11 +434,13 @@ func (c *Client) GetOfficers(number string, limit int) ([]Officer, error) {
 	officers := make([]Officer, 0, len(resp.Items))
 	for _, item := range resp.Items {
 		officers = append(officers, Officer{
-			Name:        item.Name,
-			Role:        item.OfficerRole,
-			AppointedOn: item.AppointedOn,
-			ResignedOn:  item.ResignedOn,
-			OfficerID:   officerIDFromAppointmentsLink(item.Links.Officer.Appointments),
+			Name:               item.Name,
+			Role:               item.OfficerRole,
+			AppointedOn:        item.AppointedOn,
+			ResignedOn:         item.ResignedOn,
+			OfficerID:          officerIDFromAppointmentsLink(item.Links.Officer.Appointments),
+			Nationality:        item.Nationality,
+			CountryOfResidence: item.CountryOfResidence,
 		})
 	}
 	return officers, nil
@@ -431,15 +458,23 @@ type PSC struct {
 	NaturesOfControl []string `json:"naturesOfControl,omitempty"`
 	NotifiedOn       string   `json:"notifiedOn,omitempty"`
 	CeasedOn         string   `json:"ceasedOn,omitempty"` // empty if still active
+	// Nationality and CountryOfResidence are both confirmed live on
+	// real PSC records (e.g. "British" / "England"). Neither is
+	// guaranteed present -- a corporate PSC (another company holding
+	// the significant control) has no nationality at all.
+	Nationality        string `json:"nationality,omitempty"`
+	CountryOfResidence string `json:"countryOfResidence,omitempty"`
 }
 
 type pscResponse struct {
 	Items []struct {
-		Name             string   `json:"name"`
-		Kind             string   `json:"kind"`
-		NaturesOfControl []string `json:"natures_of_control"`
-		NotifiedOn       string   `json:"notified_on"`
-		CeasedOn         string   `json:"ceased_on"`
+		Name               string   `json:"name"`
+		Kind               string   `json:"kind"`
+		NaturesOfControl   []string `json:"natures_of_control"`
+		NotifiedOn         string   `json:"notified_on"`
+		CeasedOn           string   `json:"ceased_on"`
+		Nationality        string   `json:"nationality"`
+		CountryOfResidence string   `json:"country_of_residence"`
 	} `json:"items"`
 	TotalResults int `json:"total_results"`
 }
@@ -471,11 +506,13 @@ func (c *Client) GetPersonsWithSignificantControl(number string, limit int) ([]P
 			continue // a PSC "statement" (e.g. none identified), not an actual person/company
 		}
 		pscs = append(pscs, PSC{
-			Name:             item.Name,
-			Kind:             item.Kind,
-			NaturesOfControl: item.NaturesOfControl,
-			NotifiedOn:       item.NotifiedOn,
-			CeasedOn:         item.CeasedOn,
+			Name:               item.Name,
+			Kind:               item.Kind,
+			NaturesOfControl:   item.NaturesOfControl,
+			NotifiedOn:         item.NotifiedOn,
+			CeasedOn:           item.CeasedOn,
+			Nationality:        item.Nationality,
+			CountryOfResidence: item.CountryOfResidence,
 		})
 	}
 	return pscs, nil

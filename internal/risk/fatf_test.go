@@ -52,3 +52,42 @@ func TestFATFStatusBlankCountry(t *testing.T) {
 		t.Error("expected a blank country code to never be listed")
 	}
 }
+
+// TestFATFStatusMatchesFullCountryName guards a real gap found before
+// this shipped: Companies House's officer/PSC country_of_residence
+// field returns a full country name (e.g. "Kenya"), not an ISO code,
+// so a code-only lookup would silently never match real data from
+// that source.
+func TestFATFStatusMatchesFullCountryName(t *testing.T) {
+	listed, _, weight := FATFStatus("Kenya")
+	if !listed {
+		t.Fatal("expected the full name 'Kenya' to match KE")
+	}
+	if weight != 2 {
+		t.Errorf("weight = %d, want 2 (grey list)", weight)
+	}
+}
+
+// TestFATFStatusMatchesNationalityDemonym guards the other half of the
+// same real gap: Companies House's officer/PSC nationality field uses
+// the demonym/adjective form (e.g. "Kenyan" -- confirmed live), not
+// the country name or an ISO code.
+func TestFATFStatusMatchesNationalityDemonym(t *testing.T) {
+	listed, listName, weight := FATFStatus("Kenyan")
+	if !listed {
+		t.Fatal("expected the demonym 'Kenyan' to match KE")
+	}
+	if weight != 2 {
+		t.Errorf("weight = %d, want 2 (grey list)", weight)
+	}
+	if listName == "" {
+		t.Error("listName should not be empty")
+	}
+}
+
+func TestFATFStatusDemonymIsCaseInsensitive(t *testing.T) {
+	listed, _, _ := FATFStatus("IRANIAN")
+	if !listed {
+		t.Error("expected uppercase 'IRANIAN' to match the iranian demonym alias")
+	}
+}

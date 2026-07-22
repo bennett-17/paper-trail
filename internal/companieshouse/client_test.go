@@ -135,6 +135,35 @@ func TestGetCompanyParsesPreviousNames(t *testing.T) {
 	}
 }
 
+// TestGetCompanyParsesDormantAndOverdueAccounts guards a real find:
+// company_status stays "active" for a dormant company (confirmed live
+// against a real dormant holding company) -- dormancy only shows up
+// in accounts.last_accounts.type, a field this client didn't parse at
+// all before this test existed.
+func TestGetCompanyParsesDormantAndOverdueAccounts(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/00884013", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_company_dormant.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	company, err := c.GetCompany("00884013")
+	if err != nil {
+		t.Fatalf("GetCompany: %v", err)
+	}
+	if company.Status != "active" {
+		t.Errorf("Status = %q, want active (company_status stays active for a dormant company)", company.Status)
+	}
+	if company.LastAccountsType != "dormant" {
+		t.Errorf("LastAccountsType = %q, want dormant", company.LastAccountsType)
+	}
+	if !company.AccountsOverdue {
+		t.Error("AccountsOverdue = false, want true")
+	}
+}
+
 // TestGetCompanyZeroPadsNumber guards against a real bug found live:
 // the UK Charity Commission's CompaniesHouseNumber field returns
 // company numbers without leading zeros (e.g. "4325234"), but this API
@@ -211,6 +240,9 @@ func TestGetOfficersParsesCurrentAndFormer(t *testing.T) {
 	if officers[0].Name != "EXAMPLE, Jane" || officers[0].Role != "director" || officers[0].ResignedOn != "" {
 		t.Errorf("officers[0] = %+v", officers[0])
 	}
+	if officers[0].Nationality != "British" || officers[0].CountryOfResidence != "England" {
+		t.Errorf("officers[0] nationality/residence = %q/%q, want British/England", officers[0].Nationality, officers[0].CountryOfResidence)
+	}
 	if officers[1].Name != "SAMPLE, John" || officers[1].ResignedOn != "2023-06-15" {
 		t.Errorf("officers[1] = %+v, want a resigned_on set (a former officer)", officers[1])
 	}
@@ -286,6 +318,9 @@ func TestGetPersonsWithSignificantControlParsesCurrentAndFormer(t *testing.T) {
 	}
 	if pscs[0].Name != "Mrs Jane Example" || pscs[0].CeasedOn != "" {
 		t.Errorf("pscs[0] = %+v", pscs[0])
+	}
+	if pscs[0].Nationality != "British" || pscs[0].CountryOfResidence != "England" {
+		t.Errorf("pscs[0] nationality/residence = %q/%q, want British/England", pscs[0].Nationality, pscs[0].CountryOfResidence)
 	}
 	if pscs[1].Name != "Mr John Sample" || pscs[1].CeasedOn != "2018-07-17" {
 		t.Errorf("pscs[1] = %+v, want a ceased_on set (a former PSC)", pscs[1])

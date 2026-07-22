@@ -240,7 +240,25 @@ Tesco PLC's real two-rename history, correctly not flagged since
 those spanned 36 years, versus a simulated fast-renaming pattern of
 3 renames within 18 months, which is), since a single rebrand decades
 apart is routine but several renames in quick succession is a known
-reputation-laundering/shell-company pattern, not itself proof of one. UK charities
+reputation-laundering/shell-company pattern, not itself proof of one.
+The same company profile is also checked for dormancy and overdue
+accounts: confirmed live that company_status stays "active" for a
+dormant company (dormancy only shows up in a separate
+last-filed-accounts-type field), so a dormant_company indicator
+catches what status alone would miss, and a company with statutory
+accounts currently overdue gets its own accounts_overdue indicator --
+either signal is common and often innocuous on its own, but worth a
+second look for an otherwise-active organization, especially alongside
+other indicators. Each UK charity's own trustee count (already fetched
+for the shared_person check, no extra API call needed) is also checked
+for governance concentration: two or fewer trustees gets a
+few_trustees indicator (confirmed live against a real charity with
+exactly one), the same threshold UK charity governance guidance itself
+recommends against, though it's common and often innocuous for a small
+or newly formed charity -- skipped entirely when a charity has zero
+trustees on record, since that's far more likely to mean the Charity
+Commission simply didn't publish trustee names for it than a real
+governance gap. UK charities
 that share a Charity Commission registered number under different
 suffixes (a main charity and its own linked/subsidiary charities) get
 a registry_linked_group indicator -- unlike every other indicator
@@ -271,7 +289,14 @@ regime, when that regime happens to be named after a country) is on
 FATF's high-risk or increased-monitoring list, a separate
 jurisdiction_risk indicator (FATF's lists are a manually maintained
 snapshot, refreshed after FATF's periodic plenaries, not a live feed -- see internal/risk/fatf.go
-for the date). Officer/trustee names sourced from Companies House and
+for the date). Every current Companies House officer and active PSC
+also gets checked directly, regardless of any sanctions hit: their
+nationality and country of residence (both confirmed live on real
+officer/PSC records) are checked against FATF's lists, producing a
+person_jurisdiction_risk indicator on their own -- a weaker signal
+than jurisdiction_risk (which needs a sanctions match too), but not
+nothing, and one this tool would otherwise never surface since it has
+no other reason to look at nationality at all. Officer/trustee names sourced from Companies House and
 the UK Charity Commission are also checked against Companies House's
 disqualified-directors register (a disqualified_director indicator) --
 unlike every other indicator here this is an already-adjudicated
@@ -324,7 +349,17 @@ separately calls out any two entities connected by two or more
 shared officer) -- that combination is materially stronger evidence
 than either alone, but scanning a flat list of indicators makes it easy
 to miss. This adds no weight of its own to the total; it's a
-reorganization of evidence already counted, not new evidence. --limit
+reorganization of evidence already counted, not new evidence. Every
+report also carries a plain LOW/MEDIUM/HIGH confidence read next to
+the numeric score, so the headline number comes with an at-a-glance
+signal before digging into individual indicators -- deliberately not a
+pure function of the total, since summing many weak signals (several
+formation_cluster/filing_mention hits at weight 1 each) shouldn't
+outrank one strong one: a single high-weight indicator (5+: a
+sanctions match or the disqualified-directors match at 6) or two or
+more corroborated pairs each push straight to HIGH on their own, one
+corroborated pair or a moderate-weight indicator (3+) or high-enough
+total is MEDIUM, everything else is LOW. --limit
 caps how many candidates are pulled per source per
 query term (default 5) to bound the number of live API calls. --output
 writes the report (in whichever format --json selects) to a file
@@ -1112,6 +1147,12 @@ func runCompaniesHouse(args []string) {
 		if addr := company.RegisteredOffice.AsSingleLine(); addr != "" {
 			fmt.Printf("Registered office: %s\n", addr)
 		}
+		if company.LastAccountsType == "dormant" {
+			fmt.Println("Last accounts: dormant (no significant trading activity declared)")
+		}
+		if company.AccountsOverdue {
+			fmt.Println("Accounts: OVERDUE")
+		}
 		fmt.Printf("\n%d officer(s):\n", len(officers))
 		for _, o := range officers {
 			status := "current"
@@ -1119,6 +1160,9 @@ func runCompaniesHouse(args []string) {
 				status = "resigned " + o.ResignedOn
 			}
 			line := fmt.Sprintf("  %s -- %s (appointed %s, %s)", o.Name, orDash(o.Role), orDash(o.AppointedOn), status)
+			if o.Nationality != "" || o.CountryOfResidence != "" {
+				line += fmt.Sprintf(" [%s, resides %s]", orDash(o.Nationality), orDash(o.CountryOfResidence))
+			}
 			if o.OfficerID != "" {
 				line += fmt.Sprintf(" [officer id: %s]", o.OfficerID)
 			}
@@ -1130,7 +1174,11 @@ func runCompaniesHouse(args []string) {
 			if p.CeasedOn != "" {
 				status = "ceased " + p.CeasedOn
 			}
-			fmt.Printf("  %s -- %s (%s)\n", p.Name, strings.Join(p.NaturesOfControl, ", "), status)
+			line := fmt.Sprintf("  %s -- %s (%s)", p.Name, strings.Join(p.NaturesOfControl, ", "), status)
+			if p.Nationality != "" || p.CountryOfResidence != "" {
+				line += fmt.Sprintf(" [%s, resides %s]", orDash(p.Nationality), orDash(p.CountryOfResidence))
+			}
+			fmt.Println(line)
 		}
 		fmt.Printf("\n%d charge(s):\n", len(charges))
 		for _, ch := range charges {
@@ -1209,6 +1257,13 @@ func edgarEntityFromCompany(client *edgar.Client, company edgar.Company, limit i
 // 1,000 sits comfortably above any genuine single-business address
 // observed and well below actual mail-drop scale.
 const mailDropAddressThreshold = 1000
+
+// fewTrusteesThreshold is how few trustees a charity can have before
+// few_trustees fires. UK charity governance guidance (the Charity
+// Commission's own CC3 guidance) generally recommends a minimum of
+// three trustees so no single person can unilaterally control
+// decisions or funds -- two or fewer is the threshold used here.
+const fewTrusteesThreshold = 2
 
 // riskReportJSON is the shape of a risk --json report -- named (not
 // anonymous) so --diff can decode a previously saved one back in for
@@ -1555,7 +1610,7 @@ func runRisk(args []string) {
 			}
 		}
 
-		fmt.Fprintf(w, "\nRisk score: %d\n\n", score.Total)
+		fmt.Fprintf(w, "\nRisk score: %d (confidence: %s)\n\n", score.Total, score.Confidence)
 		if len(score.Indicators) == 0 {
 			fmt.Fprintln(w, "No structural indicators found among the entities located.")
 		}
@@ -1868,6 +1923,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			}
 			people := detail.Trustees
 			var currentOfficers []companieshouse.Officer
+			var activePSCs []companieshouse.PSC
 			var chargees []string
 			if chClient != nil && detail.CompaniesHouseNumber != "" {
 				if officers, err := chClient.GetOfficers(detail.CompaniesHouseNumber, limit); err != nil {
@@ -1891,6 +1947,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 					for _, p := range pscs {
 						if p.CeasedOn == "" { // active PSCs only, matching Trustees/officers above
 							people = append(people, p.Name)
+							activePSCs = append(activePSCs, p)
 						}
 					}
 				}
@@ -1908,21 +1965,59 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 						}
 					}
 				}
-				// Frequent renaming: a company's own dated name-
-				// change history (previous_company_names). A single
-				// rename decades ago is a normal rebrand; several
-				// within a few years is a known reputation-
-				// laundering/shell-company pattern.
+				// One profile fetch covers two separate checks below --
+				// frequent renaming and dormant/overdue accounts -- so
+				// it's fetched once here rather than twice.
 				if company, err := chClient.GetCompany(detail.CompaniesHouseNumber); err != nil {
 					chNote("%s (company %s) profile: %v", detail.Name, detail.CompaniesHouseNumber, err)
-				} else if desc := frequentRenaming(company.PreviousNames); desc != "" {
-					extra = append(extra, risk.Indicator{
-						Code:        "frequent_renaming",
-						Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
-						Weight:      2,
-						Entities:    []string{fmt.Sprintf("companieshouse: %s (%s)", company.Name, company.CompanyNumber)},
-						Evidence:    desc,
-					})
+				} else {
+					companyLabel := fmt.Sprintf("companieshouse: %s (%s)", company.Name, company.CompanyNumber)
+
+					// Frequent renaming: a company's own dated name-
+					// change history (previous_company_names). A single
+					// rename decades ago is a normal rebrand; several
+					// within a few years is a known reputation-
+					// laundering/shell-company pattern.
+					if desc := frequentRenaming(company.PreviousNames); desc != "" {
+						extra = append(extra, risk.Indicator{
+							Code:        "frequent_renaming",
+							Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
+							Weight:      2,
+							Entities:    []string{companyLabel},
+							Evidence:    desc,
+						})
+					}
+
+					// Dormant/overdue accounts: confirmed live that
+					// company_status stays "active" for a dormant
+					// company (dormancy only shows up in
+					// accounts.last_accounts.type), so status alone
+					// wouldn't catch this. Either signal on its own is
+					// common and often innocuous -- a legitimately
+					// dormant holding company, or accounts a few weeks
+					// late -- but an otherwise-active charity's linked
+					// company showing no real trading activity, or
+					// falling behind on statutory filings, is worth a
+					// second look, especially alongside other
+					// indicators.
+					if company.LastAccountsType == "dormant" {
+						extra = append(extra, risk.Indicator{
+							Code:        "dormant_company",
+							Description: "This entity's linked Companies House company's last filed accounts declared no significant trading activity -- common and often innocuous for a genuine holding company, but worth a second look for an otherwise-active organization",
+							Weight:      1,
+							Entities:    []string{companyLabel},
+							Evidence:    "last accounts type: dormant",
+						})
+					}
+					if company.AccountsOverdue {
+						extra = append(extra, risk.Indicator{
+							Code:        "accounts_overdue",
+							Description: "This entity's linked Companies House company has overdue statutory accounts -- often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off and is itself a compliance red flag",
+							Weight:      1,
+							Entities:    []string{companyLabel},
+							Evidence:    "accounts overdue",
+						})
+					}
 				}
 			}
 			// ID includes the suffix -- confirmed a real bug fetching
@@ -1950,6 +2045,27 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			e.LinkedGroup = fmt.Sprintf("%d", detail.RegisteredNumber)
 			e.FormedOn = detail.RegistrationDate
 
+			// Governance concentration: a charity run by very few
+			// trustees is a known control-concentration red flag in
+			// charity regulation -- most UK charity governance
+			// guidance recommends a minimum of several trustees for
+			// exactly this reason (no single person able to control
+			// decisions or funds unchecked). Uses detail.Trustees
+			// already fetched above -- no extra API call. Skipped
+			// entirely when the count is zero, since that's far more
+			// likely to mean the Charity Commission simply didn't
+			// publish trustee names for this record than that a real
+			// charity legitimately has none.
+			if n := len(detail.Trustees); n > 0 && n <= fewTrusteesThreshold {
+				extra = append(extra, risk.Indicator{
+					Code:        "few_trustees",
+					Description: "This charity is governed by very few trustees -- a known control-concentration red flag in charity regulation, though a small or newly formed charity having few trustees is also common and often innocuous",
+					Weight:      1,
+					Entities:    []string{e.Label()},
+					Evidence:    fmt.Sprintf("%d trustee(s): %s", n, strings.Join(detail.Trustees, ", ")),
+				})
+			}
+
 			// Mail-drop address density check -- confirmed live: a
 			// known company-formation-agent mail-drop address
 			// (71-75 Shelton Street, WC2H 9JQ) has ~190,000
@@ -1971,6 +2087,44 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 						Evidence:    fmt.Sprintf("%d companies registered at postcode %s", count, detail.Postcode),
 					})
 				}
+			}
+
+			// Officer/PSC jurisdiction risk: nationality and country of
+			// residence are both confirmed live on real officer/PSC
+			// records but otherwise unused. Unlike the existing
+			// jurisdiction_risk indicator (which only fires alongside a
+			// sanctions hit), this checks every current officer/active
+			// PSC directly, regardless of any sanctions match --
+			// someone's nationality or residence being FATF-flagged is
+			// a real signal on its own, just a weaker one on its own
+			// than a sanctions match plus a FATF-flagged country
+			// together.
+			flaggedPeople := map[string]bool{}
+			flagPersonJurisdiction := func(name, nationality, countryOfResidence string) {
+				for _, country := range []string{nationality, countryOfResidence} {
+					listed, listName, weight := risk.FATFStatus(country)
+					if !listed {
+						continue
+					}
+					key := strings.ToLower(strings.TrimSpace(name)) + "|" + listName
+					if flaggedPeople[key] {
+						continue
+					}
+					flaggedPeople[key] = true
+					extra = append(extra, risk.Indicator{
+						Code:        "person_jurisdiction_risk",
+						Description: "An officer or beneficial owner's nationality or country of residence is on FATF's high-risk or increased-monitoring list -- on its own a weaker signal than a sanctions match in a FATF-flagged jurisdiction, but worth noting regardless of any sanctions hit",
+						Weight:      weight - 1,
+						Entities:    []string{e.Label()},
+						Evidence:    fmt.Sprintf("%s -- %s (%s)", name, country, listName),
+					})
+				}
+			}
+			for _, o := range currentOfficers {
+				flagPersonJurisdiction(o.Name, o.Nationality, o.CountryOfResidence)
+			}
+			for _, p := range activePSCs {
+				flagPersonJurisdiction(p.Name, p.Nationality, p.CountryOfResidence)
 			}
 
 			termEntities = append(termEntities, e)

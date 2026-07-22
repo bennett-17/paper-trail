@@ -1,0 +1,31 @@
+{
+  "company_name": "EXAMPLE DORMANT HOLDINGS LIMITED",
+  "company_number": "00884013",
+  "company_status": "active",
+  "type": "ltd",
+  "date_of_creation": "1965-04-19",
+  "registered_office_address": {
+    "address_line_1": "2 Example Place",
+    "locality": "London",
+    "postal_code": "E20 1JQ"
+  },
+  "sic_codes": ["70100"],
+  "accounts": {
+    "accounting_reference_date": {"day": "31", "month": "12"},
+    "last_accounts": {
+      "made_up_to": "2024-12-28",
+      "period_end_on": "2024-12-28",
+      "period_start_on": "2023-12-31",
+      "type": "dormant"
+    },
+    "next_accounts": {
+      "due_on": "2026-09-30",
+      "overdue": true,
+      "period_end_on": "2025-12-31",
+      "period_start_on": "2024-12-29"
+    },
+    "next_due": "2026-09-30",
+    "next_made_up_to": "2025-12-31",
+    "overdue": true
+  }
+}

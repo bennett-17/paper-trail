@@ -52,16 +52,88 @@ var fatfIncreasedMonitoring = map[string]string{
 	"YE": "Yemen",
 }
 
-// FATFStatus reports whether an ISO 3166-1 alpha-2 country code
-// appears on either FATF list. listed is false for a code on neither
-// list, including a blank or unrecognized code -- callers shouldn't
-// read anything into that beyond "not currently flagged by FATF"; FATF
+// fatfNameToCode maps every FATF-listed country's own full name (built
+// from fatfCallForAction/fatfIncreasedMonitoring's values, so it can
+// never drift out of sync with the code tables above) to its ISO code,
+// lowercased for lookup. Built once at package init.
+var fatfNameToCode = buildFATFNameToCode()
+
+func buildFATFNameToCode() map[string]string {
+	m := map[string]string{}
+	for code, name := range fatfCallForAction {
+		m[strings.ToLower(name)] = code
+	}
+	for code, name := range fatfIncreasedMonitoring {
+		m[strings.ToLower(name)] = code
+	}
+	return m
+}
+
+// fatfNationalityAliases maps common nationality/demonym adjectives
+// (as seen live in Companies House's officer/PSC "nationality" field,
+// e.g. "Kenyan" -- confirmed live) to the matching FATF-listed
+// country's ISO code. Deliberately only covers the ~25 countries
+// currently on either FATF list (see fatfCallForAction/
+// fatfIncreasedMonitoring above), not a general demonym dictionary --
+// hand-maintained the same way those lists are, and needs the same
+// review after a plenary adds or removes a country.
+var fatfNationalityAliases = map[string]string{
+	"iranian":                 "IR",
+	"north korean":            "KP",
+	"korean, north":           "KP",
+	"myanmarese":              "MM",
+	"burmese":                 "MM",
+	"angolan":                 "AO",
+	"bolivian":                "BO",
+	"bosnian":                 "BA",
+	"herzegovinian":           "BA",
+	"bulgarian":               "BG",
+	"cameroonian":             "CM",
+	"ivorian":                 "CI",
+	"congolese":               "CD",
+	"haitian":                 "HT",
+	"iraqi":                   "IQ",
+	"kenyan":                  "KE",
+	"kuwaiti":                 "KW",
+	"laotian":                 "LA",
+	"lao":                     "LA",
+	"lebanese":                "LB",
+	"monegasque":              "MC",
+	"monacan":                 "MC",
+	"nepali":                  "NP",
+	"nepalese":                "NP",
+	"papua new guinean":       "PG",
+	"south sudanese":          "SS",
+	"syrian":                  "SY",
+	"venezuelan":              "VE",
+	"vietnamese":              "VN",
+	"british virgin islander": "VG",
+	"yemeni":                  "YE",
+}
+
+// FATFStatus reports whether a country appears on either FATF list.
+// countryCode accepts an ISO 3166-1 alpha-2 code (the primary,
+// documented input), but also falls back to matching the country's
+// own full name (e.g. "Kenya") or a common nationality/demonym
+// adjective (e.g. "Kenyan") -- confirmed live that Companies House's
+// officer/PSC nationality field uses the demonym form and its
+// country_of_residence field uses the full name, neither of which is
+// an ISO code, so a code-only lookup would silently never match real
+// data from that source. listed is false for anything on neither
+// list, including blank/unrecognized input -- callers shouldn't read
+// anything into that beyond "not currently flagged by FATF"; FATF
 // jurisdiction status is one input among many, not a verdict on a
 // country or on any entity connected to it.
 func FATFStatus(countryCode string) (listed bool, listName string, weight int) {
-	code := strings.ToUpper(strings.TrimSpace(countryCode))
-	if code == "" {
+	trimmed := strings.TrimSpace(countryCode)
+	if trimmed == "" {
 		return false, "", 0
+	}
+	code := strings.ToUpper(trimmed)
+	if alias, ok := fatfNationalityAliases[strings.ToLower(trimmed)]; ok {
+		code = alias
+	} else if fromName, ok := fatfNameToCode[strings.ToLower(trimmed)]; ok {
+		code = fromName
 	}
 	if name, ok := fatfCallForAction[code]; ok {
 		return true, fmt.Sprintf("FATF high-risk jurisdiction (Call for Action): %s", name), 4

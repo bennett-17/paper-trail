@@ -6,6 +6,8 @@
       "name": "EXAMPLE, Jane",
       "officer_role": "director",
       "appointed_on": "2022-10-04",
+      "nationality": "British",
+      "country_of_residence": "England",
       "address": {
         "address_line_1": "2 Example Place",
         "locality": "London",

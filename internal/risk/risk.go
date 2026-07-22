@@ -117,6 +117,49 @@ type Score struct {
 	// *different kinds* of indicator -- see Corroboration for why this
 	// doesn't add its own weight to Total.
 	Corroborations []Corroboration `json:"corroborations,omitempty"`
+
+	// Confidence is a plain LOW/MEDIUM/HIGH read of Total/Indicators/
+	// Corroborations together -- see confidenceBand for exactly how --
+	// so the headline number comes with an at-a-glance signal before
+	// digging into individual indicators. Like Total, this is fully
+	// derived from the indicators already listed; it adds no
+	// information Total/Indicators/Corroborations didn't already carry.
+	Confidence string `json:"confidence"`
+}
+
+// confidenceBand classifies a set of indicators/corroborations into a
+// plain LOW/MEDIUM/HIGH read. Deliberately not a pure function of the
+// numeric total -- summing many weak signals (a handful of
+// formation_cluster/filing_mention hits at weight 1 each) shouldn't
+// outrank one strong one (a single disqualified_director or sanctions
+// match). The presence of a high-weight indicator (5+: a sanctions or
+// UK Sanctions List match) or a disqualified-director match (6, this
+// tool's highest, since it's an already-adjudicated finding rather
+// than a correlation) each push straight to HIGH on their own, same
+// for two or more corroborated pairs (independently-evidenced
+// connections between the same two entities, this tool's own
+// strongest structural signal). A single corroborated pair, a
+// moderate-weight indicator (3+), or a high-enough total pushes to
+// MEDIUM. Everything else, including no indicators at all, is LOW.
+func confidenceBand(indicators []Indicator, corroborations []Corroboration, total int) string {
+	highWeightPresent := false
+	moderateWeightPresent := false
+	for _, ind := range indicators {
+		if ind.Weight >= 5 {
+			highWeightPresent = true
+		}
+		if ind.Weight >= 3 {
+			moderateWeightPresent = true
+		}
+	}
+	switch {
+	case highWeightPresent || len(corroborations) >= 2:
+		return "HIGH"
+	case moderateWeightPresent || len(corroborations) >= 1 || total >= 5:
+		return "MEDIUM"
+	default:
+		return "LOW"
+	}
 }
 
 var whitespaceRE = regexp.MustCompile(`\s+`)
@@ -392,9 +435,11 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	for _, ind := range indicators {
 		total += ind.Weight
 	}
+	corroborations := computeCorroborations(indicators)
 	return Score{
 		Total:          total,
 		Indicators:     indicators,
-		Corroborations: computeCorroborations(indicators),
+		Corroborations: corroborations,
+		Confidence:     confidenceBand(indicators, corroborations, total),
 	}
 }

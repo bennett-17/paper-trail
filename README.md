@@ -155,7 +155,21 @@ And on top of all of the above, structural risk heuristics:
   18 months, which is), since a single rebrand decades apart is
   routine but several renames in quick succession is a known
   reputation-laundering/shell-company pattern, not itself proof of
-  one. UK charities
+  one. The same company profile is also checked for dormancy and
+  overdue accounts: company_status stays "active" for a dormant
+  company (confirmed live), so a dormant_company indicator catches
+  what status alone would miss, and an accounts_overdue indicator
+  flags a company currently behind on statutory filings -- either
+  signal is common and often innocuous on its own, but worth a second
+  look for an otherwise-active organization. Each UK charity's own
+  trustee count (already fetched, no extra API call needed) is checked
+  for governance concentration too: two or fewer trustees gets a
+  few_trustees indicator (confirmed live against a real charity with
+  exactly one), the same threshold UK charity governance guidance
+  itself recommends against, though it's common and often innocuous
+  for a small or newly formed charity -- skipped when a charity has
+  zero trustees on record, since that's more likely missing data than
+  a real governance gap. UK charities
   sharing a Charity Commission registered number under different
   suffixes (a main charity and its own linked/subsidiary charities) get
   a registry_linked_group indicator -- unlike every other one here,
@@ -183,6 +197,12 @@ And on top of all of the above, structural risk heuristics:
   high-risk or increased-monitoring list (a manually maintained
   snapshot refreshed after FATF's periodic plenary meetings, not a
   live feed -- FATF doesn't publish these as an API).
+  Every current Companies House officer and active PSC also gets
+  checked directly, regardless of any sanctions hit: their nationality
+  and country of residence are checked against FATF's lists too,
+  producing a person_jurisdiction_risk indicator on their own --
+  weaker than the sanctions-linked check above, but a signal this tool
+  would otherwise never surface at all.
   Officer/trustee names sourced from Companies House and the UK
   Charity Commission are also checked against Companies House's
   disqualified-directors register -- unlike every other indicator here
@@ -232,7 +252,15 @@ And on top of all of the above, structural risk heuristics:
   officer is a materially stronger combination) -- it adds no weight of
   its own, since every point is already counted by the indicators that
   produced it; it's a reorganization of that evidence, surfacing a
-  pattern a flat indicator list makes easy to miss. It's a
+  pattern a flat indicator list makes easy to miss. Every report also
+  carries a plain LOW/MEDIUM/HIGH confidence read next to the numeric
+  score -- deliberately not a pure function of the total, since summing
+  many weak signals shouldn't outrank one strong one: a single
+  high-weight indicator (a sanctions match or the disqualified-
+  directors match) or two or more corroborated pairs each push
+  straight to HIGH on their own, one corroborated pair or a moderate
+  indicator or a high-enough total is MEDIUM, everything else is LOW.
+  It's a
   lead-generation report, not a finding. `--diff <path>` compares a run
   against a previously saved `--output --json` report and shows only
   what's new -- entities, indicators, and the score change -- for

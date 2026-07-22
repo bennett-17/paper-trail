@@ -237,6 +237,9 @@ func TestAssessSumsWeightsAcrossAllIndicators(t *testing.T) {
 	if score.Total != 10 {
 		t.Errorf("Total = %d, want 10", score.Total)
 	}
+	if score.Confidence != "HIGH" {
+		t.Errorf("Confidence = %q, want HIGH (a weight-5 sanctions_match is present)", score.Confidence)
+	}
 	if len(score.Indicators) != 3 {
 		t.Fatalf("got %d indicators, want 3: %+v", len(score.Indicators), score.Indicators)
 	}
@@ -251,7 +254,57 @@ func TestAssessWithNoIndicatorsIsZero(t *testing.T) {
 	if score.Total != 0 {
 		t.Errorf("Total = %d, want 0", score.Total)
 	}
+	if score.Confidence != "LOW" {
+		t.Errorf("Confidence = %q, want LOW (no indicators at all)", score.Confidence)
+	}
 	if len(score.Indicators) != 0 {
 		t.Errorf("Indicators = %v, want empty", score.Indicators)
+	}
+}
+
+func TestConfidenceBandHighOnDisqualifiedDirectorAlone(t *testing.T) {
+	// A single weight-6 indicator (disqualified_director, this tool's
+	// highest) should push straight to HIGH even with a low total and
+	// no corroboration -- one strong signal shouldn't be diluted by
+	// being the only indicator present.
+	got := confidenceBand([]Indicator{
+		{Code: "disqualified_director", Weight: 6},
+	}, nil, 6)
+	if got != "HIGH" {
+		t.Errorf("Confidence = %q, want HIGH", got)
+	}
+}
+
+func TestConfidenceBandHighOnTwoCorroboratedPairs(t *testing.T) {
+	got := confidenceBand(
+		[]Indicator{{Code: "shared_address", Weight: 2}, {Code: "shared_person", Weight: 3}},
+		[]Corroboration{{}, {}}, // two corroborated pairs, content irrelevant to this check
+		5,
+	)
+	if got != "HIGH" {
+		t.Errorf("Confidence = %q, want HIGH (2+ corroborated pairs)", got)
+	}
+}
+
+func TestConfidenceBandMediumOnManyWeakIndicators(t *testing.T) {
+	// Ten weight-1 indicators sum to a total of 10 -- as high as the
+	// HIGH-triggering single sanctions_match case above -- but none of
+	// them is individually strong and there's no corroboration, so this
+	// should read as MEDIUM (total >= 5), not HIGH: summing many weak
+	// signals shouldn't outrank one strong one.
+	var indicators []Indicator
+	for i := 0; i < 10; i++ {
+		indicators = append(indicators, Indicator{Code: "formation_cluster", Weight: 1})
+	}
+	got := confidenceBand(indicators, nil, 10)
+	if got != "MEDIUM" {
+		t.Errorf("Confidence = %q, want MEDIUM (many weak indicators, none individually strong)", got)
+	}
+}
+
+func TestConfidenceBandLowOnASingleWeakIndicator(t *testing.T) {
+	got := confidenceBand([]Indicator{{Code: "shared_chargee", Weight: 1}}, nil, 1)
+	if got != "LOW" {
+		t.Errorf("Confidence = %q, want LOW", got)
 	}
 }
