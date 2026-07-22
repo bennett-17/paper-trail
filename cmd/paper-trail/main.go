@@ -285,7 +285,12 @@ entities at the same building under different specific offices still
 match (e.g. "123 Main St, Suite 200" vs. "123 Main St, Suite 450"),
 confirmed live catching two real same-building matches a 25-org scan's
 exact matcher missed entirely, one of them differing only in a bare
-address vs. one with a suite number appended -- plus any hit against either the US
+address vs. one with a suite number appended. Both the exact and fuzzy
+name/address matchers also fold common Latin diacritics before
+comparing (e.g. "José García" vs. "Jose Garcia", "Müller" vs.
+"Muller") -- a hand-maintained common-character table, not full
+Unicode normalization, since that needs a dependency this stdlib-only
+project doesn't take -- plus any hit against either the US
 sanctions screen (sanctions_match) or the UK Sanctions List
 (uk_sanctions_match, via uksanctions above -- the two lists overlap
 heavily but not completely, so both are checked), and,
@@ -321,7 +326,17 @@ index (see fulltext above) for a mention in some *other* company's
 filing -- e.g. a related-party footnote -- with its own
 filing_mention indicator, scored lowest of all of these since a filing
 can mention a name for reasons that have nothing to do with any real
-connection. UK, AU, and US nonprofit entities also carry a formation/
+connection. Each primary resolved EDGAR company is also checked
+against SEC's XBRL "company concept" API for its most recently
+reported total assets -- a shell_company_assets indicator flags
+anything under $150,000 despite being an active filer, SEC's own
+working definition of a shell company (confirmed live: a real
+self-disclosed shell ran $63k-$72k, a real pre-revenue clinical-stage
+biotech ran $4.5M-$7.8M, comfortably above). This only catches
+nominal-assets shells -- a pre-merger SPAC sitting on a large trust
+account is a textbook shell with substantial reported assets, a
+different pattern entirely this doesn't try to catch.
+UK, AU, and US nonprofit entities also carry a formation/
 registration/tax-exemption-ruling date where the source exposes one
 (EDGAR doesn't); a formation_cluster indicator flags two or more
 entities formed within 14 days of each other -- the weakest signal
@@ -410,7 +425,11 @@ large multi-term scan against many sources finishes substantially
 faster than running each source in sequence would, with identical
 results (confirmed live: a 25-term scan produced byte-identical
 entities/indicators/score before and after this change, in under a
-third of the wall-clock time). While a scan runs, progress lines
+third of the wall-clock time). Within each source, up to 4 query terms
+are also processed concurrently rather than one at a time (confirmed
+live under the race detector against a real multi-term scan, with a
+results-merge that keeps output ordering identical to running them one
+at a time). While a scan runs, progress lines
 ("[+12.3s] SEC EDGAR: term 4/25: ...") stream to stderr as each source
 processes each query term (and, for UK charities, each individual
 charity, since that step's own Companies House cascade is the slowest

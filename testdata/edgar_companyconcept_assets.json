@@ -1,0 +1,61 @@
+{
+  "cik": 1532383,
+  "taxonomy": "us-gaap",
+  "tag": "Assets",
+  "label": "Assets",
+  "description": "Sum of the carrying amounts as of the balance sheet date of all assets that are recognized.",
+  "entityName": "Vanjia Corporation",
+  "units": {
+    "USD": [
+      {
+        "end": "2025-06-30",
+        "val": 71959,
+        "accn": "0001017386-25-000095",
+        "fy": 2025,
+        "fp": "Q2",
+        "form": "10-Q",
+        "filed": "2025-08-14",
+        "frame": "CY2025Q2I"
+      },
+      {
+        "end": "2025-09-30",
+        "val": 71509,
+        "accn": "0001017386-25-000132",
+        "fy": 2025,
+        "fp": "Q3",
+        "form": "10-Q",
+        "filed": "2025-11-13",
+        "frame": "CY2025Q3I"
+      },
+      {
+        "end": "2025-12-31",
+        "val": 67309,
+        "accn": "0001017386-26-000019",
+        "fy": 2025,
+        "fp": "FY",
+        "form": "10-K",
+        "filed": "2026-03-26"
+      },
+      {
+        "end": "2025-12-31",
+        "val": 67309,
+        "accn": "0001017386-26-000068",
+        "fy": 2026,
+        "fp": "Q1",
+        "form": "10-Q",
+        "filed": "2026-05-15",
+        "frame": "CY2025Q4I"
+      },
+      {
+        "end": "2026-03-31",
+        "val": 63359,
+        "accn": "0001017386-26-000068",
+        "fy": 2026,
+        "fp": "Q1",
+        "form": "10-Q",
+        "filed": "2026-05-15",
+        "frame": "CY2026Q1I"
+      }
+    ]
+  }
+}

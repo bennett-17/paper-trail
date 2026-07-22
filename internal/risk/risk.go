@@ -167,12 +167,14 @@ var whitespaceRE = regexp.MustCompile(`\s+`)
 var punctRE = regexp.MustCompile(`[.,#]`)
 var nonDigitRE = regexp.MustCompile(`\D+`)
 
-// normalizeText collapses whitespace/punctuation/case differences so
-// "123 Main St." and "123 main st" (or "Jane A. Example" and
-// "jane a example") compare equal without claiming any deeper
-// fuzzy-matching than that. Used for addresses and person names.
+// normalizeText collapses whitespace/punctuation/case/diacritic
+// differences so "123 Main St." and "123 main st" (or "Jane A. Example"
+// and "jane a example", or "José García" and "Jose Garcia") compare
+// equal without claiming any deeper fuzzy-matching than that. Used for
+// addresses and person names.
 func normalizeText(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
+	s = foldDiacritics(s)
 	s = punctRE.ReplaceAllString(s, "")
 	s = whitespaceRE.ReplaceAllString(s, " ")
 	return s

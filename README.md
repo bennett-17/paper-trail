@@ -114,7 +114,12 @@ And on top of all of the above, structural risk heuristics:
   than running each source in sequence would, with identical results
   (confirmed live: a 25-term scan produced byte-identical output
   before and after this change, in under a third of the wall-clock
-  time). Progress lines stream to stderr as a scan runs (never to
+  time). Within each source, up to 4 query terms are also processed
+  concurrently rather than one at a time, for the same reason --
+  confirmed live under the race detector against a real multi-term
+  scan (which also caught and fixed a latent race in EDGAR's ticker-
+  map lazy-load, unreachable before query terms could run concurrently
+  against the same client). Progress lines stream to stderr as a scan runs (never to
   stdout or a `--output` file, so a `--json` report is never at risk)
   -- `--quiet` suppresses them. For SEC EDGAR, any related CIKs (see lookup's "Related CIKs"
   check) get their own address/insider lookup too, not just a bare
@@ -189,7 +194,12 @@ And on top of all of the above, structural risk heuristics:
   two entities at the same building under different specific offices
   still match (e.g. "123 Main St, Suite 200" vs. "123 Main St, Suite
   450") -- confirmed live catching two real same-building matches a
-  25-org scan's exact matcher missed entirely -- plus any
+  25-org scan's exact matcher missed entirely. Both the exact and fuzzy
+  matchers also fold common Latin diacritics before comparing (e.g.
+  "José García" vs. "Jose Garcia", "Müller" vs. "Muller") -- a
+  hand-maintained common-character table, not full Unicode
+  normalization, since that needs a dependency this stdlib-only
+  project doesn't take -- plus any
   hit against either the US sanctions screen or the UK Sanctions List
   (the two overlap heavily but not completely, so both are checked) on
   any name or person found, and a separate flag when a sanctions
@@ -222,7 +232,16 @@ And on top of all of the above, structural risk heuristics:
   fulltext above) for a mention in some *other* company's filing --
   its own indicator, scored lowest of the bunch since a filing can
   mention a name for reasons that have nothing to do with any real
-  connection. UK, AU, and US nonprofit entities also carry a formation
+  connection. Each primary resolved EDGAR company is also checked
+  against SEC's XBRL data for its most recently reported total assets
+  -- a shell_company_assets indicator flags anything under $150,000
+  despite being an active filer, SEC's own working definition of a
+  shell company (confirmed live against a real self-disclosed shell,
+  which ran $63k-$72k, versus a real pre-revenue biotech at
+  $4.5M-$7.8M). This only catches nominal-assets shells, not a
+  pre-merger SPAC sitting on a large trust account -- a textbook shell
+  with substantial reported assets, a different pattern entirely.
+  UK, AU, and US nonprofit entities also carry a formation
   or registration date (or, for US nonprofits, the IRS's tax-exemption
   ruling date) where the source exposes one -- EDGAR doesn't -- and a
   cluster of entities formed within 14 days of each other gets its own
@@ -505,6 +524,7 @@ source <(paper-trail completion zsh)
 ## Architecture
 
 ```
+.github/workflows/ci.yml     # gofmt/vet/build/test -race on every push and PR to main
 cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, risk, completion subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
@@ -547,7 +567,11 @@ go test ./...
 
 Tests run entirely against recorded fixture responses in `testdata/` via
 `httptest.Server` — no live network calls, so they run offline and won't
-hit SEC's rate limits.
+hit SEC's rate limits. `.github/workflows/ci.yml` runs `gofmt -l`, `go vet`,
+`go build`, and `go test -race` on every push and pull request to `main` --
+`-race` matters here specifically: `risk` runs several sources and, within
+each source, several query terms concurrently, and the race detector has
+already caught one real bug in that concurrency (see git history).
 
 `cmd/smoketest` is a separate, manually-run tool for validating against
 the *live* API once you have a working `EDGAR_USER_AGENT` set:

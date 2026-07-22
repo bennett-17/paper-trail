@@ -27,10 +27,11 @@ var nameTitleWords = map[string]bool{
 
 var nameTokenPunctRE = regexp.MustCompile(`[.,]`)
 
-// tokenizeName splits a name into lowercase, punctuation-stripped
-// words, dropping title/honorific noise words.
+// tokenizeName splits a name into lowercase, diacritic-folded,
+// punctuation-stripped words, dropping title/honorific noise words.
 func tokenizeName(s string) []string {
 	s = strings.ToLower(s)
+	s = foldDiacritics(s)
 	s = nameTokenPunctRE.ReplaceAllString(s, " ")
 	words := strings.Fields(s)
 	tokens := make([]string, 0, len(words))

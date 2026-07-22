@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -77,6 +78,33 @@ func TestNewClientRejectsUserAgentWithoutEmail(t *testing.T) {
 	if _, err := NewClient("Just A Name"); err == nil {
 		t.Fatal("expected error for user agent without an email address")
 	}
+}
+
+// TestResolveCIKConcurrentCallsDoNotRace guards a real bug found live
+// (via go test -race against an actual multi-term risk scan): the
+// ticker map's lazy-load used a check-then-fetch-then-write pattern
+// that released its lock between the check and the write, so two
+// goroutines both seeing a nil map would race writing the result --
+// unreachable before risk's per-source query terms were parallelized,
+// real once they were. Run with -race to actually catch a regression;
+// this test passes either way, but only proves something under -race.
+func TestResolveCIKConcurrentCallsDoNotRace(t *testing.T) {
+	tickers := mustReadFixture(t, "company_tickers.json")
+	srv := newTestServer(t, tickers, "", "", 0, 0)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.ResolveCIK("AAPL"); err != nil {
+				t.Errorf("ResolveCIK: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestResolveCIKByTicker(t *testing.T) {
@@ -166,6 +194,59 @@ func TestResolveCIKAmbiguous(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "matched 2 companies") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestGetTotalAssetsUsesLatestEndDate reproduces a live example
+// (Vanjia Corporation, a self-disclosed shell company) whose fixture
+// carries a duplicate 2025-12-31 entry (once from its 10-K, once
+// repeated as comparative data in the next 10-Q) -- GetTotalAssets
+// must pick the entry with the latest "end" date (2026-03-31), not
+// just the last one in the array or the first duplicate encountered.
+func TestGetTotalAssetsUsesLatestEndDate(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/companyconcept/CIK0001532383/us-gaap/Assets.json", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "edgar_companyconcept_assets.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	c.CompanyConceptURL = srv.URL + "/companyconcept/CIK%s/%s/%s.json"
+
+	val, asOf, found, err := c.GetTotalAssets("1532383")
+	if err != nil {
+		t.Fatalf("GetTotalAssets: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if asOf != "2026-03-31" {
+		t.Errorf("asOf = %q, want 2026-03-31 (the latest end date)", asOf)
+	}
+	if val != 63359 {
+		t.Errorf("val = %d, want 63359", val)
+	}
+}
+
+func TestGetTotalAssetsNotFoundIsNotAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/companyconcept/CIK0000320193/us-gaap/Assets.json", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	c.CompanyConceptURL = srv.URL + "/companyconcept/CIK%s/%s/%s.json"
+
+	val, asOf, found, err := c.GetTotalAssets("320193")
+	if err != nil {
+		t.Fatalf("GetTotalAssets: %v, want a 404 to be treated as found=false, not an error", err)
+	}
+	if found {
+		t.Errorf("found = true, want false for a company that has never reported this tag")
+	}
+	if val != 0 || asOf != "" {
+		t.Errorf("val=%d asOf=%q, want zero values when not found", val, asOf)
 	}
 }
 

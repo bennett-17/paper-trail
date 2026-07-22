@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bennett-17/paper-trail/internal/aucharity"
@@ -14,33 +15,117 @@ import (
 	"github.com/bennett-17/paper-trail/internal/ukcharity"
 )
 
+// queryTermConcurrency bounds how many query terms each source
+// processes at once. Each client already self-throttles (see e.g.
+// internal/companieshouse's MinInterval), and that throttle only gates
+// how often a new request may *start*, not the full round-trip -- so
+// concurrent callers already overlap in-flight requests safely without
+// any change to that throttling logic (confirmed empirically: a
+// benchmark against the same throttle pattern this codebase uses
+// showed a ~2.8x wall-clock improvement for 5 requests at realistic
+// network latency). This is a fixed cap, not one-goroutine-per-term,
+// so a large --input-file watchlist doesn't launch hundreds of
+// concurrent requests against a free or volunteer-run API at once.
+const queryTermConcurrency = 4
+
+// runConcurrentQueries runs work for every query term with bounded
+// concurrency (queryTermConcurrency workers), returning per-term
+// results indexed by original query position -- so callers can flatten
+// them back in query order after every worker finishes, keeping output
+// deterministic regardless of which term's work happens to complete
+// first. Same determinism guarantee already used for the source-level
+// (phase 1/phase 2) concurrency in runRisk.
+func runConcurrentQueries[T any](queries []string, work func(i int, query string) T) []T {
+	results := make([]T, len(queries))
+	sem := make(chan struct{}, queryTermConcurrency)
+	var wg sync.WaitGroup
+	for i, query := range queries {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, query string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = work(i, query)
+		}(i, query)
+	}
+	wg.Wait()
+	return results
+}
+
+// queryResult is one query term's contribution to a gather function's
+// result -- entities, extra indicators, and notes, all local to that
+// term until runConcurrentQueries's caller flattens every result back
+// in query order.
+type queryResult struct {
+	entities []risk.Entity
+	extra    []risk.Indicator
+	notes    []string
+}
+
+// flattenQueryResults appends every result's entities/extra/notes, in
+// order, onto the given slices.
+func flattenQueryResults(results []queryResult) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+	for _, r := range results {
+		entities = append(entities, r.entities...)
+		extra = append(extra, r.extra...)
+		notes = append(notes, r.notes...)
+	}
+	return entities, extra, notes
+}
+
 // gatherEDGAREntities resolves every query term to an SEC EDGAR
 // company (including any related CIKs after a corporate
 // restructuring) and its Form 3/4/5 insiders / Schedule 13D/13G
-// beneficial owners.
-func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string) {
-	note := func(format string, a ...any) { notes = append(notes, "SEC EDGAR: "+fmt.Sprintf(format, a...)) }
-	for i, query := range queries {
+// beneficial owners. The primary resolved company per query term is
+// also checked for near-zero total assets (see shellCompanyAssetThreshold).
+func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+	results := runConcurrentQueries(queries, func(i int, query string) queryResult {
 		progress.report("SEC EDGAR", "term %d/%d: %q", i+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) { r.notes = append(r.notes, "SEC EDGAR: "+fmt.Sprintf(format, a...)) }
+
 		cacheKey := riskcache.Key("edgar", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			entities = append(entities, cached...)
-			continue
+			r.entities = cached
+			return r
 		}
 
 		cik, err := edgarClient.ResolveCIK(query)
 		if err != nil {
 			note("no match for %q", query)
 			cache.Set(cacheKey, nil) // cache the "no match" too, not just hits
-			continue
+			return r
 		}
 		company, err := edgarClient.GetCompany(cik)
 		if err != nil {
 			note("%v", err)
-			continue // a transient failure shouldn't be cached as a permanent miss
+			return r // a transient failure shouldn't be cached as a permanent miss
 		}
 		var termEntities []risk.Entity
-		termEntities = append(termEntities, edgarEntityFromCompany(edgarClient, company, limit))
+		primaryEntity := edgarEntityFromCompany(edgarClient, company, limit)
+		termEntities = append(termEntities, primaryEntity)
+
+		// Shell-company financial check: near-zero total assets on an
+		// active EDGAR filer is a classic shell-company tell -- SEC's
+		// own definition is "no or nominal operations and ... no or
+		// nominal assets". Only checked for the primary resolved
+		// company per query term (not every related CIK), to keep the
+		// extra API call proportional to query volume, same reasoning
+		// as the other per-entity financial checks below. This won't
+		// catch every kind of shell -- a pre-merger SPAC sitting on a
+		// large trust account is a textbook shell with substantial
+		// reported assets, a different pattern entirely.
+		if val, asOf, found, err := edgarClient.GetTotalAssets(cik); err != nil {
+			note("%s shell-company check: %v", company.Name, err)
+		} else if found && val < shellCompanyAssetThreshold {
+			r.extra = append(r.extra, risk.Indicator{
+				Code:        "shell_company_assets",
+				Description: "This filer reports near-zero total assets despite being an active SEC filer -- consistent with a shell company (SEC's own definition: no or nominal operations and no or nominal assets), not itself evidence of wrongdoing (a genuine early-stage or wind-down company can also look like this briefly)",
+				Weight:      2,
+				Entities:    []string{primaryEntity.Label()},
+				Evidence:    fmt.Sprintf("total assets $%d as of %s", val, asOf),
+			})
+		}
 
 		// Related CIKs (former identities after a corporate
 		// restructuring) are the clearest possible evidence for
@@ -61,35 +146,38 @@ func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int,
 				termEntities = append(termEntities, edgarEntityFromCompany(edgarClient, reCompany, limit))
 			}
 		}
-		entities = append(entities, termEntities...)
+		r.entities = termEntities
 		cache.Set(cacheKey, termEntities)
-	}
-	return entities, notes
+		return r
+	})
+	return flattenQueryResults(results)
 }
 
 // gatherNonprofitEntities resolves every query term against IRS Form
 // 990 data (via ProPublica) and flags a large year-over-year swing in
 // an organization's own multi-year revenue/asset history.
 func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
-	note := func(format string, a ...any) { notes = append(notes, "IRS Form 990: "+fmt.Sprintf(format, a...)) }
 	npClient := nonprofit.NewClient()
-	for i, query := range queries {
+	results := runConcurrentQueries(queries, func(i int, query string) queryResult {
 		progress.report("IRS Form 990", "term %d/%d: %q", i+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) { r.notes = append(r.notes, "IRS Form 990: "+fmt.Sprintf(format, a...)) }
+
 		cacheKey := riskcache.Key("nonprofit", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			entities = append(entities, cached...)
-			continue
+			r.entities = cached
+			return r
 		}
 
 		result, err := npClient.SearchOrganizations(query, 1)
 		if err != nil {
 			note("%v", err)
-			continue
+			return r
 		}
 		if len(result.Organizations) == 0 {
 			note("no match for %q", query)
 			cache.Set(cacheKey, nil)
-			continue
+			return r
 		}
 		var termEntities []risk.Entity
 		for i, o := range result.Organizations {
@@ -116,7 +204,7 @@ func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache
 			// has an innocuous explanation (a one-time major grant, a
 			// capital campaign, a program winding down).
 			if desc := financialAnomaly(profile.Filings); desc != "" {
-				extra = append(extra, risk.Indicator{
+				r.extra = append(r.extra, risk.Indicator{
 					Code:        "financial_anomaly",
 					Description: "A large year-over-year swing in reported revenue or assets -- often innocuous (a one-time grant, a capital campaign, a program winding down), but worth checking against the underlying Form 990 for what changed",
 					Weight:      1,
@@ -131,7 +219,7 @@ func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache
 			// Companies House/UK-AU-charity sources, so this can't
 			// feed the shared_person check the way those do.
 			if desc := highOfficerCompensation(profile.Filings); desc != "" {
-				extra = append(extra, risk.Indicator{
+				r.extra = append(r.extra, risk.Indicator{
 					Code:        "high_officer_compensation",
 					Description: "Total compensation to current officers/directors/trustees/key employees is a large share of total functional expenses -- often innocuous (a small or founder-led organization, a single well-compensated executive at a lean nonprofit), but worth checking against the underlying Form 990 for who and why",
 					Weight:      1,
@@ -140,10 +228,11 @@ func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache
 				})
 			}
 		}
-		entities = append(entities, termEntities...)
+		r.entities = termEntities
 		cache.Set(cacheKey, termEntities)
-	}
-	return entities, extra, notes
+		return r
+	})
+	return flattenQueryResults(results)
 }
 
 // gatherACNCEntities resolves every query term against the Australian
@@ -156,29 +245,29 @@ func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache
 // shared_person check; foundAUEntity tracks whether to note that
 // once, rather than once per query term.
 func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string) {
-	note := func(format string, a ...any) { notes = append(notes, "ACNC (Australia): "+fmt.Sprintf(format, a...)) }
 	auClient := aucharity.NewClient()
-	foundAUEntity := false
-	for i, query := range queries {
+	results := runConcurrentQueries(queries, func(i int, query string) queryResult {
 		progress.report("ACNC (Australia)", "term %d/%d: %q", i+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) {
+			r.notes = append(r.notes, "ACNC (Australia): "+fmt.Sprintf(format, a...))
+		}
+
 		cacheKey := riskcache.Key("aucharity", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			entities = append(entities, cached...)
-			if len(cached) > 0 {
-				foundAUEntity = true
-			}
-			continue
+			r.entities = cached
+			return r
 		}
 
 		result, err := auClient.SearchCharities(query, 0, limit)
 		if err != nil {
 			note("%v", err)
-			continue
+			return r
 		}
 		if len(result.Charities) == 0 {
 			note("no match for %q", query)
 			cache.Set(cacheKey, nil)
-			continue
+			return r
 		}
 		var termEntities []risk.Entity
 		for _, c := range result.Charities {
@@ -192,15 +281,20 @@ func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cac
 			}
 			e.FormedOn = c.RegistrationDate
 			termEntities = append(termEntities, e)
-			foundAUEntity = true
 		}
-		entities = append(entities, termEntities...)
+		r.entities = termEntities
 		cache.Set(cacheKey, termEntities)
-	}
-	if foundAUEntity {
-		note("officer/trustee names aren't available for these entities -- " +
-			"ASIC's free datasets don't include them (only paid extracts or restricted broker API " +
-			"access do), so AU entities can't contribute to the shared-person check")
+		return r
+	})
+
+	entities, _, notes = flattenQueryResults(results)
+	for _, e := range entities {
+		if e.Source == "aucharity" {
+			notes = append(notes, "ACNC (Australia): officer/trustee names aren't available for these entities -- "+
+				"ASIC's free datasets don't include them (only paid extracts or restricted broker API "+
+				"access do), so AU entities can't contribute to the shared-person check")
+			break
+		}
 	}
 	return entities, notes
 }
@@ -216,38 +310,40 @@ func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cac
 // already guards for that, matching the pre-refactor behavior of
 // simply skipping that data rather than erroring.
 func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
-	note := func(format string, a ...any) {
-		notes = append(notes, "UK Charity Commission: "+fmt.Sprintf(format, a...))
-	}
-	chNote := func(format string, a ...any) { notes = append(notes, "Companies House: "+fmt.Sprintf(format, a...)) }
-
 	ukClient, err := ukcharity.NewClient("", "")
 	if err != nil {
-		note("skipped (%v)", err)
-		return nil, nil, notes
+		return nil, nil, []string{fmt.Sprintf("UK Charity Commission: skipped (%v)", err)}
 	}
 
-	for qi, query := range queries {
+	results := runConcurrentQueries(queries, func(qi int, query string) queryResult {
 		progress.report("UK Charity Commission", "term %d/%d: %q", qi+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) {
+			r.notes = append(r.notes, "UK Charity Commission: "+fmt.Sprintf(format, a...))
+		}
+		chNote := func(format string, a ...any) {
+			r.notes = append(r.notes, "Companies House: "+fmt.Sprintf(format, a...))
+		}
+
 		// Cached under "ukcharity" but covers the Companies House
 		// officer lookups below too, since those are already baked
 		// into each cached entity's People field -- no separate
 		// Companies House cache entry needed.
 		cacheKey := riskcache.Key("ukcharity", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			entities = append(entities, cached...)
-			continue
+			r.entities = cached
+			return r
 		}
 
 		charities, err := ukClient.SearchCharities(query)
 		if err != nil {
 			note("%v", err)
-			continue
+			return r
 		}
 		if len(charities) == 0 {
 			note("no match for %q", query)
 			cache.Set(cacheKey, nil)
-			continue
+			return r
 		}
 		var termEntities []risk.Entity
 		for i, c := range charities {
@@ -327,7 +423,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 					// within a few years is a known reputation-
 					// laundering/shell-company pattern.
 					if desc := frequentRenaming(company.PreviousNames); desc != "" {
-						extra = append(extra, risk.Indicator{
+						r.extra = append(r.extra, risk.Indicator{
 							Code:        "frequent_renaming",
 							Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
 							Weight:      2,
@@ -349,7 +445,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 					// second look, especially alongside other
 					// indicators.
 					if company.LastAccountsType == "dormant" {
-						extra = append(extra, risk.Indicator{
+						r.extra = append(r.extra, risk.Indicator{
 							Code:        "dormant_company",
 							Description: "This entity's linked Companies House company's last filed accounts declared no significant trading activity -- common and often innocuous for a genuine holding company, but worth a second look for an otherwise-active organization",
 							Weight:      1,
@@ -358,7 +454,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 						})
 					}
 					if company.AccountsOverdue {
-						extra = append(extra, risk.Indicator{
+						r.extra = append(r.extra, risk.Indicator{
 							Code:        "accounts_overdue",
 							Description: "This entity's linked Companies House company has overdue statutory accounts -- often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off and is itself a compliance red flag",
 							Weight:      1,
@@ -405,7 +501,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			// publish trustee names for this record than that a real
 			// charity legitimately has none.
 			if n := len(detail.Trustees); n > 0 && n <= fewTrusteesThreshold {
-				extra = append(extra, risk.Indicator{
+				r.extra = append(r.extra, risk.Indicator{
 					Code:        "few_trustees",
 					Description: "This charity is governed by very few trustees -- a known control-concentration red flag in charity regulation, though a small or newly formed charity having few trustees is also common and often innocuous",
 					Weight:      1,
@@ -427,7 +523,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				if count, err := chClient.CountCompaniesAtLocation(detail.Postcode); err != nil {
 					chNote("%s address density check: %v", detail.Name, err)
 				} else if count >= mailDropAddressThreshold {
-					extra = append(extra, risk.Indicator{
+					r.extra = append(r.extra, risk.Indicator{
 						Code:        "mail_drop_address",
 						Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way)",
 						Weight:      2,
@@ -459,7 +555,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 						continue
 					}
 					flaggedPeople[key] = true
-					extra = append(extra, risk.Indicator{
+					r.extra = append(r.extra, risk.Indicator{
 						Code:        "person_jurisdiction_risk",
 						Description: "An officer or beneficial owner's nationality or country of residence is on FATF's high-risk or increased-monitoring list -- on its own a weaker signal than a sanctions match in a FATF-flagged jurisdiction, but worth noting regardless of any sanctions hit",
 						Weight:      weight - 1,
@@ -505,10 +601,11 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				}
 			}
 		}
-		entities = append(entities, termEntities...)
+		r.entities = termEntities
 		cache.Set(cacheKey, termEntities)
-	}
-	return entities, extra, notes
+		return r
+	})
+	return flattenQueryResults(results)
 }
 
 // financialAnomalyRatio is how large a year-over-year multiple in

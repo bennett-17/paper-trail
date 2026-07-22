@@ -49,6 +49,19 @@ const (
 	highOfficerCompensationMinExpenses = 1_000_000
 )
 
+// shellCompanyAssetThreshold is how low an EDGAR filer's total assets
+// can go before shell_company_assets fires. Chosen from live
+// observation: Vanjia Corporation, a company that explicitly discloses
+// itself as a shell on its own 10-K cover page, reported $63k-$72k in
+// total assets across its recent filings; Processa Pharmaceuticals, a
+// genuine pre-revenue clinical-stage biotech (so a company that could
+// otherwise look "shell-like" on revenue alone), reported $4.5M-$7.8M
+// -- comfortably two orders of magnitude above. This only catches
+// nominal-assets shells, not every kind: a pre-merger SPAC sitting on
+// a large trust account is a textbook shell with substantial reported
+// assets, a different pattern entirely.
+const shellCompanyAssetThreshold = 150_000
+
 // riskReportJSON is the shape of a risk --json report -- named (not
 // anonymous) so --diff can decode a previously saved one back in for
 // comparison against a new run.
@@ -331,7 +344,7 @@ func runRisk(args []string) {
 	// fixed order below, after every goroutine finishes, so output stays
 	// deterministic regardless of which source happens to finish first.
 	var edgarEntities, npEntities, acncEntities, ukEntities []risk.Entity
-	var npExtra, ukExtra []risk.Indicator
+	var edgarExtra, npExtra, ukExtra []risk.Indicator
 	var edgarNotes, npNotes, acncNotes, ukNotes []string
 	var wg sync.WaitGroup
 
@@ -339,7 +352,7 @@ func runRisk(args []string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			edgarEntities, edgarNotes = gatherEDGAREntities(edgarClient, queries, *limit, cache, cacheTTL, progress)
+			edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, *limit, cache, cacheTTL, progress)
 		}()
 	}
 	wg.Add(1)
@@ -363,6 +376,7 @@ func runRisk(args []string) {
 	entities = append(entities, npEntities...)
 	entities = append(entities, acncEntities...)
 	entities = append(entities, ukEntities...)
+	extra = append(extra, edgarExtra...)
 	extra = append(extra, npExtra...)
 	extra = append(extra, ukExtra...)
 	notes = append(notes, edgarNotes...)

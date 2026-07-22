@@ -23,6 +23,13 @@ const (
 	DefaultSubmissionsURL    = "https://data.sec.gov/submissions/CIK%s.json"
 	DefaultBrowseEdgarURL    = "https://www.sec.gov/cgi-bin/browse-edgar"
 	DefaultFullTextSearchURL = "https://efts.sec.gov/LATEST/search-index"
+	// DefaultCompanyConceptURL is SEC's XBRL "company concept" endpoint
+	// -- a single tag's full reported history, a few KB, unlike the
+	// full "company facts" endpoint (megabytes for an established
+	// filer, since it returns every XBRL tag a company has ever used).
+	// Format args: 10-digit CIK, taxonomy (e.g. "us-gaap"), tag (e.g.
+	// "Assets").
+	DefaultCompanyConceptURL = "https://data.sec.gov/api/xbrl/companyconcept/CIK%s/%s/%s.json"
 )
 
 // ClientError wraps errors raised by this package so callers can
@@ -53,6 +60,7 @@ type Client struct {
 	SubmissionsURL    string // format string with a single %s for the 10-digit CIK
 	BrowseEdgarURL    string
 	FullTextSearchURL string
+	CompanyConceptURL string // format string with three %s: 10-digit CIK, taxonomy, tag
 
 	// MaxRetries/RetryBaseDelay govern retry-with-backoff on 429, same
 	// approach as internal/companieshouse and internal/sanctions --
@@ -68,6 +76,18 @@ type Client struct {
 
 	mu            sync.Mutex
 	lastRequestAt time.Time
+
+	// tickerMapOnce guards the lazy load below with sync.Once rather
+	// than a hand-rolled check-then-fetch-then-write dance -- confirmed
+	// live (via the race detector) that the naive version is a real
+	// data race once ResolveCIK can be called concurrently across query
+	// terms: two goroutines both see a nil map, both fetch and parse
+	// the ticker file independently, then race writing the results.
+	// Once.Do's happens-before guarantee means every read of
+	// tickerByCode/tickerByName below is safe with no further locking,
+	// once the one-time load has completed.
+	tickerMapOnce sync.Once
+	tickerMapErr  error
 	tickerByCode  map[string]string // uppercase ticker -> 10-digit CIK
 	tickerByName  map[string]string // lowercase name -> 10-digit CIK
 
@@ -103,6 +123,7 @@ func NewClient(userAgent string) (*Client, error) {
 		SubmissionsURL:    DefaultSubmissionsURL,
 		BrowseEdgarURL:    DefaultBrowseEdgarURL,
 		FullTextSearchURL: DefaultFullTextSearchURL,
+		CompanyConceptURL: DefaultCompanyConceptURL,
 		CacheDir:          cacheDir,
 		MaxRetries:        3,
 		RetryBaseDelay:    time.Second,
@@ -188,13 +209,13 @@ type tickerEntry struct {
 }
 
 func (c *Client) loadTickerMap() error {
-	c.mu.Lock()
-	if c.tickerByCode != nil {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
+	c.tickerMapOnce.Do(func() {
+		c.tickerMapErr = c.doLoadTickerMap()
+	})
+	return c.tickerMapErr
+}
 
+func (c *Client) doLoadTickerMap() error {
 	body, err := c.get(c.TickersURL)
 	if err != nil {
 		return err
@@ -216,10 +237,8 @@ func (c *Client) loadTickerMap() error {
 		}
 	}
 
-	c.mu.Lock()
 	c.tickerByCode = byCode
 	c.tickerByName = byName
-	c.mu.Unlock()
 	return nil
 }
 
@@ -418,6 +437,57 @@ func (c *Client) GetCompany(cik string) (Company, error) {
 		FiscalYearEnd:   data.FiscalYearEnd,
 		EntityType:      data.EntityType,
 	}, nil
+}
+
+type xbrlConceptResponse struct {
+	Units struct {
+		USD []struct {
+			End string `json:"end"`
+			Val int64  `json:"val"`
+		} `json:"USD"`
+	} `json:"units"`
+}
+
+// GetTotalAssets fetches a filer's most recently reported total assets
+// (XBRL us-gaap:Assets, in USD) via SEC's lightweight XBRL "company
+// concept" endpoint, along with the as-of date. found is false, not an
+// error, if this filer has never reported this tag under this taxonomy
+// (confirmed live: a 404, not an empty/zero result) -- common for
+// filers that predate XBRL, or that report total assets under a
+// different, less common tag. A company can report the same period's
+// figure in more than one filing (e.g. a prior year-end repeated as
+// comparative data in the next 10-Q); the entry with the latest "end"
+// date wins.
+func (c *Client) GetTotalAssets(cik string) (val int64, asOf string, found bool, err error) {
+	cik10 := zeroPadCIK(cik)
+	u := fmt.Sprintf(c.CompanyConceptURL, cik10, "us-gaap", "Assets")
+
+	status, body, doErr := c.doGetWithRetry(u)
+	if doErr != nil {
+		return 0, "", false, doErr
+	}
+	if status == http.StatusNotFound {
+		return 0, "", false, nil
+	}
+	if status < 200 || status >= 300 {
+		return 0, "", false, newClientError("SEC EDGAR returned HTTP %d for %s", status, u)
+	}
+
+	var resp xbrlConceptResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return 0, "", false, newClientError("parsing XBRL company concept for CIK %s: %v", cik10, err)
+	}
+
+	for _, e := range resp.Units.USD {
+		if e.End > asOf {
+			asOf = e.End
+			val = e.Val
+		}
+	}
+	if asOf == "" {
+		return 0, "", false, nil
+	}
+	return val, asOf, true, nil
 }
 
 // -- related-CIK / restructuring detection -----------------------------------
