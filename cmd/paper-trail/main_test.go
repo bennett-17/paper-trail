@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
+	"strings"
 	"testing"
 )
 
@@ -163,5 +165,71 @@ func TestSameCompanyNumberIgnoresLeadingZeroPadding(t *testing.T) {
 	}
 	if sameCompanyNumber("4325234", "04325235") {
 		t.Error("expected genuinely different numbers to compare unequal")
+	}
+}
+
+func TestVersionStringNoBuildInfoFallsBackPlainly(t *testing.T) {
+	got := versionString(nil, false)
+	if !strings.Contains(got, "paper-trail") || !strings.Contains(got, "unavailable") {
+		t.Errorf("got %q, want a plain fallback message", got)
+	}
+}
+
+// TestVersionStringDevelFallsBackToDev reproduces `go run`'s own
+// build info shape, confirmed live: Main.Version comes back
+// "(devel)" (not empty) for an ephemeral go-run build, which should
+// still read as "dev", not the literal "(devel)".
+func TestVersionStringDevelFallsBackToDev(t *testing.T) {
+	info := &debug.BuildInfo{
+		GoVersion: "go1.26.5",
+		Main:      debug.Module{Version: "(devel)"},
+	}
+	got := versionString(info, true)
+	if !strings.Contains(got, "paper-trail dev") {
+		t.Errorf("got %q, want it to report \"dev\", not the literal \"(devel)\"", got)
+	}
+}
+
+// TestVersionStringIncludesRevisionAndDirtyFlag reproduces a real go
+// build's build info (confirmed live via `go version -m` against an
+// actual built binary in this git checkout): a pseudo-version plus
+// vcs.revision/vcs.modified settings.
+func TestVersionStringIncludesRevisionAndDirtyFlag(t *testing.T) {
+	info := &debug.BuildInfo{
+		GoVersion: "go1.26.5",
+		Main:      debug.Module{Version: "v0.0.0-20260722204817-f69d8765ad69+dirty"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs", Value: "git"},
+			{Key: "vcs.revision", Value: "f69d8765ad69c73d5545a55be0ae7e7bafcdbcf9"},
+			{Key: "vcs.modified", Value: "true"},
+		},
+	}
+	got := versionString(info, true)
+	if !strings.Contains(got, "f69d8765ad69") {
+		t.Errorf("got %q, want the (truncated to 12 chars) commit hash", got)
+	}
+	if strings.Contains(got, "f69d8765ad69c73d5545a55be0ae7e7bafcdbcf9") {
+		t.Errorf("got %q, want the commit hash truncated, not the full 40 chars", got)
+	}
+	if !strings.Contains(got, "dirty") {
+		t.Errorf("got %q, want it to flag the dirty working tree", got)
+	}
+	if !strings.Contains(got, "go1.26.5") {
+		t.Errorf("got %q, want the Go toolchain version", got)
+	}
+}
+
+func TestVersionStringCleanTreeOmitsDirtyFlag(t *testing.T) {
+	info := &debug.BuildInfo{
+		GoVersion: "go1.26.5",
+		Main:      debug.Module{Version: "v1.0.0"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "abc123def456"},
+			{Key: "vcs.modified", Value: "false"},
+		},
+	}
+	got := versionString(info, true)
+	if strings.Contains(got, "dirty") {
+		t.Errorf("got %q, want no dirty flag for a clean working tree", got)
 	}
 }

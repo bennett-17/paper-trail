@@ -293,6 +293,9 @@ And on top of all of the above, structural risk heuristics:
   directors match) or two or more corroborated pairs each push
   straight to HIGH on their own, one corroborated pair or a moderate
   indicator or a high-enough total is MEDIUM, everything else is LOW.
+  The band always comes with a one-line reason naming the specific
+  factor behind it (e.g. "disqualified_director indicator at weight
+  6" or "2 corroborated pairs"), so it's never a black box.
   It's a
   lead-generation report, not a finding. `--diff <path>` compares a run
   against a previously saved `--output --json` report and shows only
@@ -307,7 +310,11 @@ And on top of all of the above, structural risk heuristics:
   for "the top N matching this filter". The total score and confidence
   band still reflect every indicator found regardless of any of these,
   and `--diff` still compares against the full set, so none of them can
-  hide a genuinely new indicator from a diff. `--exclude <terms>`
+  hide a genuinely new indicator from a diff. `--min-corroboration <n>`
+  is the same idea for the Corroborations rollup instead: show only
+  corroborated pairs matched on at least `<n>` distinct indicator
+  codes -- Corroborations never contributed to Total in the first
+  place, so there's nothing to recompute. `--exclude <terms>`
   (comma-separated) and `--exclude-file <path>` are different from all
   of the above: any indicator whose evidence or entity labels contain
   one of these terms (case-insensitive) is treated as not a real
@@ -326,6 +333,13 @@ And on top of all of the above, structural risk heuristics:
   either applies -- for scripting/dashboards. Combine with `--fail-on`
   and `--quiet` for a silent CI check that only prints one line and
   exits non-zero on a real hit.
+  `--webhook <url>` requires `--fail-on` too: when the threshold is
+  met, a JSON alert is POSTed to `<url>` before exiting. A
+  `hooks.slack.com` or `discord.com/api/webhooks` URL gets that
+  platform's own minimal message format (confirmed live against each
+  platform's current docs); any other URL gets the full compact
+  summary as the POST body. A failed send is a warning, not a change
+  to the exit status -- `--fail-on` already communicates that.
 
 ## Why
 
@@ -535,6 +549,11 @@ go run ./cmd/paper-trail risk --input-file watchlist.txt --fail-on HIGH --quiet
 # Or print one compact line instead of the full report -- pairs well
 # with --fail-on for a monitoring job that only needs the headline
 go run ./cmd/paper-trail risk --input-file watchlist.txt --summary --quiet
+
+# Or have a real hit actually notify someone -- posts to Slack/Discord's
+# own message format automatically, or a plain JSON summary to any
+# other URL for a custom integration to parse
+go run ./cmd/paper-trail risk --input-file watchlist.txt --fail-on HIGH --webhook https://hooks.slack.com/services/... --quiet
 ```
 
 `--cik <cik>` works on `lookup`/`graph` in place of a name/ticker query,
@@ -550,6 +569,10 @@ go build -o paper-trail ./cmd/paper-trail
 
 Every command supports `--json` to print machine-readable output instead
 of the formatted console view.
+
+`paper-trail version` (also `-v`/`--version`) prints the module version
+and VCS commit, derived automatically from Go's own build info -- no
+separate version-injection build step to remember.
 
 ### Shell completion
 
@@ -569,7 +592,7 @@ source <(paper-trail completion zsh)
 
 ```
 .github/workflows/ci.yml     # gofmt/vet/build/test -race on every push and PR to main
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, risk, completion subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, risk, completion, version subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY

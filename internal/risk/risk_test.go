@@ -1,6 +1,9 @@
 package risk
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSharedAddressesFlagsTwoDistinctEntities(t *testing.T) {
 	entities := []Entity{
@@ -300,22 +303,28 @@ func TestConfidenceBandHighOnDisqualifiedDirectorAlone(t *testing.T) {
 	// highest) should push straight to HIGH even with a low total and
 	// no corroboration -- one strong signal shouldn't be diluted by
 	// being the only indicator present.
-	got := confidenceBand([]Indicator{
+	got, reason := confidenceBand([]Indicator{
 		{Code: "disqualified_director", Weight: 6},
 	}, nil, 6)
 	if got != "HIGH" {
 		t.Errorf("Confidence = %q, want HIGH", got)
 	}
+	if !strings.Contains(reason, "disqualified_director") || !strings.Contains(reason, "6") {
+		t.Errorf("reason = %q, want it to name disqualified_director and weight 6", reason)
+	}
 }
 
 func TestConfidenceBandHighOnTwoCorroboratedPairs(t *testing.T) {
-	got := confidenceBand(
+	got, reason := confidenceBand(
 		[]Indicator{{Code: "shared_address", Weight: 2}, {Code: "shared_person", Weight: 3}},
 		[]Corroboration{{}, {}}, // two corroborated pairs, content irrelevant to this check
 		5,
 	)
 	if got != "HIGH" {
 		t.Errorf("Confidence = %q, want HIGH (2+ corroborated pairs)", got)
+	}
+	if !strings.Contains(reason, "2") || !strings.Contains(reason, "corroborated") {
+		t.Errorf("reason = %q, want it to mention the 2 corroborated pairs", reason)
 	}
 }
 
@@ -329,15 +338,37 @@ func TestConfidenceBandMediumOnManyWeakIndicators(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		indicators = append(indicators, Indicator{Code: "formation_cluster", Weight: 1})
 	}
-	got := confidenceBand(indicators, nil, 10)
+	got, reason := confidenceBand(indicators, nil, 10)
 	if got != "MEDIUM" {
 		t.Errorf("Confidence = %q, want MEDIUM (many weak indicators, none individually strong)", got)
+	}
+	if !strings.Contains(reason, "10") {
+		t.Errorf("reason = %q, want it to cite the total score 10, not a single indicator", reason)
+	}
+}
+
+func TestConfidenceBandMediumNamesTheTriggeringIndicator(t *testing.T) {
+	// Sorted highest-weight-first, as Assess always passes it -- the
+	// weight-3 shared_person indicator (not shared_address) should be
+	// named as the reason.
+	got, reason := confidenceBand(
+		[]Indicator{{Code: "shared_person", Weight: 3}, {Code: "shared_address", Weight: 2}},
+		nil, 5,
+	)
+	if got != "MEDIUM" {
+		t.Errorf("Confidence = %q, want MEDIUM", got)
+	}
+	if !strings.Contains(reason, "shared_person") || !strings.Contains(reason, "3") {
+		t.Errorf("reason = %q, want it to name shared_person at weight 3, not shared_address", reason)
 	}
 }
 
 func TestConfidenceBandLowOnASingleWeakIndicator(t *testing.T) {
-	got := confidenceBand([]Indicator{{Code: "shared_chargee", Weight: 1}}, nil, 1)
+	got, reason := confidenceBand([]Indicator{{Code: "shared_chargee", Weight: 1}}, nil, 1)
 	if got != "LOW" {
 		t.Errorf("Confidence = %q, want LOW", got)
+	}
+	if reason == "" {
+		t.Error("reason should not be empty even for LOW")
 	}
 }

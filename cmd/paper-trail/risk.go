@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -82,6 +84,12 @@ type riskReportJSON struct {
 	// default, omitted) unless one of those flags actually removed
 	// something.
 	ExcludedIndicators int `json:"excludedIndicators,omitempty"`
+	// HiddenCorroborations is how many corroborated pairs
+	// --min-corroboration left out of Score.Corroborations -- a
+	// separate count from HiddenIndicators since it's a different
+	// collection. Zero (the default, omitted) unless --min-corroboration
+	// was set and actually filtered something out.
+	HiddenCorroborations int `json:"hiddenCorroborations,omitempty"`
 }
 
 // riskReportDiff summarizes what changed between a previous risk
@@ -148,6 +156,29 @@ func filterIndicators(score risk.Score, minWeight int, codes []string) (risk.Sco
 	return score, hidden
 }
 
+// filterCorroborations implements --min-corroboration: keeps only
+// corroborated pairs matched on at least minCorroboration distinct
+// indicator codes, returning the filtered score and how many were
+// removed. minCorroboration <= 0 is a no-op (show all, the default).
+// Like filterIndicators/truncateIndicators, this only limits what's
+// *shown* -- Corroborations never contributed to Total in the first
+// place (see the Corroboration doc comment), so there's nothing to
+// recompute the way --exclude has to.
+func filterCorroborations(score risk.Score, minCorroboration int) (risk.Score, int) {
+	if minCorroboration <= 0 {
+		return score, 0
+	}
+	kept := make([]risk.Corroboration, 0, len(score.Corroborations))
+	for _, c := range score.Corroborations {
+		if len(c.Codes) >= minCorroboration {
+			kept = append(kept, c)
+		}
+	}
+	hidden := len(score.Corroborations) - len(kept)
+	score.Corroborations = kept
+	return score, hidden
+}
+
 // parseIndicatorCodes splits a comma-separated --indicator flag value
 // into individual codes, trimming whitespace and dropping empty
 // entries (so a trailing comma or extra spaces don't produce a bogus
@@ -210,7 +241,7 @@ func excludeIndicators(score risk.Score, terms []string) (risk.Score, int) {
 	score.Indicators = kept
 	score.Total = total
 	score.Corroborations = corroborations
-	score.Confidence = risk.ConfidenceBand(kept, corroborations, total)
+	score.Confidence, score.ConfidenceReason = risk.ConfidenceBand(kept, corroborations, total)
 	return score, excluded
 }
 
@@ -336,6 +367,7 @@ type riskSummaryJSON struct {
 	Queries            []string        `json:"queries"`
 	Total              int             `json:"total"`
 	Confidence         string          `json:"confidence"`
+	ConfidenceReason   string          `json:"confidenceReason"`
 	EntityCount        int             `json:"entityCount"`
 	IndicatorCount     int             `json:"indicatorCount"`
 	HiddenIndicators   int             `json:"hiddenIndicators,omitempty"`
@@ -353,6 +385,7 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 			Queries:            report.Queries,
 			Total:              report.Score.Total,
 			Confidence:         report.Score.Confidence,
+			ConfidenceReason:   report.Score.ConfidenceReason,
 			EntityCount:        len(report.Entities),
 			IndicatorCount:     len(report.Score.Indicators),
 			HiddenIndicators:   report.HiddenIndicators,
@@ -362,7 +395,7 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 		return
 	}
 
-	line := fmt.Sprintf("Score: %d (%s) -- %d indicator(s), %d entit(ies)", report.Score.Total, report.Score.Confidence, len(report.Score.Indicators), len(report.Entities))
+	line := fmt.Sprintf("Score: %d (%s -- %s) -- %d indicator(s), %d entit(ies)", report.Score.Total, report.Score.Confidence, report.Score.ConfidenceReason, len(report.Score.Indicators), len(report.Entities))
 	var extras []string
 	if report.HiddenIndicators > 0 {
 		extras = append(extras, fmt.Sprintf("%d hidden", report.HiddenIndicators))
@@ -377,6 +410,74 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 		line += " (" + strings.Join(extras, "; ") + ")"
 	}
 	fmt.Fprintln(w, line)
+}
+
+// summaryFromReport builds a riskSummaryJSON from a full report --
+// used by --webhook so it works whether or not --summary was also
+// passed (the two are independent flags).
+func summaryFromReport(report riskReportJSON) riskSummaryJSON {
+	return riskSummaryJSON{
+		Queries:            report.Queries,
+		Total:              report.Score.Total,
+		Confidence:         report.Score.Confidence,
+		ConfidenceReason:   report.Score.ConfidenceReason,
+		EntityCount:        len(report.Entities),
+		IndicatorCount:     len(report.Score.Indicators),
+		HiddenIndicators:   report.HiddenIndicators,
+		ExcludedIndicators: report.ExcludedIndicators,
+	}
+}
+
+// webhookMessage renders a compact, human-readable one-line message
+// for --webhook -- the same information as --summary's text line.
+func webhookMessage(s riskSummaryJSON) string {
+	return fmt.Sprintf("paper-trail risk alert: score %d (%s -- %s) -- %d indicator(s), %d entit(ies). Queries: %s",
+		s.Total, s.Confidence, s.ConfidenceReason, s.IndicatorCount, s.EntityCount, strings.Join(s.Queries, ", "))
+}
+
+// sendWebhookAlert posts a --fail-on alert to url. A hooks.slack.com or
+// discord.com/api/webhooks (or discordapp.com/api/webhooks) URL gets
+// that platform's own minimal payload shape (confirmed live against
+// each platform's current docs: Slack wants {"text": ...}, Discord
+// wants {"content": ...}); anything else gets the full riskSummaryJSON
+// as-is, for a custom integration to parse. A 10s timeout and no
+// retries -- this is a best-effort notification on top of --fail-on's
+// own exit code, not something worth blocking or retrying a finished
+// scan over.
+func sendWebhookAlert(url string, summary riskSummaryJSON) error {
+	message := webhookMessage(summary)
+
+	var payload any
+	switch {
+	case strings.Contains(url, "hooks.slack.com"):
+		payload = map[string]string{"text": message}
+	case strings.Contains(url, "discord.com/api/webhooks"), strings.Contains(url, "discordapp.com/api/webhooks"):
+		payload = map[string]string{"content": message}
+	default:
+		payload = summary
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("building webhook payload: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("building webhook request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending webhook: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("webhook returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // runRisk queries every configured source for candidates matching
@@ -403,14 +504,16 @@ func runRisk(args []string) {
 	top := fs.Int("top", 0, "show only the N highest-weight indicators (0 shows all, the default) -- Total still reflects every indicator found; only which ones are listed is limited, for a large scan's report to lead with what matters most without scrolling a long flat list")
 	minWeight := fs.Int("min-weight", 0, "show only indicators with weight >= this (0 shows all, the default) -- Total still reflects every indicator found")
 	indicatorFilter := fs.String("indicator", "", "show only indicators matching these comma-separated codes, e.g. disqualified_director,sanctions_match (empty shows all, the default) -- Total still reflects every indicator found")
+	minCorroboration := fs.Int("min-corroboration", 0, "show only corroborated pairs matched on at least this many distinct indicator codes (0 shows all, the default) -- Corroborations never contribute to Total, so this only limits which corroborated pairs are listed")
 	excludeFlag := fs.String("exclude", "", "comma-separated terms -- any indicator whose evidence or entity labels contain one of these (case-insensitive) is permanently removed from the report, including Total/Confidence, not just hidden from display -- for dismissing leads you've already reviewed and cleared")
 	excludeFile := fs.String("exclude-file", "", "read additional --exclude terms from this file too, one per line (blank lines and lines starting with # are ignored)")
 	failOn := fs.String("fail-on", "", "exit with a non-zero status if the final confidence band reaches this level or higher (LOW, MEDIUM, or HIGH) -- lets a scan act as a gate in CI/cron/pre-merge automation instead of requiring someone to read the output")
 	summary := fs.Bool("summary", false, "print (or, with --json, encode) a compact one-line/one-object summary -- score, confidence, and entity/indicator counts -- instead of the full report, for scripting/dashboards/monitoring where the full indicator-by-indicator report is too verbose")
+	webhookURL := fs.String("webhook", "", "POST a JSON alert to this URL when --fail-on's threshold is met (requires --fail-on) -- a hooks.slack.com or discord.com/api/webhooks URL gets that platform's own minimal message format, anything else gets the full compact summary as JSON")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -451,6 +554,10 @@ func runRisk(args []string) {
 
 	if err := validateFailOn(*failOn); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: --fail-on %v\n", err)
+		os.Exit(1)
+	}
+	if *webhookURL != "" && *failOn == "" {
+		fmt.Fprintln(os.Stderr, "Error: --webhook requires --fail-on to be set too -- otherwise there's no threshold to alert on")
 		os.Exit(1)
 	}
 
@@ -638,8 +745,9 @@ func runRisk(args []string) {
 	score, hiddenByFilter := filterIndicators(score, *minWeight, parseIndicatorCodes(*indicatorFilter))
 	score, hiddenByTop := truncateIndicators(score, *top)
 	hiddenIndicators := hiddenByFilter + hiddenByTop
+	score, hiddenCorroborations := filterCorroborations(score, *minCorroboration)
 
-	report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount}
+	report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, HiddenCorroborations: hiddenCorroborations}
 
 	var w io.Writer = os.Stdout
 	if *output != "" {
@@ -682,7 +790,7 @@ func runRisk(args []string) {
 		if excludedCount > 0 {
 			fmt.Fprintf(w, "\n%d indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.\n", excludedCount)
 		}
-		fmt.Fprintf(w, "\nRisk score: %d (confidence: %s)\n\n", score.Total, score.Confidence)
+		fmt.Fprintf(w, "\nRisk score: %d (confidence: %s -- %s)\n\n", score.Total, score.Confidence, score.ConfidenceReason)
 		if len(score.Indicators) == 0 {
 			fmt.Fprintln(w, "No structural indicators found among the entities located.")
 		}
@@ -712,6 +820,9 @@ func runRisk(args []string) {
 				fmt.Fprintf(w, "  %s\n", strings.Join(c.Entities, "  <->  "))
 				fmt.Fprintf(w, "    matched on: %s\n\n", strings.Join(c.Codes, ", "))
 			}
+		}
+		if hiddenCorroborations > 0 {
+			fmt.Fprintf(w, "... and %d more corroborated pair(s) not shown (--min-corroboration %d).\n\n", hiddenCorroborations, *minCorroboration)
 		}
 		fmt.Fprintln(w, "This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
 
@@ -765,6 +876,16 @@ func runRisk(args []string) {
 	// suppress the report itself, so a CI system that captures the
 	// output artifact on failure still gets one.
 	if shouldFailOn(score.Confidence, *failOn) {
+		if *webhookURL != "" {
+			if err := sendWebhookAlert(*webhookURL, summaryFromReport(report)); err != nil {
+				// Deliberately non-fatal: --fail-on's exit code below
+				// already communicates the failure state to whatever's
+				// watching this process's exit status; a webhook
+				// delivery problem shouldn't additionally obscure that
+				// with a different failure mode.
+				fmt.Fprintf(os.Stderr, "Warning: --webhook alert failed to send: %v\n", err)
+			}
+		}
 		os.Exit(1)
 	}
 }

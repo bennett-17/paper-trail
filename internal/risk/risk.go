@@ -126,6 +126,14 @@ type Score struct {
 	// derived from the indicators already listed; it adds no
 	// information Total/Indicators/Corroborations didn't already carry.
 	Confidence string `json:"confidence"`
+
+	// ConfidenceReason is the specific factor that produced Confidence
+	// -- e.g. "disqualified_director indicator at weight 6" or "2
+	// corroborated pairs" -- so the band isn't a black box: it's
+	// visible exactly which indicator, corroboration count, or total
+	// pushed the score to its level, without having to reverse-engineer
+	// confidenceBand's own thresholds by hand.
+	ConfidenceReason string `json:"confidenceReason"`
 }
 
 // confidenceBand classifies a set of indicators/corroborations into a
@@ -142,7 +150,14 @@ type Score struct {
 // strongest structural signal). A single corroborated pair, a
 // moderate-weight indicator (3+), or a high-enough total pushes to
 // MEDIUM. Everything else, including no indicators at all, is LOW.
-func confidenceBand(indicators []Indicator, corroborations []Corroboration, total int) string {
+// confidenceBand also returns the specific reason for the band it
+// picked -- e.g. which indicator's weight triggered it, or how many
+// corroborated pairs, or the qualifying total -- so the band is never
+// a black box. indicators is assumed already sorted highest-weight-
+// first (Assess sorts before calling this), so the first indicator
+// meeting a weight threshold is simply indicators[0] once that
+// threshold is known to be met somewhere in the slice.
+func confidenceBand(indicators []Indicator, corroborations []Corroboration, total int) (band, reason string) {
 	highWeightPresent := false
 	moderateWeightPresent := false
 	for _, ind := range indicators {
@@ -154,12 +169,18 @@ func confidenceBand(indicators []Indicator, corroborations []Corroboration, tota
 		}
 	}
 	switch {
-	case highWeightPresent || len(corroborations) >= 2:
-		return "HIGH"
-	case moderateWeightPresent || len(corroborations) >= 1 || total >= 5:
-		return "MEDIUM"
+	case highWeightPresent:
+		return "HIGH", fmt.Sprintf("%s indicator at weight %d", indicators[0].Code, indicators[0].Weight)
+	case len(corroborations) >= 2:
+		return "HIGH", fmt.Sprintf("%d corroborated pairs (2+ independent kinds of evidence each)", len(corroborations))
+	case moderateWeightPresent:
+		return "MEDIUM", fmt.Sprintf("%s indicator at weight %d", indicators[0].Code, indicators[0].Weight)
+	case len(corroborations) >= 1:
+		return "MEDIUM", "1 corroborated pair (2+ independent kinds of evidence)"
+	case total >= 5:
+		return "MEDIUM", fmt.Sprintf("total score %d (no single strong indicator or corroborated pair, but the combined total crosses 5)", total)
 	default:
-		return "LOW"
+		return "LOW", "no weight-3+ indicator, no corroborated pair, and total score under 5"
 	}
 }
 
@@ -449,11 +470,13 @@ func Assess(entities []Entity, extra []Indicator) Score {
 		total += ind.Weight
 	}
 	corroborations := computeCorroborations(indicators)
+	confidence, confidenceReason := confidenceBand(indicators, corroborations, total)
 	return Score{
-		Total:          total,
-		Indicators:     indicators,
-		Corroborations: corroborations,
-		Confidence:     confidenceBand(indicators, corroborations, total),
+		Total:            total,
+		Indicators:       indicators,
+		Corroborations:   corroborations,
+		Confidence:       confidence,
+		ConfidenceReason: confidenceReason,
 	}
 }
 
@@ -468,8 +491,9 @@ func ComputeCorroborations(indicators []Indicator) []Corroboration {
 }
 
 // ConfidenceBand exports confidenceBand for the same reason: --exclude
-// needs to recompute the confidence band from what's left after
-// removing indicators, not leave it reflecting ones no longer counted.
-func ConfidenceBand(indicators []Indicator, corroborations []Corroboration, total int) string {
+// needs to recompute the confidence band (and its reason) from what's
+// left after removing indicators, not leave it reflecting ones no
+// longer counted.
+func ConfidenceBand(indicators []Indicator, corroborations []Corroboration, total int) (band, reason string) {
 	return confidenceBand(indicators, corroborations, total)
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +130,37 @@ func TestFilterIndicatorsCombinesMinWeightAndCodeAsAnd(t *testing.T) {
 	}
 }
 
+func TestFilterCorroborationsNoOpWhenZeroOrNegative(t *testing.T) {
+	score := risk.Score{Corroborations: []risk.Corroboration{{Codes: []string{"a"}}, {Codes: []string{"a", "b"}}}}
+	for _, min := range []int{0, -1} {
+		got, hidden := filterCorroborations(score, min)
+		if hidden != 0 || len(got.Corroborations) != 2 {
+			t.Errorf("min=%d: got %d corroborations, %d hidden, want no-op (2, 0)", min, len(got.Corroborations), hidden)
+		}
+	}
+}
+
+func TestFilterCorroborationsKeepsOnlyThoseMeetingThreshold(t *testing.T) {
+	score := risk.Score{
+		Total: 9, // unaffected -- Corroborations never contributed to Total
+		Corroborations: []risk.Corroboration{
+			{Entities: []string{"a", "b"}, Codes: []string{"shared_address", "shared_person"}},                 // 2 codes
+			{Entities: []string{"c", "d"}, Codes: []string{"shared_address", "shared_person", "shared_email"}}, // 3 codes
+			{Entities: []string{"e", "f"}, Codes: []string{"shared_address"}},                                  // 1 code -- shouldn't happen in practice, but exercises the boundary
+		},
+	}
+	got, hidden := filterCorroborations(score, 2)
+	if hidden != 1 {
+		t.Fatalf("hidden = %d, want 1 (only the 1-code entry)", hidden)
+	}
+	if len(got.Corroborations) != 2 {
+		t.Fatalf("got %d corroborations, want 2", len(got.Corroborations))
+	}
+	if got.Total != 9 {
+		t.Errorf("Total = %d, want 9 (unchanged -- filtering only limits what's shown)", got.Total)
+	}
+}
+
 func TestParseIndicatorCodesTrimsAndDropsEmpty(t *testing.T) {
 	got := parseIndicatorCodes(" sanctions_match ,, disqualified_director ,")
 	want := []string{"sanctions_match", "disqualified_director"}
@@ -220,6 +253,9 @@ func TestExcludeIndicatorsRecomputesConfidenceAndCorroborations(t *testing.T) {
 	}
 	if got.Total != 1 {
 		t.Errorf("Total = %d, want 1 (only the remaining shared_address indicator)", got.Total)
+	}
+	if strings.Contains(got.ConfidenceReason, "disqualified_director") {
+		t.Errorf("ConfidenceReason = %q, want it to no longer cite the excluded indicator", got.ConfidenceReason)
 	}
 }
 
@@ -395,16 +431,17 @@ func TestWriteSummaryTextMode(t *testing.T) {
 		Queries:  []string{"Example Corp"},
 		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
 		Score: risk.Score{
-			Total:      8,
-			Confidence: "HIGH",
-			Indicators: []risk.Indicator{{Code: "a"}, {Code: "b"}, {Code: "c"}},
+			Total:            8,
+			Confidence:       "HIGH",
+			ConfidenceReason: "disqualified_director indicator at weight 6",
+			Indicators:       []risk.Indicator{{Code: "a"}, {Code: "b"}, {Code: "c"}},
 		},
 	}
 	var buf bytes.Buffer
 	writeSummary(&buf, report, nil, false)
 	out := buf.String()
-	if !strings.Contains(out, "Score: 8 (HIGH)") {
-		t.Errorf("output %q doesn't contain the score/confidence", out)
+	if !strings.Contains(out, "Score: 8 (HIGH -- disqualified_director indicator at weight 6)") {
+		t.Errorf("output %q doesn't contain the score/confidence/reason", out)
 	}
 	if !strings.Contains(out, "3 indicator(s)") || !strings.Contains(out, "1 entit(ies)") {
 		t.Errorf("output %q doesn't contain the indicator/entity counts", out)
@@ -436,7 +473,7 @@ func TestWriteSummaryJSONMode(t *testing.T) {
 	report := riskReportJSON{
 		Queries:  []string{"Example Corp"},
 		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
-		Score:    risk.Score{Total: 8, Confidence: "HIGH", Indicators: []risk.Indicator{{Code: "a"}}},
+		Score:    risk.Score{Total: 8, Confidence: "HIGH", ConfidenceReason: "sanctions_match indicator at weight 5", Indicators: []risk.Indicator{{Code: "a"}}},
 	}
 	var buf bytes.Buffer
 	writeSummary(&buf, report, nil, true)
@@ -447,5 +484,110 @@ func TestWriteSummaryJSONMode(t *testing.T) {
 	}
 	if got.Total != 8 || got.Confidence != "HIGH" || got.EntityCount != 1 || got.IndicatorCount != 1 {
 		t.Errorf("got %+v, want Total=8 Confidence=HIGH EntityCount=1 IndicatorCount=1", got)
+	}
+	if got.ConfidenceReason != "sanctions_match indicator at weight 5" {
+		t.Errorf("ConfidenceReason = %q, want it to round-trip through JSON", got.ConfidenceReason)
+	}
+}
+
+// TestSendWebhookAlertSlackFormat guards the Slack incoming-webhook
+// payload shape (confirmed live against Slack's own current docs):
+// {"text": "..."} , not the generic summary object.
+func TestSendWebhookAlertSlackFormat(t *testing.T) {
+	var gotBody map[string]any
+	var gotContentType string
+	mux := http.NewServeMux()
+	// sendWebhookAlert detects Slack by looking for "hooks.slack.com"
+	// as a substring anywhere in the URL, not by matching the real
+	// host -- so prefixing the httptest server's path with it exercises
+	// the exact same branch a real https://hooks.slack.com/... URL
+	// would take.
+	mux.HandleFunc("/hooks.slack.com/services/T00/B00/XXX", func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Write([]byte("ok"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	url := srv.URL + "/hooks.slack.com/services/T00/B00/XXX"
+
+	summary := riskSummaryJSON{Total: 8, Confidence: "HIGH", ConfidenceReason: "test reason", Queries: []string{"Example Corp"}}
+	if err := sendWebhookAlert(url, summary); err != nil {
+		t.Fatalf("sendWebhookAlert: %v", err)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	text, ok := gotBody["text"].(string)
+	if !ok || text == "" {
+		t.Fatalf("gotBody = %+v, want a non-empty \"text\" field (Slack's format)", gotBody)
+	}
+	if !strings.Contains(text, "HIGH") || !strings.Contains(text, "8") {
+		t.Errorf("text = %q, want it to mention the score and confidence", text)
+	}
+	if _, hasContent := gotBody["content"]; hasContent {
+		t.Error("Slack payload should not have a \"content\" field (that's Discord's)")
+	}
+}
+
+// TestSendWebhookAlertDiscordFormat guards the Discord webhook payload
+// shape (confirmed live against Discord's own current docs):
+// {"content": "..."}, not Slack's "text" or the generic summary.
+func TestSendWebhookAlertDiscordFormat(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/discord.com/api/webhooks/123/abc", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	url := srv.URL + "/discord.com/api/webhooks/123/abc"
+
+	summary := riskSummaryJSON{Total: 8, Confidence: "HIGH", ConfidenceReason: "test reason"}
+	if err := sendWebhookAlert(url, summary); err != nil {
+		t.Fatalf("sendWebhookAlert: %v", err)
+	}
+	content, ok := gotBody["content"].(string)
+	if !ok || content == "" {
+		t.Fatalf("gotBody = %+v, want a non-empty \"content\" field (Discord's format)", gotBody)
+	}
+	if _, hasText := gotBody["text"]; hasText {
+		t.Error("Discord payload should not have a \"text\" field (that's Slack's)")
+	}
+}
+
+// TestSendWebhookAlertGenericFormat guards the fallback for any other
+// URL: the full compact summary as JSON, not a Slack/Discord-shaped
+// message.
+func TestSendWebhookAlertGenericFormat(t *testing.T) {
+	var gotBody riskSummaryJSON
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	summary := riskSummaryJSON{Total: 8, Confidence: "HIGH", ConfidenceReason: "test reason", EntityCount: 3}
+	if err := sendWebhookAlert(srv.URL+"/", summary); err != nil {
+		t.Fatalf("sendWebhookAlert: %v", err)
+	}
+	if gotBody.Total != 8 || gotBody.Confidence != "HIGH" || gotBody.EntityCount != 3 {
+		t.Errorf("gotBody = %+v, want the full summary round-tripped", gotBody)
+	}
+}
+
+func TestSendWebhookAlertNonOKStatusIsAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if err := sendWebhookAlert(srv.URL+"/", riskSummaryJSON{}); err == nil {
+		t.Fatal("expected an error for a non-2xx webhook response")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/bennett-17/paper-trail/internal/edgar"
@@ -49,6 +50,8 @@ func main() {
 		runRisk(os.Args[2:])
 	case "completion":
 		runCompletion(os.Args[2:])
+	case "-v", "--version", "version":
+		runVersion()
 	case "-h", "--help", "help":
 		printUsage()
 	default:
@@ -82,8 +85,9 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--summary] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--quiet] [--json]
   paper-trail completion bash|zsh
+  paper-trail version
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
 Useful for CIKs with no ticker of their own -- e.g. a subsidiary or
@@ -399,7 +403,12 @@ outrank one strong one: a single high-weight indicator (5+: a
 sanctions match or the disqualified-directors match at 6) or two or
 more corroborated pairs each push straight to HIGH on their own, one
 corroborated pair or a moderate-weight indicator (3+) or high-enough
-total is MEDIUM, everything else is LOW. --limit
+total is MEDIUM, everything else is LOW. The band always comes with a
+one-line reason naming the specific factor behind it (e.g.
+"disqualified_director indicator at weight 6" or "2 corroborated
+pairs" or "total score 7"), so it's never a black box you have to
+reverse-engineer by hand. --limit
+caps how many candidates are pulled per source per
 caps how many candidates are pulled per source per
 query term (default 5) to bound the number of live API calls. --output
 writes the report (in whichever format --json selects) to a file
@@ -482,6 +491,12 @@ the full indicator set regardless of --top/--min-weight/--indicator, so
 none of them can hide a genuinely new indicator from a diff. The total
 score and confidence band are likewise unaffected by all three -- they
 always reflect every indicator found, not just the ones shown.
+--min-corroboration <n> is the same idea applied to the Corroborations
+rollup instead of Indicators: show only corroborated pairs matched on
+at least <n> distinct indicator codes, e.g. --min-corroboration 2 to
+see only pairs backed by 2+ independent kinds of evidence. Corroborations
+never contributed to Total in the first place, so there's nothing to
+recompute here the way --exclude has to below.
 --exclude <terms> (comma-separated) and --exclude-file <path> (one
 term per line, same format as --input-file) are different from all of
 the above: any indicator whose evidence or entity labels contain one
@@ -509,6 +524,15 @@ scripting/dashboards/monitoring where the full report is too verbose.
 It's independent of --fail-on: use them together for a completely
 silent CI check (--summary --fail-on HIGH --quiet exits non-zero on a
 real hit and prints nothing at all beyond the one summary line).
+--webhook <url> requires --fail-on to also be set: when the threshold
+is met, a JSON alert is POSTed to <url> before exiting. A hooks.slack.com
+or discord.com/api/webhooks URL gets that platform's own minimal
+message format (confirmed live against Slack's and Discord's current
+docs: {"text": "..."} and {"content": "..."} respectively); any other
+URL gets the full compact summary (the same shape --summary --json
+prints) as the POST body, for a custom integration to parse. A failed
+send is reported as a warning but never changes the exit status --
+--fail-on's own exit code already communicates the failure state.
 A source with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it
@@ -521,6 +545,11 @@ subcommands and their flags -- e.g. source <(paper-trail completion
 bash) in your shell rc file, or the zsh equivalent (see the script's
 own header comment for install options).
 
+version (also -v or --version) prints the module version and VCS
+commit -- derived automatically from Go's own build info, so it's
+accurate for both "go install" and a plain "go build" in this git
+checkout with no separate version-injection step to remember.
+
 Environment:
   EDGAR_USER_AGENT             required for SEC EDGAR commands, e.g. "Your Name your.email@example.com"
                                 (can also be set via a .env file in the working dir)
@@ -530,6 +559,54 @@ Environment:
   CSL_API_KEY_PRIMARY          required for the sanctions command only (see above)
   CSL_API_KEY_SECONDARY        optional rotation fallback for sanctions (see above)
   COMPANIES_HOUSE_API_KEY      required for the companieshouse and person commands (see above)`)
+}
+
+// versionString builds paper-trail's --version output from Go's own
+// module build info -- no custom ldflags/version-injection build step
+// needed: this works automatically both for `go install` (which
+// records the module version) and a plain `go build` run inside this
+// git checkout (which records the VCS commit via Go's built-in VCS
+// stamping, confirmed live). ok=false is debug.ReadBuildInfo's own
+// signal that no build info is available at all (e.g. built without
+// module mode) -- reported plainly rather than guessing at a version.
+func versionString(info *debug.BuildInfo, ok bool) string {
+	if !ok {
+		return "paper-trail (version info unavailable -- built without Go module support)"
+	}
+
+	version := info.Main.Version
+	if version == "" || version == "(devel)" {
+		version = "dev"
+	}
+
+	var revision string
+	dirty := false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+
+	out := fmt.Sprintf("paper-trail %s", version)
+	if revision != "" {
+		if len(revision) > 12 {
+			revision = revision[:12]
+		}
+		out += fmt.Sprintf(" (%s", revision)
+		if dirty {
+			out += ", dirty"
+		}
+		out += ")"
+	}
+	out += fmt.Sprintf("\ngo: %s", info.GoVersion)
+	return out
+}
+
+func runVersion() {
+	fmt.Println(versionString(debug.ReadBuildInfo()))
 }
 
 // splitPositional separates args into flag arguments (recognized by fs)
