@@ -99,6 +99,9 @@ func runCompaniesHouse(args []string) {
 		if company.AccountsOverdue {
 			fmt.Println("Accounts: OVERDUE")
 		}
+		if company.ConfirmationStatementOverdue {
+			fmt.Println("Confirmation statement: OVERDUE")
+		}
 		fmt.Printf("\n%d officer(s):\n", len(officers))
 		for _, o := range officers {
 			status := "current"

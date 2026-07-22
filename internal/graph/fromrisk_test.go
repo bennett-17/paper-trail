@@ -61,6 +61,43 @@ func TestBuildFromRiskSkipsSingleParticipantIndicators(t *testing.T) {
 	}
 }
 
+// TestBuildFromRiskSetsMaxWeightToHighestTouchingEdge covers Node.MaxWeight:
+// a node touching both a weight-1 and a weight-3 edge should carry the
+// higher of the two, and a node with no edges at all should stay 0.
+func TestBuildFromRiskSetsMaxWeightToHighestTouchingEdge(t *testing.T) {
+	entities := []risk.Entity{
+		risk.NewEntity("edgar", "1", "Hub Corp", []string{"123 Main St"}, []string{"Jane Example"}),
+		risk.NewEntity("ukcharity", "2", "Address Match Trust", []string{"123 Main St"}, nil),
+		risk.NewEntity("companieshouse", "3", "Person Match Ltd", nil, []string{"Jane Example"}),
+		risk.NewEntity("nonprofit", "4", "Unconnected Org", nil, nil),
+	}
+	score := risk.Assess(entities, nil)
+
+	g := BuildFromRisk(entities, score)
+	byLabel := make(map[string]Node, len(g.Nodes))
+	for _, n := range g.Nodes {
+		byLabel[n.Label] = n
+	}
+
+	hub, ok := byLabel["Hub Corp"]
+	if !ok {
+		t.Fatal("Hub Corp node not found")
+	}
+	// shared_address is weight 2, shared_person is weight 3 -- Hub Corp
+	// touches both, so it should carry the higher one.
+	if hub.MaxWeight != 3 {
+		t.Errorf("Hub Corp MaxWeight = %d, want 3 (the higher of shared_address=2 and shared_person=3)", hub.MaxWeight)
+	}
+
+	unconnected, ok := byLabel["Unconnected Org"]
+	if !ok {
+		t.Fatal("Unconnected Org node not found")
+	}
+	if unconnected.MaxWeight != 0 {
+		t.Errorf("Unconnected Org MaxWeight = %d, want 0 (no edges at all)", unconnected.MaxWeight)
+	}
+}
+
 func TestBuildFromRiskProducesMultipleEdgesForCorroboratedPair(t *testing.T) {
 	entities := []risk.Entity{
 		risk.NewEntity("edgar", "1", "Example Corp", []string{"123 Main St"}, []string{"Jane Example"}),

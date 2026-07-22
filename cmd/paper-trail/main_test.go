@@ -95,6 +95,34 @@ func TestReadQueryTermsFileMissingFileReturnsError(t *testing.T) {
 	}
 }
 
+// TestReadQueryTermsFileDashReadsStdin guards --input-file -, which
+// lets a watchlist be piped in from another command instead of always
+// needing a real file on disk.
+func TestReadQueryTermsFileDashReadsStdin(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = origStdin })
+
+	content := "Example Org One\n\n# a comment\nExample Org Two\n"
+	go func() {
+		w.WriteString(content)
+		w.Close()
+	}()
+
+	terms, err := readQueryTermsFile("-")
+	if err != nil {
+		t.Fatalf("readQueryTermsFile(\"-\"): %v", err)
+	}
+	want := []string{"Example Org One", "Example Org Two"}
+	if !reflect.DeepEqual(terms, want) {
+		t.Errorf("terms = %v, want %v", terms, want)
+	}
+}
+
 func TestOrDash(t *testing.T) {
 	if got := orDash(""); got != "-" {
 		t.Errorf("orDash(\"\") = %q, want -", got)

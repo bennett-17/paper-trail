@@ -205,6 +205,9 @@ func TestGetCompanyParsesDormantAndOverdueAccounts(t *testing.T) {
 	if !company.AccountsOverdue {
 		t.Error("AccountsOverdue = false, want true")
 	}
+	if !company.ConfirmationStatementOverdue {
+		t.Error("ConfirmationStatementOverdue = false, want true -- a distinct compliance signal from AccountsOverdue")
+	}
 }
 
 // TestGetCompanyZeroPadsNumber guards against a real bug found live:

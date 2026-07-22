@@ -61,5 +61,21 @@ func BuildFromRisk(entities []risk.Entity, score risk.Score) Graph {
 		}
 	}
 
+	// MaxWeight per node: the highest Weight among edges touching it,
+	// used by the HTML viewer to size/highlight nodes by priority (see
+	// Node.MaxWeight).
+	maxWeightByID := make(map[string]int, len(nodes))
+	for _, e := range edges {
+		if e.Weight > maxWeightByID[e.Source] {
+			maxWeightByID[e.Source] = e.Weight
+		}
+		if e.Weight > maxWeightByID[e.Target] {
+			maxWeightByID[e.Target] = e.Weight
+		}
+	}
+	for i := range nodes {
+		nodes[i].MaxWeight = maxWeightByID[nodes[i].ID]
+	}
+
 	return Graph{Nodes: nodes, Edges: edges}
 }

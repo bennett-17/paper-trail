@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -141,6 +143,110 @@ func TestParseIndicatorCodesTrimsAndDropsEmpty(t *testing.T) {
 func TestParseIndicatorCodesEmptyStringReturnsNil(t *testing.T) {
 	if got := parseIndicatorCodes(""); got != nil {
 		t.Errorf("got %v, want nil", got)
+	}
+}
+
+func TestExcludeIndicatorsNoOpWhenNoTerms(t *testing.T) {
+	score := risk.Score{
+		Total:      5,
+		Indicators: []risk.Indicator{{Code: "a", Weight: 5, Evidence: "123 Main St"}},
+		Confidence: "MEDIUM",
+	}
+	got, excluded := excludeIndicators(score, nil)
+	if excluded != 0 {
+		t.Errorf("excluded = %d, want 0", excluded)
+	}
+	if got.Total != 5 || got.Confidence != "MEDIUM" {
+		t.Errorf("got = %+v, want unchanged", got)
+	}
+}
+
+func TestExcludeIndicatorsMatchesEvidenceCaseInsensitively(t *testing.T) {
+	score := risk.Score{
+		Total: 3,
+		Indicators: []risk.Indicator{
+			{Code: "shared_address", Weight: 2, Evidence: "123 MAIN ST, Suite 200", Entities: []string{"edgar: Example Corp (1)"}},
+			{Code: "formation_cluster", Weight: 1, Evidence: "formed within 3 days", Entities: []string{"edgar: Other Corp (2)"}},
+		},
+	}
+	got, excluded := excludeIndicators(score, []string{"main st"})
+	if excluded != 1 {
+		t.Fatalf("excluded = %d, want 1", excluded)
+	}
+	if len(got.Indicators) != 1 || got.Indicators[0].Code != "formation_cluster" {
+		t.Fatalf("got.Indicators = %+v, want only formation_cluster left", got.Indicators)
+	}
+	if got.Total != 1 {
+		t.Errorf("Total = %d, want 1 (recomputed from what's left, not the original 3)", got.Total)
+	}
+}
+
+func TestExcludeIndicatorsMatchesEntityLabels(t *testing.T) {
+	score := risk.Score{
+		Total: 3,
+		Indicators: []risk.Indicator{
+			{Code: "shared_person", Weight: 3, Evidence: "Jane Example", Entities: []string{"edgar: Cleared Corp (1)", "edgar: Other Corp (2)"}},
+		},
+	}
+	got, excluded := excludeIndicators(score, []string{"Cleared Corp"})
+	if excluded != 1 {
+		t.Fatalf("excluded = %d, want 1", excluded)
+	}
+	if len(got.Indicators) != 0 || got.Total != 0 {
+		t.Errorf("got = %+v, want everything removed and Total 0", got)
+	}
+}
+
+// TestExcludeIndicatorsRecomputesConfidenceAndCorroborations guards the
+// difference between --exclude and --top/--min-weight/--indicator:
+// this needs to recompute Confidence (and Corroborations) from what's
+// left, not leave them reflecting an indicator that's been dismissed
+// as not a real finding.
+func TestExcludeIndicatorsRecomputesConfidenceAndCorroborations(t *testing.T) {
+	high := risk.Indicator{Code: "disqualified_director", Weight: 6, Evidence: "dismissed lead", Entities: []string{"a", "b"}}
+	other := risk.Indicator{Code: "shared_address", Weight: 1, Evidence: "123 Main St", Entities: []string{"a", "b"}}
+	score := risk.Assess(nil, []risk.Indicator{high, other})
+	if score.Confidence != "HIGH" {
+		t.Fatalf("precondition failed: Confidence = %q, want HIGH (weight-6 indicator present)", score.Confidence)
+	}
+
+	got, excluded := excludeIndicators(score, []string{"dismissed lead"})
+	if excluded != 1 {
+		t.Fatalf("excluded = %d, want 1", excluded)
+	}
+	if got.Confidence == "HIGH" {
+		t.Errorf("Confidence = %q, want recomputed down from HIGH now that the weight-6 indicator is excluded", got.Confidence)
+	}
+	if got.Total != 1 {
+		t.Errorf("Total = %d, want 1 (only the remaining shared_address indicator)", got.Total)
+	}
+}
+
+func TestParseExcludeTermsCombinesFlagAndFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "exclude.txt")
+	content := "Cleared Corp\n\n# a comment\nAnother Cleared Entity\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	terms, err := parseExcludeTerms("flag term", path)
+	if err != nil {
+		t.Fatalf("parseExcludeTerms: %v", err)
+	}
+	want := []string{"flag term", "Cleared Corp", "Another Cleared Entity"}
+	if len(terms) != len(want) {
+		t.Fatalf("got %v, want %v", terms, want)
+	}
+	for i := range want {
+		if terms[i] != want[i] {
+			t.Errorf("got %v, want %v", terms, want)
+		}
+	}
+}
+
+func TestParseExcludeTermsMissingFileReturnsError(t *testing.T) {
+	if _, err := parseExcludeTerms("", filepath.Join(t.TempDir(), "does-not-exist.txt")); err == nil {
+		t.Fatal("expected an error for a missing --exclude-file")
 	}
 }
 

@@ -37,6 +37,26 @@ func TestWriteHTMLEmbedsGraphData(t *testing.T) {
 	}
 }
 
+// TestWriteHTMLEmbedsNodeMaxWeight guards the size/highlight-by-weight
+// feature: a node's MaxWeight needs to actually reach the embedded
+// graph data the viewer's JS reads, not just exist on the Go struct.
+func TestWriteHTMLEmbedsNodeMaxWeight(t *testing.T) {
+	g := Graph{
+		Nodes: []Node{{ID: "a", Label: "Alpha Inc.", Type: "edgar", MaxWeight: 6}},
+	}
+	path := filepath.Join(t.TempDir(), "graph.html")
+	if err := WriteHTML(g, path); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	if !strings.Contains(string(data), `"maxWeight":6`) {
+		t.Error("maxWeight not found embedded in the output graph data")
+	}
+}
+
 // TestWriteHTMLEscapesScriptTagBreakout guards against a node/edge
 // string field containing a literal "</script>" -- entity
 // names/evidence come from live external APIs, not input this program

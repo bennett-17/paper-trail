@@ -165,8 +165,12 @@ And on top of all of the above, structural risk heuristics:
   overdue accounts: company_status stays "active" for a dormant
   company (confirmed live), so a dormant_company indicator catches
   what status alone would miss, and an accounts_overdue indicator
-  flags a company currently behind on statutory filings -- either
-  signal is common and often innocuous on its own, but worth a second
+  flags a company currently behind on statutory filings. A separate
+  confirmation_statement_overdue indicator flags the same for the
+  confirmation statement -- the annual filing confirming current
+  officers/PSCs/shareholders, not financials, so a company can be
+  current on one and overdue on the other. Each of these three
+  signals is common and often innocuous on its own, but worth a second
   look for an otherwise-active organization. Each UK charity's own
   trustee count (already fetched, no extra API call needed) is checked
   for governance concentration too: two or fewer trustees gets a
@@ -303,7 +307,14 @@ And on top of all of the above, structural risk heuristics:
   for "the top N matching this filter". The total score and confidence
   band still reflect every indicator found regardless of any of these,
   and `--diff` still compares against the full set, so none of them can
-  hide a genuinely new indicator from a diff.
+  hide a genuinely new indicator from a diff. `--exclude <terms>`
+  (comma-separated) and `--exclude-file <path>` are different from all
+  of the above: any indicator whose evidence or entity labels contain
+  one of these terms (case-insensitive) is treated as not a real
+  finding at all -- removed before `--diff` runs (so it can never
+  resurface as "new" later) and the total score/confidence band are
+  recomputed without it. Use this to permanently dismiss a lead you've
+  already reviewed and cleared, across every future run.
 
 ## Why
 
@@ -471,7 +482,9 @@ go run ./cmd/paper-trail risk "Example Name" --output risk_report.txt
 go run ./cmd/paper-trail risk "Example Name" --graph risk_graph.json
 
 # Or export a self-contained, interactive HTML graph -- no server, no
-# CDN, works fully offline -- just open it in a browser
+# CDN, works fully offline -- just open it in a browser. Nodes are
+# sized by the highest-weight indicator they're involved in, with a
+# red outline at weight >= 5, so top-priority leads stand out at a glance
 go run ./cmd/paper-trail risk "Example Name" --html risk_graph.html
 
 # Or export as a CSV edge list or GraphML, for Gephi/yEd or a spreadsheet
@@ -486,6 +499,14 @@ go run ./cmd/paper-trail risk "Example Name" --cache-ttl 24h
 # Read a watchlist of names from a file instead of retyping them --
 # one per line, blank lines and #-prefixed comments ignored
 go run ./cmd/paper-trail risk --input-file watchlist.txt
+
+# Or pipe names in from another command instead of a real file
+grep -v "^reviewed:" watchlist.txt | go run ./cmd/paper-trail risk --input-file -
+
+# Permanently dismiss a lead you've already reviewed and cleared --
+# unlike --top/--min-weight/--indicator, this removes it from the
+# score entirely, and it stays excluded on every future run
+go run ./cmd/paper-trail risk --input-file watchlist.txt --exclude "Example Corp"
 
 # Re-check the same watchlist later and see only what's new since a
 # previously saved --output --json report

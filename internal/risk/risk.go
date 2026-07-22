@@ -456,3 +456,20 @@ func Assess(entities []Entity, extra []Indicator) Score {
 		Confidence:     confidenceBand(indicators, corroborations, total),
 	}
 }
+
+// ComputeCorroborations exports computeCorroborations for callers
+// outside this package that need to recompute corroborations after
+// removing indicators (e.g. cmd/paper-trail's risk --exclude flag,
+// which permanently removes indicators rather than just hiding them
+// from display, so corroborated pairs that depended on an excluded
+// indicator need to be recomputed too, not left stale).
+func ComputeCorroborations(indicators []Indicator) []Corroboration {
+	return computeCorroborations(indicators)
+}
+
+// ConfidenceBand exports confidenceBand for the same reason: --exclude
+// needs to recompute the confidence band from what's left after
+// removing indicators, not leave it reflecting ones no longer counted.
+func ConfidenceBand(indicators []Indicator, corroborations []Corroboration, total int) string {
+	return confidenceBand(indicators, corroborations, total)
+}

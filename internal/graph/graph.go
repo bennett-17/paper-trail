@@ -16,6 +16,13 @@ type Node struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
 	Type  string `json:"node_type,omitempty"`
+	// MaxWeight is the highest Weight among edges touching this node
+	// (see BuildFromRisk) -- 0 for a graph not built from a risk
+	// assessment (Build above never sets edge weights), or for a node
+	// with no edges at all. The HTML viewer uses this to size/highlight
+	// nodes by priority, so the highest-weight leads are visually
+	// obvious without reading every edge label.
+	MaxWeight int `json:"maxWeight,omitempty"`
 }
 
 // Edge is a directed relationship between two nodes. EvidenceForm/

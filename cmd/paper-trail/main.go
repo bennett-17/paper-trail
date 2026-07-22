@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -81,7 +82,7 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--quiet] [--json]
   paper-trail completion bash|zsh
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
@@ -199,7 +200,10 @@ pool of everything every term found. --input-file reads additional
 terms from a file, one per line (blank lines and #-prefixed comment
 lines are ignored) -- combined with any <query> arguments given
 directly -- for re-running the same watchlist of names without
-retyping them each time. For SEC EDGAR this includes any
+retyping them each time. Pass "-" instead of a path to read terms from
+stdin, so a watchlist can be piped in from another command (e.g. a
+filtered grep/awk output) instead of always needing a real file on
+disk. For SEC EDGAR this includes any
 related CIKs (see lookup's "Related CIKs" check) -- each one gets its
 own address/insider lookup too, not just a bare name, so a corporate
 restructuring can actually surface a shared address or officer instead
@@ -251,10 +255,15 @@ accounts: confirmed live that company_status stays "active" for a
 dormant company (dormancy only shows up in a separate
 last-filed-accounts-type field), so a dormant_company indicator
 catches what status alone would miss, and a company with statutory
-accounts currently overdue gets its own accounts_overdue indicator --
-either signal is common and often innocuous on its own, but worth a
-second look for an otherwise-active organization, especially alongside
-other indicators. Each UK charity's own trustee count (already fetched
+accounts currently overdue gets its own accounts_overdue indicator.
+The same profile also carries an overdue confirmation statement flag
+(confirmation_statement_overdue) -- a distinct compliance signal from
+accounts_overdue: the confirmation statement is the annual filing that
+confirms who a company's current officers/PSCs/shareholders are, not
+its financials, so a company can be current on one and overdue on the
+other. Each of these three is common and often innocuous on its own,
+but worth a second look for an otherwise-active organization,
+especially alongside other indicators. Each UK charity's own trustee count (already fetched
 for the shared_person check, no extra API call needed) is also checked
 for governance concentration: two or fewer trustees gets a
 few_trustees indicator (confirmed live against a real charity with
@@ -410,7 +419,11 @@ file -- no server, no CDN, works fully offline -- that lays out a
 force-directed graph in the browser: drag nodes, click one to
 highlight what it connects to and why (each edge shows its indicator
 code and evidence on hover or in the click detail panel), scroll to
-zoom. --graph-csv writes the same nodes/edges as a single denormalized
+zoom. Each node is also sized by the highest-weight indicator it's
+involved in, with a red outline for one at or above weight 5 (this
+project's own "HIGH confidence" threshold), so the highest-priority
+leads are visually obvious without reading every edge label first.
+--graph-csv writes the same nodes/edges as a single denormalized
 edge-list CSV (each endpoint's label/type included directly on the
 row), readable in a spreadsheet or importable into a dedicated
 graph-analysis tool like Gephi or yEd. --graph-graphml writes the same
@@ -463,6 +476,16 @@ the full indicator set regardless of --top/--min-weight/--indicator, so
 none of them can hide a genuinely new indicator from a diff. The total
 score and confidence band are likewise unaffected by all three -- they
 always reflect every indicator found, not just the ones shown.
+--exclude <terms> (comma-separated) and --exclude-file <path> (one
+term per line, same format as --input-file) are different from all of
+the above: any indicator whose evidence or entity labels contain one
+of these terms (case-insensitive) is treated as not a real finding at
+all, not just hidden -- it's removed before --diff runs (so it can
+never resurface as "new" later) and the total score/confidence band
+are recomputed without it. Use this to permanently dismiss a lead
+you've already reviewed and cleared (e.g. --exclude "Example Corp" for
+a known, legitimate shared registered-agent address), across every
+future run, not just this one.
 A source with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it
@@ -524,9 +547,17 @@ func splitPositional(fs *flag.FlagSet, args []string) (flagArgs, positional []st
 // readQueryTermsFile reads risk --input-file: one query term per
 // line, skipping blank lines and lines starting with # (comments),
 // for re-running a watchlist of names without retyping them as CLI
-// arguments each time.
+// arguments each time. path == "-" reads from stdin instead of a real
+// file, so a watchlist can be piped in from another command (e.g. a
+// filtered grep/awk output) instead of always needing one on disk.
 func readQueryTermsFile(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		return nil, err
 	}

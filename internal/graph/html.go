@@ -67,6 +67,7 @@ const htmlViewerTemplate = `<!DOCTYPE html>
   svg { width: 100%; height: 100%; display: block; cursor: grab; }
   svg.panning { cursor: grabbing; }
   .node circle { stroke: var(--bg); stroke-width: 1.5px; cursor: pointer; }
+  .node circle.high-weight { stroke: #e15759; stroke-width: 3px; }
   .node text { font-size: 10px; fill: var(--fg); pointer-events: none; }
   .edge { stroke: var(--edge); fill: none; }
   .node.dim circle, .node.dim text { opacity: 0.15; }
@@ -105,6 +106,7 @@ let width = window.innerWidth, height = window.innerHeight;
 const nodes = graphData.nodes.map((n, i) => ({
   ...n,
   type: n.node_type, // the exported JSON field is "node_type"; normalize once here
+  maxWeight: n.maxWeight || 0,
   x: width / 2 + Math.cos(i) * 100 + (Math.random() - 0.5) * 50,
   y: height / 2 + Math.sin(i) * 100 + (Math.random() - 0.5) * 50,
   vx: 0, vy: 0,
@@ -132,6 +134,17 @@ for (const [type, color] of typeColor) {
   item.className = 'item';
   item.innerHTML = '<span class="swatch" style="background:' + color + '"></span>' + type;
   legend.appendChild(item);
+}
+// Only shown when this graph actually carries indicator weights (i.e.
+// it came from risk --graph/--html, not a plain lookup/graph export,
+// which never sets maxWeight) -- otherwise the note would be
+// meaningless noise.
+if (nodes.some(n => n.maxWeight > 0)) {
+  const note = document.createElement('div');
+  note.className = 'hint';
+  note.style.marginTop = '6px';
+  note.textContent = 'Larger node = higher-weight indicator involved; red outline = a high-weight one (>=5).';
+  legend.appendChild(note);
 }
 
 // -- physics: simple Coulomb repulsion + spring edges + centering,
@@ -197,18 +210,33 @@ const edgeEls = edges.map(e => {
   return line;
 });
 
+// radiusFor sizes a node by the highest-weight indicator it's involved
+// in (see Node.MaxWeight) -- capped so a single very high weight
+// doesn't dominate the layout visually. Purely cosmetic: it doesn't
+// feed the physics simulation above, which sizes forces off fixed
+// constants regardless of node radius.
+function radiusFor(n) {
+  return 7 + Math.min(n.maxWeight || 0, 8) * 1.5;
+}
+
 const nodeEls = nodes.map(n => {
   const g = document.createElementNS(NS, 'g');
   g.setAttribute('class', 'node');
+  const r = radiusFor(n);
   const circle = document.createElementNS(NS, 'circle');
-  circle.setAttribute('r', 7);
+  circle.setAttribute('r', r);
   circle.setAttribute('fill', colorFor(n.type));
+  // High-weight threshold matches this project's own "HIGH weight"
+  // convention (internal/risk's confidenceBand: weight >= 5 alone is
+  // enough to push confidence to HIGH) -- a distinct outline so the
+  // node stands out regardless of its type color.
+  if (n.maxWeight >= 5) circle.classList.add('high-weight');
   const text = document.createElementNS(NS, 'text');
-  text.setAttribute('x', 10);
+  text.setAttribute('x', r + 3);
   text.setAttribute('y', 4);
   text.textContent = n.label;
   const title = document.createElementNS(NS, 'title');
-  title.textContent = n.label + ' (' + n.type + ')';
+  title.textContent = n.label + ' (' + n.type + ')' + (n.maxWeight ? ' -- highest indicator weight involved: ' + n.maxWeight : '');
   g.appendChild(circle);
   g.appendChild(text);
   g.appendChild(title);

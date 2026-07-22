@@ -282,6 +282,13 @@ type Company struct {
 	// enough to catch this.
 	AccountsOverdue  bool   `json:"accountsOverdue,omitempty"`
 	LastAccountsType string `json:"lastAccountsType,omitempty"`
+	// ConfirmationStatementOverdue is confirmed live, same shape as
+	// AccountsOverdue above but a distinct compliance signal: the
+	// confirmation statement is the annual filing that confirms who a
+	// company's officers, PSCs, and shareholders currently are, not its
+	// financials -- a company can be current on one and overdue on the
+	// other.
+	ConfirmationStatementOverdue bool `json:"confirmationStatementOverdue,omitempty"`
 }
 
 type companyResponse struct {
@@ -303,6 +310,9 @@ type companyResponse struct {
 			Type string `json:"type"`
 		} `json:"last_accounts"`
 	} `json:"accounts"`
+	ConfirmationStatement struct {
+		Overdue bool `json:"overdue"`
+	} `json:"confirmation_statement"`
 }
 
 // zeroPadCompanyNumber left-pads a company number to Companies House's
@@ -344,16 +354,17 @@ func (c *Client) GetCompany(number string) (Company, error) {
 	}
 
 	return Company{
-		CompanyNumber:    resp.CompanyNumber,
-		Name:             resp.CompanyName,
-		Status:           resp.CompanyStatus,
-		Type:             resp.Type,
-		IncorporatedOn:   resp.DateOfCreation,
-		RegisteredOffice: resp.RegisteredOfficeAddress.toAddress(),
-		SICCodes:         resp.SICCodes,
-		PreviousNames:    previousNames,
-		AccountsOverdue:  resp.Accounts.Overdue,
-		LastAccountsType: resp.Accounts.LastAccounts.Type,
+		CompanyNumber:                resp.CompanyNumber,
+		Name:                         resp.CompanyName,
+		Status:                       resp.CompanyStatus,
+		Type:                         resp.Type,
+		IncorporatedOn:               resp.DateOfCreation,
+		RegisteredOffice:             resp.RegisteredOfficeAddress.toAddress(),
+		SICCodes:                     resp.SICCodes,
+		PreviousNames:                previousNames,
+		AccountsOverdue:              resp.Accounts.Overdue,
+		LastAccountsType:             resp.Accounts.LastAccounts.Type,
+		ConfirmationStatementOverdue: resp.ConfirmationStatement.Overdue,
 	}, nil
 }
 

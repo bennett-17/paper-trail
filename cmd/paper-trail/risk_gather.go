@@ -462,6 +462,22 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 							Evidence:    "accounts overdue",
 						})
 					}
+					// Confirmation statement overdue is a distinct
+					// compliance signal from accounts_overdue above --
+					// the confirmation statement is the annual filing
+					// that confirms who a company's current officers,
+					// PSCs, and shareholders are, not its financials, so
+					// a company can be current on one and overdue on
+					// the other.
+					if company.ConfirmationStatementOverdue {
+						r.extra = append(r.extra, risk.Indicator{
+							Code:        "confirmation_statement_overdue",
+							Description: "This entity's linked Companies House company has an overdue confirmation statement -- the annual filing confirming current officers/PSCs/shareholders, not financials, so this can lag even for a company current on its accounts. Often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off",
+							Weight:      1,
+							Entities:    []string{companyLabel},
+							Evidence:    "confirmation statement overdue",
+						})
+					}
 				}
 			}
 			// ID includes the suffix -- confirmed a real bug fetching

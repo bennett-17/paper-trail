@@ -75,6 +75,13 @@ type riskReportJSON struct {
 	// reflects all of them. Zero (the default, omitted) unless one of
 	// those flags was set and actually filtered something out.
 	HiddenIndicators int `json:"hiddenIndicators,omitempty"`
+	// ExcludedIndicators is how many indicators --exclude/--exclude-file
+	// permanently removed -- unlike HiddenIndicators above, these are
+	// NOT reflected in Score.Total/Score.Confidence, since --exclude
+	// means "not a real finding", not just "don't show it". Zero (the
+	// default, omitted) unless one of those flags actually removed
+	// something.
+	ExcludedIndicators int `json:"excludedIndicators,omitempty"`
 }
 
 // riskReportDiff summarizes what changed between a previous risk
@@ -159,6 +166,71 @@ func parseIndicatorCodes(flagValue string) []string {
 	return codes
 }
 
+// excludeIndicators implements --exclude/--exclude-file: permanently
+// removes indicators whose Evidence or any Entities label contains
+// (case-insensitively) any of the given terms, returning the filtered
+// score and how many were removed. Unlike filterIndicators/
+// truncateIndicators (--min-weight/--indicator/--top), which only
+// limit what's *shown*, this means "I've already reviewed this and
+// it's not a real finding" -- so Total, Confidence, and Corroborations
+// are all recomputed from what's left, not left reflecting indicators
+// that no longer count. An empty terms is a no-op (the default).
+func excludeIndicators(score risk.Score, terms []string) (risk.Score, int) {
+	if len(terms) == 0 {
+		return score, 0
+	}
+	lowerTerms := make([]string, len(terms))
+	for i, t := range terms {
+		lowerTerms[i] = strings.ToLower(t)
+	}
+	matches := func(ind risk.Indicator) bool {
+		haystack := strings.ToLower(ind.Evidence + " " + strings.Join(ind.Entities, " "))
+		for _, t := range lowerTerms {
+			if strings.Contains(haystack, t) {
+				return true
+			}
+		}
+		return false
+	}
+	kept := make([]risk.Indicator, 0, len(score.Indicators))
+	for _, ind := range score.Indicators {
+		if !matches(ind) {
+			kept = append(kept, ind)
+		}
+	}
+	excluded := len(score.Indicators) - len(kept)
+	if excluded == 0 {
+		return score, 0
+	}
+	total := 0
+	for _, ind := range kept {
+		total += ind.Weight
+	}
+	corroborations := risk.ComputeCorroborations(kept)
+	score.Indicators = kept
+	score.Total = total
+	score.Corroborations = corroborations
+	score.Confidence = risk.ConfidenceBand(kept, corroborations, total)
+	return score, excluded
+}
+
+// parseExcludeTerms combines --exclude's comma-separated value with
+// --exclude-file's one-term-per-line file (blank lines and #-prefixed
+// comments ignored, same format as --input-file), so a long-lived
+// allowlist doesn't have to be retyped as a single flag value every
+// run.
+func parseExcludeTerms(flagValue, filePath string) ([]string, error) {
+	terms := parseIndicatorCodes(flagValue) // same comma-split/trim/drop-empty logic, generically reused
+	if filePath != "" {
+		fromFile, err := readQueryTermsFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		terms = append(terms, fromFile...)
+	}
+	return terms, nil
+}
+
 // diffRiskReports compares a freshly computed report against a
 // previously saved one (see --diff).
 func diffRiskReports(previous riskReportJSON, entities []risk.Entity, score risk.Score) riskReportDiff {
@@ -238,16 +310,18 @@ func runRisk(args []string) {
 	csvPath := fs.String("graph-csv", "", "additionally write the graph (same nodes/edges as --graph) as a denormalized edge-list CSV, for spreadsheets or import into Gephi/yEd")
 	graphMLPath := fs.String("graph-graphml", "", "additionally write the graph (same nodes/edges as --graph) as GraphML, for import into Gephi/yEd or other graph-analysis tools")
 	cacheTTLFlag := fs.String("cache-ttl", "", "cache entities per source/query/limit on disk for this long (e.g. 24h) and reuse them within that window instead of re-fetching; unset disables caching entirely (always live, the default)")
-	inputFile := fs.String("input-file", "", "read additional query terms from this file, one per line (blank lines and lines starting with # are ignored) -- combined with any <query> arguments given directly")
+	inputFile := fs.String("input-file", "", "read additional query terms from this file, one per line (blank lines and lines starting with # are ignored) -- combined with any <query> arguments given directly; pass - to read from stdin instead of a file")
 	diffPath := fs.String("diff", "", "compare this run against a previously saved --output --json report, showing newly appeared entities/indicators and the score change")
 	quiet := fs.Bool("quiet", false, "suppress progress output (written to stderr as the scan runs; never affects --json or --output)")
 	top := fs.Int("top", 0, "show only the N highest-weight indicators (0 shows all, the default) -- Total still reflects every indicator found; only which ones are listed is limited, for a large scan's report to lead with what matters most without scrolling a long flat list")
 	minWeight := fs.Int("min-weight", 0, "show only indicators with weight >= this (0 shows all, the default) -- Total still reflects every indicator found")
 	indicatorFilter := fs.String("indicator", "", "show only indicators matching these comma-separated codes, e.g. disqualified_director,sanctions_match (empty shows all, the default) -- Total still reflects every indicator found")
+	excludeFlag := fs.String("exclude", "", "comma-separated terms -- any indicator whose evidence or entity labels contain one of these (case-insensitive) is permanently removed from the report, including Total/Confidence, not just hidden from display -- for dismissing leads you've already reviewed and cleared")
+	excludeFile := fs.String("exclude-file", "", "read additional --exclude terms from this file too, one per line (blank lines and lines starting with # are ignored)")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--exclude <terms>] [--exclude-file <path>] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -278,6 +352,12 @@ func runRisk(args []string) {
 			os.Exit(1)
 		}
 		previousReport = &r
+	}
+
+	excludeTerms, err := parseExcludeTerms(*excludeFlag, *excludeFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --exclude-file %q: %v\n", *excludeFile, err)
+		os.Exit(1)
 	}
 
 	// Caching is opt-in: this tool's whole point is checking *current*
@@ -436,9 +516,18 @@ func runRisk(args []string) {
 
 	score := risk.Assess(entities, extra)
 
-	// --diff always compares the full indicator set, before any --top
-	// truncation below -- otherwise an indicator that just fell outside
-	// --top's cutoff in an earlier run could misleadingly look "new".
+	// --exclude/--exclude-file apply before everything else below,
+	// including --diff: unlike --top/--min-weight/--indicator, which
+	// only limit what's *shown*, an excluded indicator is treated as
+	// not a real finding at all -- so it should never resurface as
+	// "new" in a diff either, and Total/Confidence are recomputed to
+	// no longer reflect it.
+	score, excludedCount := excludeIndicators(score, excludeTerms)
+
+	// --diff always compares the (post-exclude) full indicator set,
+	// before any --top truncation below -- otherwise an indicator that
+	// just fell outside --top's cutoff in an earlier run could
+	// misleadingly look "new".
 	var diff *riskReportDiff
 	if previousReport != nil {
 		d := diffRiskReports(*previousReport, entities, score)
@@ -456,7 +545,7 @@ func runRisk(args []string) {
 	score, hiddenByTop := truncateIndicators(score, *top)
 	hiddenIndicators := hiddenByFilter + hiddenByTop
 
-	report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators}
+	report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount}
 
 	var w io.Writer = os.Stdout
 	if *output != "" {
@@ -494,6 +583,9 @@ func runRisk(args []string) {
 			}
 		}
 
+		if excludedCount > 0 {
+			fmt.Fprintf(w, "\n%d indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.\n", excludedCount)
+		}
 		fmt.Fprintf(w, "\nRisk score: %d (confidence: %s)\n\n", score.Total, score.Confidence)
 		if len(score.Indicators) == 0 {
 			fmt.Fprintln(w, "No structural indicators found among the entities located.")
