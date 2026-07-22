@@ -50,6 +50,13 @@ type Client struct {
 	UserAgent   string
 	SearchURL   string
 
+	// MaxRetries/RetryBaseDelay govern retry-with-backoff on 429, same
+	// approach as internal/companieshouse, internal/sanctions,
+	// internal/edgar, internal/nonprofit, internal/aucharity, and
+	// internal/ukcharity.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+
 	mu            sync.Mutex
 	lastRequestAt time.Time
 }
@@ -57,10 +64,12 @@ type Client struct {
 // NewClient builds a Client. No API key is needed or accepted.
 func NewClient() *Client {
 	return &Client{
-		HTTPClient:  &http.Client{Timeout: 15 * time.Second},
-		MinInterval: 500 * time.Millisecond,
-		UserAgent:   "paper-trail (https://github.com/bennett-17/paper-trail)",
-		SearchURL:   DefaultSearchURL,
+		HTTPClient:     &http.Client{Timeout: 15 * time.Second},
+		MinInterval:    500 * time.Millisecond,
+		UserAgent:      "paper-trail (https://github.com/bennett-17/paper-trail)",
+		SearchURL:      DefaultSearchURL,
+		MaxRetries:     3,
+		RetryBaseDelay: time.Second,
 	}
 }
 
@@ -126,6 +135,45 @@ type SearchResult struct {
 	Hits  []Hit `json:"hits"`
 }
 
+// doPostWithRetry wraps rawPost with exponential backoff retries when
+// the response is HTTP 429 (rate limited) -- same approach as
+// internal/companieshouse, internal/sanctions, internal/edgar,
+// internal/nonprofit, internal/aucharity, and internal/ukcharity.
+func (c *Client) doPostWithRetry(payload []byte) (statusCode int, body []byte, err error) {
+	delay := c.RetryBaseDelay
+	for attempt := 0; ; attempt++ {
+		status, respBody, doErr := c.rawPost(payload)
+		if doErr != nil || status != http.StatusTooManyRequests || attempt >= c.MaxRetries {
+			return status, respBody, doErr
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
+}
+
+func (c *Client) rawPost(payload []byte) (statusCode int, body []byte, err error) {
+	c.throttle()
+
+	req, reqErr := http.NewRequest(http.MethodPost, c.SearchURL, bytes.NewReader(payload))
+	if reqErr != nil {
+		return 0, nil, newClientError("building request for %s: %v", c.SearchURL, reqErr)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.UserAgent)
+
+	resp, doErr := c.HTTPClient.Do(req)
+	if doErr != nil {
+		return 0, nil, newClientError("request to %s failed: %v", c.SearchURL, doErr)
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return 0, nil, newClientError("reading response from %s: %v", c.SearchURL, readErr)
+	}
+	return resp.StatusCode, respBody, nil
+}
+
 // SearchDesignations searches the UK Sanctions List by name. limit
 // caps how many results come back (0 defaults to 50, the same default
 // the live search tool itself uses).
@@ -151,26 +199,12 @@ func (c *Client) SearchDesignations(name string, limit int) (SearchResult, error
 		return SearchResult{}, newClientError("building search request: %v", err)
 	}
 
-	c.throttle()
-	req, err := http.NewRequest(http.MethodPost, c.SearchURL, bytes.NewReader(payload))
+	status, body, err := c.doPostWithRetry(payload)
 	if err != nil {
-		return SearchResult{}, newClientError("building request for %s: %v", c.SearchURL, err)
+		return SearchResult{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", c.UserAgent)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return SearchResult{}, newClientError("request to %s failed: %v", c.SearchURL, err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return SearchResult{}, newClientError("reading response from %s: %v", c.SearchURL, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SearchResult{}, newClientError("UK Sanctions List search returned HTTP %d for %s", resp.StatusCode, c.SearchURL)
+	if status < 200 || status >= 300 {
+		return SearchResult{}, newClientError("UK Sanctions List search returned HTTP %d for %s", status, c.SearchURL)
 	}
 
 	var raw searchResponse

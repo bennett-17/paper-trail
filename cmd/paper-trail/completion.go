@@ -9,7 +9,7 @@ import (
 // completionCommands and completionFlags are the single source of truth for
 // what the completion scripts below offer -- keep both in sync with the
 // subcommands registered in main() and their flag sets in printUsage().
-const completionCommands = "lookup filings graph fulltext nonprofit aucharity ukcharity sanctions uksanctions companieshouse risk completion help"
+const completionCommands = "lookup filings graph fulltext nonprofit aucharity ukcharity sanctions uksanctions companieshouse person risk completion help"
 
 var completionFlags = map[string]string{
 	"lookup":         "--cik --json",
@@ -22,7 +22,8 @@ var completionFlags = map[string]string{
 	"sanctions":      "--fuzzy --offset --limit --json",
 	"uksanctions":    "--limit --json",
 	"companieshouse": "--number --officer --limit --json",
-	"risk":           "--input-file --limit --output --graph --html --graph-csv --graph-graphml --cache-ttl --diff --top --quiet --json",
+	"person":         "--limit --json",
+	"risk":           "--input-file --limit --output --graph --html --graph-csv --graph-graphml --cache-ttl --diff --top --min-weight --indicator --quiet --json",
 }
 
 const bashCompletionScript = `# paper-trail bash completion

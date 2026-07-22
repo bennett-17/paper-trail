@@ -49,6 +49,12 @@ type Client struct {
 	SearchURL  string
 	ResourceID string
 
+	// MaxRetries/RetryBaseDelay govern retry-with-backoff on 429, same
+	// approach as internal/companieshouse, internal/sanctions,
+	// internal/edgar, and internal/nonprofit.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+
 	mu            sync.Mutex
 	lastRequestAt time.Time
 }
@@ -56,11 +62,13 @@ type Client struct {
 // NewClient builds a Client with sensible defaults.
 func NewClient() *Client {
 	return &Client{
-		HTTPClient:  &http.Client{Timeout: 15 * time.Second},
-		MinInterval: 150 * time.Millisecond,
-		UserAgent:   "paper-trail (https://github.com/bennett-17/paper-trail)",
-		SearchURL:   DefaultSearchURL,
-		ResourceID:  DefaultResourceID,
+		HTTPClient:     &http.Client{Timeout: 15 * time.Second},
+		MinInterval:    150 * time.Millisecond,
+		UserAgent:      "paper-trail (https://github.com/bennett-17/paper-trail)",
+		SearchURL:      DefaultSearchURL,
+		ResourceID:     DefaultResourceID,
+		MaxRetries:     3,
+		RetryBaseDelay: time.Second,
 	}
 }
 
@@ -75,28 +83,52 @@ func (c *Client) throttle() {
 }
 
 func (c *Client) get(u string) ([]byte, error) {
+	status, body, err := c.doGetWithRetry(u)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("data.gov.au returned HTTP %d for %s", status, u)
+	}
+	return body, nil
+}
+
+// doGetWithRetry wraps rawGet with exponential backoff retries when the
+// response is HTTP 429 (rate limited) -- same approach as
+// internal/companieshouse, internal/sanctions, internal/edgar, and
+// internal/nonprofit.
+func (c *Client) doGetWithRetry(u string) (statusCode int, body []byte, err error) {
+	delay := c.RetryBaseDelay
+	for attempt := 0; ; attempt++ {
+		status, respBody, doErr := c.rawGet(u)
+		if doErr != nil || status != http.StatusTooManyRequests || attempt >= c.MaxRetries {
+			return status, respBody, doErr
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
+}
+
+func (c *Client) rawGet(u string) (statusCode int, body []byte, err error) {
 	c.throttle()
 
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, newClientError("building request for %s: %v", u, err)
+	req, reqErr := http.NewRequest(http.MethodGet, u, nil)
+	if reqErr != nil {
+		return 0, nil, newClientError("building request for %s: %v", u, reqErr)
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, newClientError("request to %s failed: %v", u, err)
+	resp, doErr := c.HTTPClient.Do(req)
+	if doErr != nil {
+		return 0, nil, newClientError("request to %s failed: %v", u, doErr)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, newClientError("reading response from %s: %v", u, err)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return 0, nil, newClientError("reading response from %s: %v", u, readErr)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newClientError("data.gov.au returned HTTP %d for %s", resp.StatusCode, u)
-	}
-	return body, nil
+	return resp.StatusCode, respBody, nil
 }
 
 var nonDigitRE = regexp.MustCompile(`\D`)

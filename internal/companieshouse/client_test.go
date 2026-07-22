@@ -87,6 +87,49 @@ func TestSearchCompaniesUsesBasicAuth(t *testing.T) {
 	}
 }
 
+func TestSearchOfficersParsesNameAndDateOfBirthMonthYearOnly(t *testing.T) {
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/officers", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("q")
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_officer_search_results.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	result, err := c.SearchOfficers("David Cameron", 2)
+	if err != nil {
+		t.Fatalf("SearchOfficers: %v", err)
+	}
+
+	if gotQuery != "David Cameron" {
+		t.Errorf("q param = %q, want %q", gotQuery, "David Cameron")
+	}
+	if result.Total != 10000 || len(result.Results) != 2 {
+		t.Fatalf("result = %+v, want Total 10000 and 2 results", result)
+	}
+
+	withDOB := result.Results[0]
+	if withDOB.Name != "David CAMERON" || withDOB.AppointmentCount != 1 {
+		t.Errorf("first hit = %+v, want David CAMERON with 1 appointment", withDOB)
+	}
+	if withDOB.BirthMonth != 12 || withDOB.BirthYear != 1962 {
+		t.Errorf("date of birth = %d/%d, want 12/1962 (month/year only, never a full date)", withDOB.BirthMonth, withDOB.BirthYear)
+	}
+	if withDOB.OfficerID != "8NM_u0Gx_nGUHnl7n5Fjoe6cD0U" {
+		t.Errorf("OfficerID = %q, want extracted from links.self", withDOB.OfficerID)
+	}
+	if withDOB.Address.Locality != "Brechin" {
+		t.Errorf("Address.Locality = %q, want Brechin", withDOB.Address.Locality)
+	}
+
+	withoutDOB := result.Results[1]
+	if withoutDOB.BirthMonth != 0 || withoutDOB.BirthYear != 0 {
+		t.Errorf("second hit date of birth = %d/%d, want zero values -- this API omits date_of_birth entirely for some hits", withoutDOB.BirthMonth, withoutDOB.BirthYear)
+	}
+}
+
 func TestGetCompanyParsesProfile(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/company/04325234", func(w http.ResponseWriter, r *http.Request) {

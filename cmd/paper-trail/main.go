@@ -42,6 +42,8 @@ func main() {
 		runUKSanctions(os.Args[2:])
 	case "companieshouse":
 		runCompaniesHouse(os.Args[2:])
+	case "person":
+		runPerson(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "completion":
@@ -78,7 +80,8 @@ Usage:
   paper-trail companieshouse <query> [--limit <n>] [--json]
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--quiet] [--json]
+  paper-trail person <name> [--limit <n>] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--quiet] [--json]
   paper-trail completion bash|zsh
 
 --cik looks up an exact CIK directly, bypassing name/ticker resolution.
@@ -175,6 +178,18 @@ same no-keyless-option model as ukcharity and sanctions, but a single
 key, not a primary/secondary pair. Register for a free account at
 https://developer.company-information.service.gov.uk, create an
 application, and request a REST key (not Web or Streaming).
+
+person is the entry point for starting from someone's name instead of
+a company: it searches Companies House's officer records directly by
+name, since --officer above needs an officer ID you'd otherwise have
+to already have found via a --number lookup. A hit's officer ID feeds
+straight into --officer to fan out to every company appointment
+register-wide. Appointment count and date of birth (month/year only,
+never a full date) are the only hints this API gives for telling two
+same-named officers apart -- a match is a lead to verify, not a
+confirmed identity. UK Companies House only; there's no equivalent
+person-search API for EDGAR, US nonprofits, or the AU/UK charity
+registers in this tool.
 
 risk runs one or more <query> terms against every source above that's
 configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a
@@ -323,7 +338,16 @@ larger, same low weight as formation_cluster, since a dramatic swing
 is just as often a one-time grant, a capital campaign, or a program
 winding down as anything else; confirmed live against real early-stage
 nonprofits showing a 7.5x and a 360x jump in their first couple of
-years, both plausible ordinary growth, not evidence of anything.
+years, both plausible ordinary growth, not evidence of anything. The
+same filing history feeds a high_officer_compensation indicator: total
+compensation to current officers/directors/trustees/key employees
+exceeding 30% of total functional expenses, on a base above $1M --
+confirmed live against real large nonprofits (Wikimedia Foundation,
+Doctors Without Borders USA), which both ran under 3%. Note this is a
+named-role dollar total, not individual names -- ProPublica's API never
+exposes who the officers actually are, so US nonprofits (unlike EDGAR,
+Companies House, and UK charities) can't contribute to the
+shared_person check below.
 ACNC (Australia) has no free
 officer/trustee data (see aucharity above), so AU entities can only
 ever match on shared address or website, never shared person. Passing
@@ -410,11 +434,16 @@ to manually spot what changed in a wall of repeated output.
 --top <n> shows only the <n> highest-weight indicators (already sorted
 highest-first) instead of the full list, noting how many were hidden --
 useful when a large scan turns up dozens of low-weight indicators and
-you just want the ones most worth checking by hand first. --diff still
-compares the full indicator set regardless of --top, so truncation
-never hides a genuinely new indicator from a diff. The total score and
-confidence band are unaffected by --top -- they always reflect every
-indicator found, not just the ones shown.
+you just want the ones most worth checking by hand first. --min-weight
+<n> and --indicator <codes> filter by relevance instead of count: show
+only indicators at or above a weight, or matching specific comma-
+separated indicator codes (e.g. --indicator disqualified_director,
+sanctions_match) -- combine with --top to get "the top N indicators
+matching this filter", applied in that order. --diff always compares
+the full indicator set regardless of --top/--min-weight/--indicator, so
+none of them can hide a genuinely new indicator from a diff. The total
+score and confidence band are likewise unaffected by all three -- they
+always reflect every indicator found, not just the ones shown.
 A source with no credentials configured
 (ukcharity/sanctions) or no match for a given term is skipped and
 noted, not treated as a failure. This is a lead-generation tool: it
@@ -435,7 +464,7 @@ Environment:
   UK_CHARITY_API_KEY_SECONDARY optional rotation fallback for ukcharity (see above)
   CSL_API_KEY_PRIMARY          required for the sanctions command only (see above)
   CSL_API_KEY_SECONDARY        optional rotation fallback for sanctions (see above)
-  COMPANIES_HOUSE_API_KEY      required for the companieshouse command only (see above)`)
+  COMPANIES_HOUSE_API_KEY      required for the companieshouse and person commands (see above)`)
 }
 
 // splitPositional separates args into flag arguments (recognized by fs)

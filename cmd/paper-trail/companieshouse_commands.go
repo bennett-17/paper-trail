@@ -156,3 +156,54 @@ func runCompaniesHouse(args []string) {
 		fmt.Println("No matches. Note: this searches UK Companies House only -- use `ukcharity` for the England & Wales charity register itself.")
 	}
 }
+
+// runPerson is the entry point for starting research from a person's
+// name rather than a company: it searches UK Companies House's officer
+// records directly, then points at `companieshouse --officer <id>` to
+// fan out to every company appointment that officer ID is linked to.
+func runPerson(args []string) {
+	fs := flag.NewFlagSet("person", flag.ExitOnError)
+	limit := fs.Int("limit", 10, "max results to show")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	flagArgs, positional := splitPositional(fs, args)
+	fs.Parse(flagArgs)
+
+	const usage = "usage: paper-trail person <name> [--limit <n>] [--json]"
+	if len(positional) != 1 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(1)
+	}
+	name := positional[0]
+
+	client, err := companieshouse.NewClient("")
+	exitOnErr(err)
+
+	result, err := client.SearchOfficers(name, *limit)
+	exitOnErr(err)
+
+	if *asJSON {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("%d total match(es) on UK Companies House officer records, showing %d:\n\n", result.Total, len(result.Results))
+	for _, h := range result.Results {
+		line := fmt.Sprintf("  %s", h.Name)
+		if h.BirthYear != 0 {
+			line += fmt.Sprintf("  (born %02d/%d)", h.BirthMonth, h.BirthYear)
+		}
+		line += fmt.Sprintf(" -- %d appointment(s)", h.AppointmentCount)
+		fmt.Println(line)
+		if addr := h.Address.AsSingleLine(); addr != "" {
+			fmt.Printf("    %s\n", addr)
+		}
+		if h.OfficerID != "" {
+			fmt.Printf("    officer id: %s  ->  paper-trail companieshouse --officer %s\n", h.OfficerID, h.OfficerID)
+		}
+	}
+	if result.Total == 0 {
+		fmt.Println("No matches. Note: this searches UK Companies House officer records only -- there's no equivalent person-search API for EDGAR, US nonprofits, or the AU/UK charity registers in this tool.")
+	} else {
+		fmt.Println("\nA name match here is a lead to verify, not a confirmed identity -- common names collide, and appointment count plus date of birth (month and year only, this API never returns a full date) are the only disambiguating hints available before committing to one officer id.")
+	}
+}

@@ -81,6 +81,72 @@ func TestFinancialAnomalyWithFewerThanTwoFilingsIsEmpty(t *testing.T) {
 	}
 }
 
+// TestHighOfficerCompensationRealLargeNonprofitsAreNotFlagged reproduces
+// two live examples that shaped this heuristic: the Wikimedia
+// Foundation (2023: $4.1M officer comp / $168.3M total expenses, 2.5%)
+// and MSF USA (2023: $3.1M / $856.5M, 0.4%) -- both well-run,
+// well-known large nonprofits, both far below highOfficerCompensationRatio.
+func TestHighOfficerCompensationRealLargeNonprofitsAreNotFlagged(t *testing.T) {
+	wikimedia := []nonprofit.Filing{
+		{TaxYear: 2023, OfficerCompensation: int64Ptr(4_145_477), TotalExpenses: int64Ptr(168_305_333)},
+	}
+	if desc := highOfficerCompensation(wikimedia); desc != "" {
+		t.Errorf("got %q, want no flag for a 2.5%% ratio", desc)
+	}
+
+	msf := []nonprofit.Filing{
+		{TaxYear: 2023, OfficerCompensation: int64Ptr(3_105_482), TotalExpenses: int64Ptr(856_531_073)},
+	}
+	if desc := highOfficerCompensation(msf); desc != "" {
+		t.Errorf("got %q, want no flag for a 0.4%% ratio", desc)
+	}
+}
+
+func TestHighOfficerCompensationFlagsRatioAboveThreshold(t *testing.T) {
+	filings := []nonprofit.Filing{
+		{TaxYear: 2023, OfficerCompensation: int64Ptr(2_000_000), TotalExpenses: int64Ptr(5_000_000)}, // 40%
+	}
+	desc := highOfficerCompensation(filings)
+	if desc == "" {
+		t.Fatal("expected a flag for a 40% ratio above the 30% threshold")
+	}
+	if !strings.Contains(desc, "40%") {
+		t.Errorf("description = %q, want it to mention the 40%% ratio", desc)
+	}
+}
+
+func TestHighOfficerCompensationSkipsBelowExpenseFloor(t *testing.T) {
+	// A single paid founder can legitimately be ~100% of a tiny
+	// budget -- the expense floor exists specifically so a small or
+	// all-volunteer organization isn't flagged for this.
+	filings := []nonprofit.Filing{
+		{TaxYear: 2023, OfficerCompensation: int64Ptr(45_000), TotalExpenses: int64Ptr(50_000)}, // 90%, but tiny
+	}
+	if desc := highOfficerCompensation(filings); desc != "" {
+		t.Errorf("got %q, want no flag below the expense floor regardless of ratio", desc)
+	}
+}
+
+func TestHighOfficerCompensationSkipsMissingFigures(t *testing.T) {
+	filings := []nonprofit.Filing{
+		{TaxYear: 2023, OfficerCompensation: nil, TotalExpenses: int64Ptr(5_000_000)},
+		{TaxYear: 2022, OfficerCompensation: int64Ptr(2_000_000), TotalExpenses: nil},
+	}
+	if desc := highOfficerCompensation(filings); desc != "" {
+		t.Errorf("got %q, want no flag when either figure is missing", desc)
+	}
+}
+
+func TestHighOfficerCompensationUsesFirstQualifyingFilingNewestFirst(t *testing.T) {
+	filings := []nonprofit.Filing{
+		{TaxYear: 2023, OfficerCompensation: int64Ptr(500_000), TotalExpenses: int64Ptr(5_000_000)},   // 10%, no flag
+		{TaxYear: 2022, OfficerCompensation: int64Ptr(2_000_000), TotalExpenses: int64Ptr(5_000_000)}, // 40%, would flag, but shouldn't be reached
+	}
+	if desc := highOfficerCompensation(filings); desc != "" {
+		t.Errorf("got %q, want the newest (2023) filing's 10%% ratio to win, not the older 40%%", desc)
+	}
+}
+
 // TestFrequentRenamingRealTescoHistoryIsNotFlagged reproduces the
 // live example that shaped this heuristic: Tesco PLC's two recorded
 // renames span 36 years (1947->1983), well outside

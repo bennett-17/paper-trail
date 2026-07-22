@@ -31,6 +31,7 @@ registered-agent/address-based relationship mapping).
 | `sanctions` | US Consolidated Screening List | OFAC SDN + State/BIS restricted-party lists | `CSL_API_KEY_PRIMARY` |
 | `uksanctions` | OFSI (UK Sanctions List) | UK financial sanctions designations | none |
 | `companieshouse` | UK Companies House | UK company officers/directors + beneficial owners (PSCs) | `COMPANIES_HOUSE_API_KEY` |
+| `person` | UK Companies House officer search | start from a person's name, not a company | `COMPANIES_HOUSE_API_KEY` |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
 Seven independent public-data sources across three countries, unified
@@ -235,7 +236,14 @@ And on top of all of the above, structural risk heuristics:
   in revenue or assets -- a financial_anomaly indicator flags anything
   5x or larger, same low weight as formation_cluster, since a dramatic
   swing is just as often a one-time grant or a program winding down as
-  anything else. Phone/email are UK-only today, website
+  anything else. The same filing history also feeds a
+  high_officer_compensation indicator -- total compensation to current
+  officers/directors/trustees/key employees exceeding 30% of total
+  functional expenses, on a base above $1M -- though that's a named-
+  role dollar total, not individual names: ProPublica's API never
+  exposes who the officers actually are, so unlike EDGAR, Companies
+  House, and UK charities, US nonprofits can't contribute to the
+  shared_person check below regardless. Phone/email are UK-only today, website
   is UK+AU; AU entities have no officer/trustee data (see above) and so
   can only ever match on shared address or website, never shared
   person. Passing
@@ -268,11 +276,15 @@ And on top of all of the above, structural risk heuristics:
   what's new -- entities, indicators, and the score change -- for
   re-checking the same watchlist over time without manually spotting
   what changed in a wall of repeated output. `--top <n>` shows only the
-  `<n>` highest-weight indicators, noting how many were hidden -- the
-  total score and confidence band still reflect every indicator found,
-  and `--diff` still compares against the full set regardless of
-  `--top`, so truncation never hides a genuinely new indicator from a
-  diff.
+  `<n>` highest-weight indicators, noting how many were hidden.
+  `--min-weight <n>` and `--indicator <codes>` filter by relevance
+  instead of count -- only indicators at or above a weight, or matching
+  specific comma-separated codes (e.g. `--indicator
+  disqualified_director,sanctions_match`) -- and combine with `--top`
+  for "the top N matching this filter". The total score and confidence
+  band still reflect every indicator found regardless of any of these,
+  and `--diff` still compares against the full set, so none of them can
+  hide a genuinely new indicator from a diff.
 
 ## Why
 
@@ -419,6 +431,10 @@ go run ./cmd/paper-trail companieshouse --number 04325234
 # register-wide, using the officer id shown in the output above
 go run ./cmd/paper-trail companieshouse --officer <officer id>
 
+# Start from a person's name instead of a company -- finds officer ids
+# to feed into --officer above (requires COMPANIES_HOUSE_API_KEY)
+go run ./cmd/paper-trail person "Example Name"
+
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
 go run ./cmd/paper-trail risk "Example Name"
@@ -489,7 +505,7 @@ source <(paper-trail completion zsh)
 ## Architecture
 
 ```
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, risk, completion subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, risk, completion subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
@@ -520,6 +536,8 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://api.company-information.service.gov.uk/` (UK Companies House Public Data API -- company search, profile, and officers, requires a free registered API key)
 
 `ukcharity`, `sanctions`, and `companieshouse` are the three exceptions to this project's no-key model.
+
+Every client above retries with exponential backoff on a 429 (rate-limited) response before giving up, so a momentary rate-limit hiccup during a large `risk` scan doesn't skip an entire source.
 
 ## Testing
 

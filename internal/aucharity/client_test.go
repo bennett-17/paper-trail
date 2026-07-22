@@ -21,9 +21,40 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
 	c := NewClient()
 	c.MinInterval = 0
+	c.RetryBaseDelay = 0
 	c.SearchURL = srv.URL + "/datastore_search"
 	c.ResourceID = "test-resource-id"
 	return c
+}
+
+// TestRetriesOn429ThenSucceeds mirrors internal/companieshouse,
+// internal/sanctions, internal/edgar, and internal/nonprofit's retry
+// behavior.
+func TestRetriesOn429ThenSucceeds(t *testing.T) {
+	attempts := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/datastore_search", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, mustReadFixture(t, "aucharity_search_results.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	result, err := c.SearchCharities("Example", 0, 0)
+	if err != nil {
+		t.Fatalf("SearchCharities: %v, want it to succeed after retrying past the 429s", err)
+	}
+	if attempts != 3 {
+		t.Errorf("made %d attempts, want 3 (two 429s then a success)", attempts)
+	}
+	if result.Total != 9 {
+		t.Errorf("Total = %d, want 9", result.Total)
+	}
 }
 
 func TestSearchCharitiesParsesResults(t *testing.T) {

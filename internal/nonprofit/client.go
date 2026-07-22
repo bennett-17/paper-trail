@@ -44,6 +44,12 @@ type Client struct {
 	SearchURL       string
 	OrganizationURL string // format string with a single %s for the EIN (digits only)
 
+	// MaxRetries/RetryBaseDelay govern retry-with-backoff on 429, same
+	// approach as internal/companieshouse, internal/sanctions, and
+	// internal/edgar.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+
 	mu            sync.Mutex
 	lastRequestAt time.Time
 }
@@ -56,6 +62,8 @@ func NewClient() *Client {
 		UserAgent:       "paper-trail (https://github.com/bennett-17/paper-trail)",
 		SearchURL:       DefaultSearchURL,
 		OrganizationURL: DefaultOrganizationURL,
+		MaxRetries:      3,
+		RetryBaseDelay:  time.Second,
 	}
 }
 
@@ -83,31 +91,54 @@ func (c *Client) getTolerant404(u string) ([]byte, error) {
 }
 
 func (c *Client) doGet(u string, tolerate404 bool) ([]byte, error) {
+	status, body, err := c.doGetWithRetry(u)
+	if err != nil {
+		return nil, err
+	}
+	if tolerate404 && status == http.StatusNotFound {
+		return body, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("ProPublica Nonprofit Explorer returned HTTP %d for %s", status, u)
+	}
+	return body, nil
+}
+
+// doGetWithRetry wraps rawGet with exponential backoff retries when the
+// response is HTTP 429 (rate limited) -- same approach as
+// internal/companieshouse, internal/sanctions, and internal/edgar.
+func (c *Client) doGetWithRetry(u string) (statusCode int, body []byte, err error) {
+	delay := c.RetryBaseDelay
+	for attempt := 0; ; attempt++ {
+		status, respBody, doErr := c.rawGet(u)
+		if doErr != nil || status != http.StatusTooManyRequests || attempt >= c.MaxRetries {
+			return status, respBody, doErr
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
+}
+
+func (c *Client) rawGet(u string) (statusCode int, body []byte, err error) {
 	c.throttle()
 
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, newClientError("building request for %s: %v", u, err)
+	req, reqErr := http.NewRequest(http.MethodGet, u, nil)
+	if reqErr != nil {
+		return 0, nil, newClientError("building request for %s: %v", u, reqErr)
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, newClientError("request to %s failed: %v", u, err)
+	resp, doErr := c.HTTPClient.Do(req)
+	if doErr != nil {
+		return 0, nil, newClientError("request to %s failed: %v", u, doErr)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, newClientError("reading response from %s: %v", u, err)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return 0, nil, newClientError("reading response from %s: %v", u, readErr)
 	}
-	if tolerate404 && resp.StatusCode == http.StatusNotFound {
-		return body, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newClientError("ProPublica Nonprofit Explorer returned HTTP %d for %s", resp.StatusCode, u)
-	}
-	return body, nil
+	return resp.StatusCode, respBody, nil
 }
 
 var nonDigitRE = regexp.MustCompile(`\D`)
@@ -229,7 +260,15 @@ type Filing struct {
 	TotalRevenue  *int64 `json:"totalRevenue,omitempty"`
 	TotalExpenses *int64 `json:"totalExpenses,omitempty"`
 	TotalAssets   *int64 `json:"totalAssets,omitempty"`
-	PDFURL        string `json:"pdfUrl,omitempty"`
+	// OfficerCompensation is the "compensation of current officers,
+	// directors, trustees, and key employees" line from this filing
+	// (confirmed live via ProPublica's compnsatncurrofcr field). Only
+	// populated when HasFinancials is true, same as the figures above.
+	// This is a named-role total, not individual names or a headcount --
+	// ProPublica's API doesn't expose the officers themselves, unlike
+	// this project's EDGAR/Companies House/UK-AU-charity sources.
+	OfficerCompensation *int64 `json:"officerCompensation,omitempty"`
+	PDFURL              string `json:"pdfUrl,omitempty"`
 }
 
 // OrganizationProfile is a nonprofit's IRS registration details plus its
@@ -257,6 +296,7 @@ type organizationResponse struct {
 		TotRevenue   *int64 `json:"totrevenue"`
 		TotFuncExpns *int64 `json:"totfuncexpns"`
 		TotAssetsEnd *int64 `json:"totassetsend"`
+		CompCurrOfcr *int64 `json:"compnsatncurrofcr"`
 		PDFURL       string `json:"pdf_url"`
 	} `json:"filings_with_data"`
 	FilingsWithoutData []struct {
@@ -338,13 +378,14 @@ func (c *Client) GetOrganization(ein string) (OrganizationProfile, error) {
 	filings := make([]Filing, 0, len(resp.FilingsWithData)+len(resp.FilingsWithoutData))
 	for _, f := range resp.FilingsWithData {
 		filings = append(filings, Filing{
-			TaxYear:       f.TaxPrdYr,
-			FormType:      formTypeName(f.FormType),
-			HasFinancials: true,
-			TotalRevenue:  f.TotRevenue,
-			TotalExpenses: f.TotFuncExpns,
-			TotalAssets:   f.TotAssetsEnd,
-			PDFURL:        f.PDFURL,
+			TaxYear:             f.TaxPrdYr,
+			FormType:            formTypeName(f.FormType),
+			HasFinancials:       true,
+			TotalRevenue:        f.TotRevenue,
+			TotalExpenses:       f.TotFuncExpns,
+			TotalAssets:         f.TotAssetsEnd,
+			OfficerCompensation: f.CompCurrOfcr,
+			PDFURL:              f.PDFURL,
 		})
 	}
 	for _, f := range resp.FilingsWithoutData {

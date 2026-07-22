@@ -21,9 +21,39 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
 	c := NewClient()
 	c.MinInterval = 0
+	c.RetryBaseDelay = 0
 	c.SearchURL = srv.URL + "/search.json"
 	c.OrganizationURL = srv.URL + "/organizations/%s.json"
 	return c
+}
+
+// TestRetriesOn429ThenSucceeds mirrors internal/companieshouse,
+// internal/sanctions, and internal/edgar's retry behavior.
+func TestRetriesOn429ThenSucceeds(t *testing.T) {
+	attempts := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/organizations/530196605.json", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, mustReadFixture(t, "nonprofit_organization_red_cross.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	profile, err := c.GetOrganization("53-0196605")
+	if err != nil {
+		t.Fatalf("GetOrganization: %v, want it to succeed after retrying past the 429s", err)
+	}
+	if attempts != 3 {
+		t.Errorf("made %d attempts, want 3 (two 429s then a success)", attempts)
+	}
+	if profile.Organization.Name != "American National Red Cross" {
+		t.Errorf("Name = %q", profile.Organization.Name)
+	}
 }
 
 func TestSearchOrganizationsParsesResults(t *testing.T) {
@@ -148,6 +178,9 @@ func TestGetOrganizationParsesFilings(t *testing.T) {
 	}
 	if withData.TotalRevenue == nil || *withData.TotalRevenue != 3217077611 {
 		t.Errorf("withData.TotalRevenue = %v, want 3217077611", withData.TotalRevenue)
+	}
+	if withData.OfficerCompensation == nil || *withData.OfficerCompensation != 5947262 {
+		t.Errorf("withData.OfficerCompensation = %v, want 5947262", withData.OfficerCompensation)
 	}
 
 	withoutData := profile.Filings[1]

@@ -57,6 +57,93 @@ func TestTruncateIndicatorsTopGreaterThanCountIsNoOp(t *testing.T) {
 	}
 }
 
+func TestFilterIndicatorsNoOpWhenNoFilterSet(t *testing.T) {
+	score := risk.Score{Indicators: []risk.Indicator{{Code: "a", Weight: 1}, {Code: "b", Weight: 5}}}
+	got, hidden := filterIndicators(score, 0, nil)
+	if hidden != 0 || len(got.Indicators) != 2 {
+		t.Errorf("got %d indicators, %d hidden, want no-op (2 indicators, 0 hidden)", len(got.Indicators), hidden)
+	}
+}
+
+func TestFilterIndicatorsByMinWeight(t *testing.T) {
+	score := risk.Score{
+		Total: 9,
+		Indicators: []risk.Indicator{
+			{Code: "disqualified_director", Weight: 6},
+			{Code: "shared_person", Weight: 3},
+			{Code: "formation_cluster", Weight: 1},
+		},
+	}
+	got, hidden := filterIndicators(score, 3, nil)
+	if hidden != 1 {
+		t.Errorf("hidden = %d, want 1 (only formation_cluster is below weight 3)", hidden)
+	}
+	if len(got.Indicators) != 2 {
+		t.Fatalf("got %d indicators, want 2", len(got.Indicators))
+	}
+	if got.Total != 9 {
+		t.Errorf("Total = %d, want 9 (unchanged -- filtering only limits what's shown)", got.Total)
+	}
+}
+
+func TestFilterIndicatorsByCode(t *testing.T) {
+	score := risk.Score{
+		Indicators: []risk.Indicator{
+			{Code: "sanctions_match", Weight: 5},
+			{Code: "shared_address", Weight: 1},
+			{Code: "sanctions_match", Weight: 5},
+		},
+	}
+	got, hidden := filterIndicators(score, 0, []string{"sanctions_match"})
+	if hidden != 1 {
+		t.Errorf("hidden = %d, want 1 (the one shared_address indicator)", hidden)
+	}
+	if len(got.Indicators) != 2 {
+		t.Fatalf("got %d indicators, want 2", len(got.Indicators))
+	}
+	for _, ind := range got.Indicators {
+		if ind.Code != "sanctions_match" {
+			t.Errorf("kept indicator with code %q, want only sanctions_match", ind.Code)
+		}
+	}
+}
+
+func TestFilterIndicatorsCombinesMinWeightAndCodeAsAnd(t *testing.T) {
+	score := risk.Score{
+		Indicators: []risk.Indicator{
+			{Code: "sanctions_match", Weight: 5}, // matches both
+			{Code: "sanctions_match", Weight: 1}, // wrong weight
+			{Code: "shared_address", Weight: 5},  // wrong code
+		},
+	}
+	got, hidden := filterIndicators(score, 3, []string{"sanctions_match"})
+	if hidden != 2 {
+		t.Errorf("hidden = %d, want 2", hidden)
+	}
+	if len(got.Indicators) != 1 || got.Indicators[0].Weight != 5 {
+		t.Fatalf("got %+v, want exactly the weight-5 sanctions_match indicator", got.Indicators)
+	}
+}
+
+func TestParseIndicatorCodesTrimsAndDropsEmpty(t *testing.T) {
+	got := parseIndicatorCodes(" sanctions_match ,, disqualified_director ,")
+	want := []string{"sanctions_match", "disqualified_director"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestParseIndicatorCodesEmptyStringReturnsNil(t *testing.T) {
+	if got := parseIndicatorCodes(""); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
 func TestIndicatorIdentityDistinguishesDifferentEvidenceOnSameCode(t *testing.T) {
 	a := risk.Indicator{Code: "shared_address", Entities: []string{"edgar: Example Corp (1)", "ukcharity: Example Trust (2)"}, Evidence: "123 Main St"}
 	b := risk.Indicator{Code: "shared_address", Entities: []string{"edgar: Example Corp (1)", "ukcharity: Example Trust (2)"}, Evidence: "456 Other Ave"}

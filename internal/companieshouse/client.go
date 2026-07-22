@@ -569,6 +569,80 @@ func (c *Client) SearchDisqualifiedOfficers(name string, limit int) ([]Disqualif
 	return hits, nil
 }
 
+// OfficerSearchHit is a single officer search result -- confirmed live,
+// this is a name-only match against the same officer records
+// GetOfficers/GetOfficerAppointments use, not a specific person: common
+// names collide the same way they do on a sanctions list.
+// AppointmentCount and DateOfBirth (month/year only, the API never
+// returns a full date) are this search's only hints for telling two
+// same-named officers apart before committing to one via OfficerID.
+type OfficerSearchHit struct {
+	Name             string  `json:"name"`
+	OfficerID        string  `json:"officerId,omitempty"`
+	AppointmentCount int     `json:"appointmentCount,omitempty"`
+	Address          Address `json:"address,omitempty"`
+	BirthMonth       int     `json:"birthMonth,omitempty"`
+	BirthYear        int     `json:"birthYear,omitempty"`
+}
+
+// OfficerSearchResult is a page of officer search results.
+type OfficerSearchResult struct {
+	Total   int                `json:"total"`
+	Results []OfficerSearchHit `json:"results"`
+}
+
+type officerSearchResponse struct {
+	Items []struct {
+		Title            string     `json:"title"`
+		AppointmentCount int        `json:"appointment_count"`
+		Address          addressRaw `json:"address"`
+		Links            struct {
+			Self string `json:"self"`
+		} `json:"links"`
+		DateOfBirth struct {
+			Month int `json:"month"`
+			Year  int `json:"year"`
+		} `json:"date_of_birth"`
+	} `json:"items"`
+	TotalResults int `json:"total_results"`
+}
+
+// SearchOfficers searches Companies House's officer records by name --
+// this is the entry point for starting from a person rather than a
+// company: pair OfficerID from a hit here with GetOfficerAppointments
+// to fan out to every company they're linked to across the whole
+// register. limit caps how many results come back (0 uses the API's
+// own default page size).
+func (c *Client) SearchOfficers(name string, limit int) (OfficerSearchResult, error) {
+	params := url.Values{}
+	params.Set("q", name)
+	if limit > 0 {
+		params.Set("items_per_page", strconv.Itoa(limit))
+	}
+	body, err := c.get(c.BaseURL + "/search/officers?" + params.Encode())
+	if err != nil {
+		return OfficerSearchResult{}, err
+	}
+
+	var resp officerSearchResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return OfficerSearchResult{}, newClientError("parsing officer search results: %v", err)
+	}
+
+	hits := make([]OfficerSearchHit, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		hits = append(hits, OfficerSearchHit{
+			Name:             item.Title,
+			OfficerID:        officerIDFromAppointmentsLink(item.Links.Self),
+			AppointmentCount: item.AppointmentCount,
+			Address:          item.Address.toAddress(),
+			BirthMonth:       item.DateOfBirth.Month,
+			BirthYear:        item.DateOfBirth.Year,
+		})
+	}
+	return OfficerSearchResult{Total: resp.TotalResults, Results: hits}, nil
+}
+
 // Charge is a single registered charge (mortgage/debenture) against a
 // company. PersonsEntitled is who benefits from the charge -- the
 // lender/chargeholder -- a counterparty relationship distinct from an

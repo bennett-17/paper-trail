@@ -124,6 +124,21 @@ func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache
 					Evidence:    desc,
 				})
 			}
+
+			// Officer compensation is a named-role total, not
+			// individual names -- ProPublica's API never exposes who
+			// the officers actually are, unlike this project's EDGAR/
+			// Companies House/UK-AU-charity sources, so this can't
+			// feed the shared_person check the way those do.
+			if desc := highOfficerCompensation(profile.Filings); desc != "" {
+				extra = append(extra, risk.Indicator{
+					Code:        "high_officer_compensation",
+					Description: "Total compensation to current officers/directors/trustees/key employees is a large share of total functional expenses -- often innocuous (a small or founder-led organization, a single well-compensated executive at a lean nonprofit), but worth checking against the underlying Form 990 for who and why",
+					Weight:      1,
+					Entities:    []string{e.Label()},
+					Evidence:    desc,
+				})
+			}
 		}
 		entities = append(entities, termEntities...)
 		cache.Set(cacheKey, termEntities)
@@ -536,6 +551,37 @@ func financialAnomaly(filings []nonprofit.Filing) string {
 		check("Total assets", newer.TotalAssets, older.TotalAssets, newer.TaxYear, older.TaxYear)
 	}
 	return best
+}
+
+// highOfficerCompensation looks at a nonprofit's single most recent Form
+// 990 filing with published figures (filings are newest first, as
+// ProPublica returns them) for total compensation to current officers/
+// directors/trustees/key employees exceeding
+// highOfficerCompensationRatio of total functional expenses, on an
+// expense base above highOfficerCompensationMinExpenses. This is
+// deliberately a snapshot of the current governance picture, not a
+// multi-year scan like financialAnomaly -- a stale ratio from years ago
+// isn't a current lead, so once the most recent filing with data is
+// found, its result (flagged or not) is final; older filings aren't
+// consulted even if one of them would have qualified. Returns a human-
+// readable description, or "" if that filing doesn't qualify (missing
+// figures on every filing, below the expense floor, or below the
+// ratio).
+func highOfficerCompensation(filings []nonprofit.Filing) string {
+	for _, f := range filings {
+		if f.OfficerCompensation == nil || f.TotalExpenses == nil {
+			continue // keep looking for the most recent filing with both figures published
+		}
+		if *f.TotalExpenses < highOfficerCompensationMinExpenses {
+			return ""
+		}
+		ratio := float64(*f.OfficerCompensation) / float64(*f.TotalExpenses)
+		if ratio < highOfficerCompensationRatio {
+			return ""
+		}
+		return fmt.Sprintf("tax year %d: $%d to current officers/directors/trustees/key employees, %.0f%% of $%d total functional expenses", f.TaxYear, *f.OfficerCompensation, ratio*100, *f.TotalExpenses)
+	}
+	return ""
 }
 
 // frequentRenamingWindow is how short a span between a company's

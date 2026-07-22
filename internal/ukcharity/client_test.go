@@ -25,6 +25,7 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 		t.Fatalf("NewClient: %v", err)
 	}
 	c.MinInterval = 0
+	c.RetryBaseDelay = 0
 	c.SearchURL = srv.URL + "/searchCharityName/%s"
 	c.DetailURL = srv.URL + "/allcharitydetailsV2/%d/%d"
 	return c
@@ -63,6 +64,46 @@ func TestNewClientAcceptsSecondaryKeyAlone(t *testing.T) {
 	os.Unsetenv("UK_CHARITY_API_KEY_SECONDARY")
 	if _, err := NewClient("", "only-secondary"); err != nil {
 		t.Errorf("NewClient with only a secondary key: %v, want no error", err)
+	}
+}
+
+// TestRetriesOn429ThenSucceeds mirrors internal/companieshouse,
+// internal/sanctions, internal/edgar, internal/nonprofit, and
+// internal/aucharity's retry behavior. Unlike TestFallsBackToSecondaryKeyOn401,
+// a 429 should be retried on the *same* key, not trigger a fallback --
+// it's a rate limit, not an authorization failure.
+func TestRetriesOn429ThenSucceeds(t *testing.T) {
+	attempts := 0
+	var keysReceived []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/searchCharityName/", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		keysReceived = append(keysReceived, r.Header.Get("Ocp-Apim-Subscription-Key"))
+		if attempts < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, mustReadFixture(t, "ukcharity_search_results.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	charities, err := c.SearchCharities("Example")
+	if err != nil {
+		t.Fatalf("SearchCharities: %v, want it to succeed after retrying past the 429s", err)
+	}
+	if attempts != 3 {
+		t.Errorf("made %d attempts, want 3 (two 429s then a success)", attempts)
+	}
+	if len(charities) != 2 {
+		t.Errorf("got %d charities, want 2", len(charities))
+	}
+	for _, k := range keysReceived {
+		if k != "test-primary-key" {
+			t.Errorf("keys tried = %v, want every attempt to reuse the primary key, not fall back", keysReceived)
+			break
+		}
 	}
 }
 
@@ -198,6 +239,7 @@ func TestFallsBackToSecondaryKeyOn401(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	c.MinInterval = 0
+	c.RetryBaseDelay = 0
 	c.SearchURL = srv.URL + "/searchCharityName/%s"
 
 	charities, err := c.SearchCharities("Example")
@@ -231,6 +273,7 @@ func TestBothKeysRejectedReturnsError(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	c.MinInterval = 0
+	c.RetryBaseDelay = 0
 	c.SearchURL = srv.URL + "/searchCharityName/%s"
 
 	if _, err := c.SearchCharities("anything"); err == nil {

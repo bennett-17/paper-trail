@@ -54,6 +54,12 @@ type Client struct {
 	SearchURL string // format string with a single %s for the URL-escaped charity name
 	DetailURL string // format string with two %d: registered number, then suffix
 
+	// MaxRetries/RetryBaseDelay govern retry-with-backoff on 429, same
+	// approach as internal/companieshouse, internal/sanctions,
+	// internal/edgar, internal/nonprofit, and internal/aucharity.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+
 	mu            sync.Mutex
 	lastRequestAt time.Time
 }
@@ -80,13 +86,15 @@ func NewClient(primaryKey, secondaryKey string) (*Client, error) {
 		)
 	}
 	return &Client{
-		HTTPClient:   &http.Client{Timeout: 15 * time.Second},
-		MinInterval:  150 * time.Millisecond,
-		UserAgent:    "paper-trail (https://github.com/bennett-17/paper-trail)",
-		PrimaryKey:   primaryKey,
-		SecondaryKey: secondaryKey,
-		SearchURL:    DefaultBaseURL + "/searchCharityName/%s",
-		DetailURL:    DefaultBaseURL + "/allcharitydetailsV2/%d/%d",
+		HTTPClient:     &http.Client{Timeout: 15 * time.Second},
+		MinInterval:    150 * time.Millisecond,
+		UserAgent:      "paper-trail (https://github.com/bennett-17/paper-trail)",
+		PrimaryKey:     primaryKey,
+		SecondaryKey:   secondaryKey,
+		SearchURL:      DefaultBaseURL + "/searchCharityName/%s",
+		DetailURL:      DefaultBaseURL + "/allcharitydetailsV2/%d/%d",
+		MaxRetries:     3,
+		RetryBaseDelay: time.Second,
 	}, nil
 }
 
@@ -131,7 +139,7 @@ func (c *Client) getWithFallback(u string, tolerate404 bool) ([]byte, error) {
 
 	var lastErr error
 	for _, key := range keys {
-		status, body, err := c.doGet(u, key)
+		status, body, err := c.doGetWithRetry(u, key)
 		if err != nil {
 			return nil, err
 		}
@@ -152,6 +160,25 @@ func (c *Client) getWithFallback(u string, tolerate404 bool) ([]byte, error) {
 		}
 	}
 	return nil, lastErr
+}
+
+// doGetWithRetry wraps doGet with exponential backoff retries when the
+// response is HTTP 429 (rate limited) -- same approach as
+// internal/companieshouse, internal/sanctions, internal/edgar,
+// internal/nonprofit, and internal/aucharity. This retries the same
+// key rather than falling back to the secondary one: a 429 is a rate
+// limit, not an authorization failure, so switching credentials
+// wouldn't address it the way it does for a 401.
+func (c *Client) doGetWithRetry(u, key string) (statusCode int, body []byte, err error) {
+	delay := c.RetryBaseDelay
+	for attempt := 0; ; attempt++ {
+		status, respBody, doErr := c.doGet(u, key)
+		if doErr != nil || status != http.StatusTooManyRequests || attempt >= c.MaxRetries {
+			return status, respBody, doErr
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
 }
 
 // doGet performs a single request with the given subscription key,

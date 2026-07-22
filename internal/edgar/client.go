@@ -54,6 +54,13 @@ type Client struct {
 	BrowseEdgarURL    string
 	FullTextSearchURL string
 
+	// MaxRetries/RetryBaseDelay govern retry-with-backoff on 429, same
+	// approach as internal/companieshouse and internal/sanctions --
+	// a momentary rate-limit hiccup during a large risk scan shouldn't
+	// be treated as a hard failure and skip an entire source.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+
 	// CacheDir holds the on-disk cache of insider-filing reporting-owner
 	// lookups (see fetchReportingOwners). Defaults to
 	// os.UserCacheDir()/paper-trail; set to "" to disable caching.
@@ -97,6 +104,8 @@ func NewClient(userAgent string) (*Client, error) {
 		BrowseEdgarURL:    DefaultBrowseEdgarURL,
 		FullTextSearchURL: DefaultFullTextSearchURL,
 		CacheDir:          cacheDir,
+		MaxRetries:        3,
+		RetryBaseDelay:    time.Second,
 	}, nil
 }
 
@@ -113,36 +122,61 @@ func (c *Client) throttle() {
 }
 
 func (c *Client) get(url string) ([]byte, error) {
-	c.throttle()
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	status, body, err := c.doGetWithRetry(url)
 	if err != nil {
-		return nil, newClientError("building request for %s: %v", url, err)
-	}
-	req.Header.Set("User-Agent", c.UserAgent)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, newClientError("request to %s failed: %v", url, err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, newClientError("reading response from %s: %v", url, err)
+		return nil, err
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if status == http.StatusTooManyRequests {
 		return nil, newClientError(
-			"SEC EDGAR rate-limited this client (HTTP 429) for %s", url,
+			"SEC EDGAR rate-limited this client (HTTP 429) for %s -- retried %d time(s) already", url, c.MaxRetries,
 		)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if status < 200 || status >= 300 {
 		return nil, newClientError(
-			"SEC EDGAR returned HTTP %d for %s", resp.StatusCode, url,
+			"SEC EDGAR returned HTTP %d for %s", status, url,
 		)
 	}
 	return body, nil
+}
+
+// doGetWithRetry wraps doGet with exponential backoff retries when the
+// response is HTTP 429 (rate limited) -- SEC EDGAR's own rate-limit
+// guidance is a suggestion, not a hard cap, so a brief backoff and
+// retry is more useful than immediately giving up on an entire source
+// mid-scan.
+func (c *Client) doGetWithRetry(url string) (statusCode int, body []byte, err error) {
+	delay := c.RetryBaseDelay
+	for attempt := 0; ; attempt++ {
+		status, respBody, doErr := c.doGet(url)
+		if doErr != nil || status != http.StatusTooManyRequests || attempt >= c.MaxRetries {
+			return status, respBody, doErr
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
+}
+
+func (c *Client) doGet(url string) (statusCode int, body []byte, err error) {
+	c.throttle()
+
+	req, reqErr := http.NewRequest(http.MethodGet, url, nil)
+	if reqErr != nil {
+		return 0, nil, newClientError("building request for %s: %v", url, reqErr)
+	}
+	req.Header.Set("User-Agent", c.UserAgent)
+
+	resp, doErr := c.HTTPClient.Do(req)
+	if doErr != nil {
+		return 0, nil, newClientError("request to %s failed: %v", url, doErr)
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return 0, nil, newClientError("reading response from %s: %v", url, readErr)
+	}
+	return resp.StatusCode, respBody, nil
 }
 
 // -- ticker / CIK resolution ------------------------------------------------

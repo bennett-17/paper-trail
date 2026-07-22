@@ -57,6 +57,7 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 		t.Fatalf("NewClient: %v", err)
 	}
 	c.MinInterval = 0
+	c.RetryBaseDelay = 0
 	c.TickersURL = srv.URL + "/tickers.json"
 	c.SubmissionsURL = srv.URL + "/submissions/CIK%s.json"
 	c.BrowseEdgarURL = srv.URL + "/browse-edgar"
@@ -477,6 +478,38 @@ func TestFetchReportingOwnersCachesAcrossClients(t *testing.T) {
 	}
 	if indexHits != 1 || xmlHits != 1 {
 		t.Errorf("after client 2 (should be a disk cache hit): indexHits=%d xmlHits=%d, want still 1/1", indexHits, xmlHits)
+	}
+}
+
+// TestRetriesOn429ThenSucceeds mirrors internal/companieshouse and
+// internal/sanctions's retry behavior -- SEC EDGAR's rate-limit
+// guidance is a suggestion, not a hard cap, so a momentary 429 during a
+// large risk scan shouldn't be treated as a hard failure.
+func TestRetriesOn429ThenSucceeds(t *testing.T) {
+	attempts := 0
+	tickers := mustReadFixture(t, "company_tickers.json")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tickers.json", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, tickers)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	cik, err := c.ResolveCIK("AAPL")
+	if err != nil {
+		t.Fatalf("ResolveCIK: %v, want it to succeed after retrying past the 429s", err)
+	}
+	if attempts != 3 {
+		t.Errorf("made %d attempts, want 3 (two 429s then a success)", attempts)
+	}
+	if cik != "0000320193" {
+		t.Errorf("got CIK %s, want 0000320193", cik)
 	}
 }
 

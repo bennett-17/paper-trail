@@ -34,6 +34,21 @@ const mailDropAddressThreshold = 1000
 // decisions or funds -- two or fewer is the threshold used here.
 const fewTrusteesThreshold = 2
 
+// highOfficerCompensationRatio and highOfficerCompensationMinExpenses
+// together gate the high_officer_compensation indicator: total
+// compensation to current officers/directors/trustees/key employees
+// exceeding this share of total functional expenses, but only above a
+// minimum expense floor. Chosen from live observation against several
+// real large nonprofits (Wikimedia Foundation, MSF USA), which ran
+// 0.2%-2.9% -- well below this threshold -- while a small or all-
+// volunteer organization can legitimately run much higher on a tiny
+// budget (a single paid founder can be 100% of a $50k budget), which
+// is what the expense floor is for.
+const (
+	highOfficerCompensationRatio       = 0.30
+	highOfficerCompensationMinExpenses = 1_000_000
+)
+
 // riskReportJSON is the shape of a risk --json report -- named (not
 // anonymous) so --diff can decode a previously saved one back in for
 // comparison against a new run.
@@ -42,10 +57,10 @@ type riskReportJSON struct {
 	Entities []risk.Entity `json:"entities"`
 	Notes    []string      `json:"notes"`
 	Score    risk.Score    `json:"score"`
-	// HiddenIndicators is how many lower-weight indicators --top
-	// left out of Score.Indicators -- Score.Total still reflects all
-	// of them. Zero (the default, omitted) unless --top was set and
-	// actually truncated something.
+	// HiddenIndicators is how many indicators --top, --min-weight, or
+	// --indicator left out of Score.Indicators -- Score.Total still
+	// reflects all of them. Zero (the default, omitted) unless one of
+	// those flags was set and actually filtered something out.
 	HiddenIndicators int `json:"hiddenIndicators,omitempty"`
 }
 
@@ -81,6 +96,54 @@ func truncateIndicators(score risk.Score, top int) (risk.Score, int) {
 	hidden := len(score.Indicators) - top
 	score.Indicators = score.Indicators[:top]
 	return score, hidden
+}
+
+// filterIndicators implements --min-weight and --indicator: keeps only
+// indicators whose weight is >= minWeight AND (codes is empty OR the
+// indicator's Code is one of codes), returning the filtered score and
+// how many indicators were removed. minWeight <= 0 and an empty codes
+// is a no-op (the default -- show all). Like --top, this only limits
+// what's *shown*: Total and Confidence are computed before filtering
+// and are left untouched, so they still reflect every indicator found.
+func filterIndicators(score risk.Score, minWeight int, codes []string) (risk.Score, int) {
+	if minWeight <= 0 && len(codes) == 0 {
+		return score, 0
+	}
+	allowedCode := make(map[string]bool, len(codes))
+	for _, c := range codes {
+		allowedCode[c] = true
+	}
+	kept := make([]risk.Indicator, 0, len(score.Indicators))
+	for _, ind := range score.Indicators {
+		if ind.Weight < minWeight {
+			continue
+		}
+		if len(codes) > 0 && !allowedCode[ind.Code] {
+			continue
+		}
+		kept = append(kept, ind)
+	}
+	hidden := len(score.Indicators) - len(kept)
+	score.Indicators = kept
+	return score, hidden
+}
+
+// parseIndicatorCodes splits a comma-separated --indicator flag value
+// into individual codes, trimming whitespace and dropping empty
+// entries (so a trailing comma or extra spaces don't produce a bogus
+// empty-string code that could never match).
+func parseIndicatorCodes(flagValue string) []string {
+	if flagValue == "" {
+		return nil
+	}
+	var codes []string
+	for _, c := range strings.Split(flagValue, ",") {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			codes = append(codes, c)
+		}
+	}
+	return codes
 }
 
 // diffRiskReports compares a freshly computed report against a
@@ -166,10 +229,12 @@ func runRisk(args []string) {
 	diffPath := fs.String("diff", "", "compare this run against a previously saved --output --json report, showing newly appeared entities/indicators and the score change")
 	quiet := fs.Bool("quiet", false, "suppress progress output (written to stderr as the scan runs; never affects --json or --output)")
 	top := fs.Int("top", 0, "show only the N highest-weight indicators (0 shows all, the default) -- Total still reflects every indicator found; only which ones are listed is limited, for a large scan's report to lead with what matters most without scrolling a long flat list")
+	minWeight := fs.Int("min-weight", 0, "show only indicators with weight >= this (0 shows all, the default) -- Total still reflects every indicator found")
+	indicatorFilter := fs.String("indicator", "", "show only indicators matching these comma-separated codes, e.g. disqualified_director,sanctions_match (empty shows all, the default) -- Total still reflects every indicator found")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -366,10 +431,16 @@ func runRisk(args []string) {
 		diff = &d
 	}
 
-	// --top only limits which indicators are *shown*, after diffing --
-	// Total (and the confidence band, already computed) still reflect
-	// every indicator found.
-	score, hiddenIndicators := truncateIndicators(score, *top)
+	// --min-weight, --indicator, and --top all only limit which
+	// indicators are *shown*, after diffing -- Total (and the confidence
+	// band, already computed) still reflect every indicator found.
+	// --min-weight/--indicator apply first (relevance), --top second
+	// (count), so e.g. --indicator sanctions_match --top 3 means "the 3
+	// highest-weight sanctions matches", not "of the top 3 overall,
+	// whichever happen to be sanctions matches".
+	score, hiddenByFilter := filterIndicators(score, *minWeight, parseIndicatorCodes(*indicatorFilter))
+	score, hiddenByTop := truncateIndicators(score, *top)
+	hiddenIndicators := hiddenByFilter + hiddenByTop
 
 	report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators}
 
@@ -419,7 +490,19 @@ func runRisk(args []string) {
 			fmt.Fprintf(w, "     Evidence: %s\n\n", ind.Evidence)
 		}
 		if hiddenIndicators > 0 {
-			fmt.Fprintf(w, "... and %d more indicator(s) not shown (--top %d) -- the score above still reflects all of them.\n\n", hiddenIndicators, *top)
+			var reasons []string
+			if hiddenByFilter > 0 {
+				if *minWeight > 0 {
+					reasons = append(reasons, fmt.Sprintf("--min-weight %d", *minWeight))
+				}
+				if *indicatorFilter != "" {
+					reasons = append(reasons, fmt.Sprintf("--indicator %q", *indicatorFilter))
+				}
+			}
+			if hiddenByTop > 0 {
+				reasons = append(reasons, fmt.Sprintf("--top %d", *top))
+			}
+			fmt.Fprintf(w, "... and %d more indicator(s) not shown (%s) -- the score above still reflects all of them.\n\n", hiddenIndicators, strings.Join(reasons, ", "))
 		}
 		if len(score.Corroborations) > 0 {
 			fmt.Fprintln(w, "Corroborated pairs (matched on 2+ independent kinds of evidence -- stronger than any single indicator above):")
