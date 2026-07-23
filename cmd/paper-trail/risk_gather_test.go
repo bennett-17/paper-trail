@@ -202,6 +202,64 @@ func TestAppointmentBurstSkipsUnparseableDates(t *testing.T) {
 	}
 }
 
+// TestResignationBurstFlagsRealCorporateNomineeDirectorPattern is
+// modeled directly on real, live-confirmed resignation history for the
+// same Companies House officer ID nEggfu04XePBqnRERobPjXjmHGk
+// ("Corporate Directors Limited") appointmentBurst's own tests cite --
+// its resignations cluster even more tightly than its appointments do:
+// four separate companies (Burndell Limited, Coldbrook Services
+// Limited, Courtwick Services Ltd, Ventmor Ltd) all had this same
+// corporate director resign on 2016-04-27 alone, part of a wider wave
+// of 8 distinct companies within that single week.
+func TestResignationBurstFlagsRealCorporateNomineeDirectorPattern(t *testing.T) {
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "09483243", CompanyName: "OLDWICK SERVICES LIMITED", AppointedOn: "2015-03-11", ResignedOn: "2016-04-25"},
+		{CompanyNumber: "09747142", CompanyName: "PULLAST CONSULTING LTD", AppointedOn: "2015-08-25", ResignedOn: "2016-04-26"},
+		{CompanyNumber: "09347433", CompanyName: "ROUNDSTONE NETWORK LTD.", AppointedOn: "2014-12-09", ResignedOn: "2016-04-26"},
+		{CompanyNumber: "09615136", CompanyName: "BURNDELL LIMITED", AppointedOn: "2015-05-29", ResignedOn: "2016-04-27"},
+		{CompanyNumber: "09157902", CompanyName: "COLDBROOK SERVICES LIMITED", AppointedOn: "2014-08-01", ResignedOn: "2016-04-27"},
+		{CompanyNumber: "09463602", CompanyName: "COURTWICK SERVICES LTD", AppointedOn: "2015-02-27", ResignedOn: "2016-04-27"},
+		{CompanyNumber: "09262162", CompanyName: "VENTMOR LTD", AppointedOn: "2014-10-14", ResignedOn: "2016-04-27"},
+		{CompanyNumber: "09461143", CompanyName: "VERITLEX SERVICES LIMITED", AppointedOn: "2015-02-26", ResignedOn: "2016-04-28"},
+		// Still active -- no resignation date, must not contribute.
+		{CompanyNumber: "00000099", CompanyName: "STILL ACTIVE LTD", AppointedOn: "2014-01-01"},
+	}
+	desc := resignationBurst(appointments)
+	if desc == "" {
+		t.Fatal("got no flag, want a resignation burst flagged for the April 2016 cluster")
+	}
+	if !strings.Contains(desc, "resigned from") {
+		t.Errorf("desc = %q, want it to describe a resignation, not an appointment", desc)
+	}
+	if !strings.Contains(desc, "8 companies") {
+		t.Errorf("desc = %q, want it to report all 8 companies within the 7-day window", desc)
+	}
+}
+
+func TestResignationBurstIgnoresStillActiveAppointments(t *testing.T) {
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "00000001", CompanyName: "A LTD", AppointedOn: "2020-01-01"},
+		{CompanyNumber: "00000002", CompanyName: "B LTD", AppointedOn: "2020-01-01"},
+		{CompanyNumber: "00000003", CompanyName: "C LTD", AppointedOn: "2020-01-01"},
+	}
+	// None of these have a ResignedOn at all -- a burst of new
+	// appointments must not be mistaken for a resignation burst.
+	if desc := resignationBurst(appointments); desc != "" {
+		t.Errorf("got %q, want no flag: nothing here has actually resigned", desc)
+	}
+}
+
+func TestResignationBurstIgnoresOrdinaryResignationsSpreadOverYears(t *testing.T) {
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "00000001", CompanyName: "FIRST LTD", AppointedOn: "2005-01-01", ResignedOn: "2010-01-01"},
+		{CompanyNumber: "00000002", CompanyName: "SECOND LTD", AppointedOn: "2010-01-01", ResignedOn: "2014-06-15"},
+		{CompanyNumber: "00000003", CompanyName: "THIRD LTD", AppointedOn: "2014-06-15", ResignedOn: "2019-11-30"},
+	}
+	if desc := resignationBurst(appointments); desc != "" {
+		t.Errorf("got %q, want no flag for resignations spread over years", desc)
+	}
+}
+
 func TestFollowPSCChainStopsWhenNoCorporatePSCFound(t *testing.T) {
 	// The next hop's own PSC is an individual, not another corporate
 	// entity -- the chain must stop there rather than erroring, since

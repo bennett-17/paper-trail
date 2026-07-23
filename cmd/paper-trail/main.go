@@ -251,7 +251,32 @@ several landing on the very same day -- this is exactly how a bulk
 shelf-company-formation or nominee-director/-secretary service
 operates, which is often entirely lawful, but is also how a nominee is
 used to obscure who's actually behind a company, so it's a lead to
-investigate rather than proof on its own. Each UK charity's own registered postcode is also
+investigate rather than proof on its own. The same history is checked
+the other way too (officer_resignation_burst): three or more distinct
+companies' appointments for the same officer all ending within a
+single week -- the bulk-handover signature of a shelf-company-
+formation service completing or unwinding a batch. Confirmed live
+against that same nominee-director service: its resignations cluster
+even more tightly than its appointments do, with four separate
+companies resigning the same officer on the exact same day. Same
+caveat as officer_appointment_burst -- common in lawful bulk formation
+services too, so a lead to investigate rather than proof on its own.
+Every Companies-House-sourced
+entity in a scan, including ones found only via the officer fan-out
+above, is also cross-referenced by registration number
+(sequential_registration_numbers): fires when two or more fall within
+a tight numeric span of each other, within the same jurisdiction/type
+prefix (a plain England/Wales number and a Scottish "SC" one are
+different sequences entirely, never compared to each other). Needs to
+be much tighter than same-day: confirmed live that even 85 companies
+incorporated the same day at the same known mail-drop address (see
+mail_drop_address below) spanned numeric gaps in the thousands, since
+Companies House processes thousands of incorporations nationwide per
+working day -- so this is a stronger, more specific signal than
+formation_cluster's same-day/week grouping alone, closer to "filed
+back-to-back in one session" than just "the same busy week", though a
+busy formation agent's ordinary queue can still produce this by
+chance. Each UK charity's own registered postcode is also
 checked against Companies House's advanced search for how many
 companies register-wide share it -- a mail_drop_address indicator
 fires when that count is unusually high, consistent with a company-
@@ -416,7 +441,20 @@ parent is itself US-registered -- the cross-border jump only shows up
 one level higher). Same framing as multi_jurisdiction_ownership: a
 normal structure for many multinational groups and also a known
 technique for obscuring ultimate control, so a lead to investigate,
-not proof on its own. Officer/trustee names sourced from Companies House and
+not proof on its own. That same ultimate-parent lookup also feeds a
+gleif_common_ultimate_parent indicator -- unlike every other Shared*
+check in this tool, two entities can share an ultimate parent while
+having completely different names, addresses, phone numbers, and
+countries, so this is the one signal here that can link entities with
+no other visible overlap at all. Confirmed live: querying "Goldman
+Sachs International" and "Goldman Sachs Group Europe SE" together
+correctly links them via their shared parent, The Goldman Sachs Group,
+Inc. -- and in that real case the two also turned out to share a
+registered address, so the existing corroborated-pairs rollup picked
+up both signals on the same pair automatically, no extra code needed.
+Same framing as the cross-border check: common ownership within a
+large, legitimate corporate group is itself routine, so a lead to
+investigate, not proof of anything improper. Officer/trustee names sourced from Companies House and
 the UK Charity Commission are also checked against Companies House's
 disqualified-directors register (a disqualified_director indicator) --
 unlike every other indicator here this is an already-adjudicated
@@ -500,7 +538,18 @@ separately calls out any two entities connected by two or more
 shared officer) -- that combination is materially stronger evidence
 than either alone, but scanning a flat list of indicators makes it easy
 to miss. This adds no weight of its own to the total; it's a
-reorganization of evidence already counted, not new evidence. Every
+reorganization of evidence already counted, not new evidence. The
+single-entity version of that same idea gets its own real indicator
+instead: convergent_risk fires when one entity alone is independently
+named by three or more distinct indicator codes at once -- three weak
+signals converging on the same place is a materially stronger lead
+than the same three scattered across three unrelated entities. Unlike
+Corroborated pairs, this one does carry its own weight (one point per
+distinct converging code, capped at 6, this tool's ceiling), since the
+convergence itself is treated as an independent finding rather than a
+silent side effect of the total; --exclude recomputes it the same way
+it recomputes Corroborations, so removing one of the codes it depended
+on can't leave a stale convergent_risk hit behind. Every
 report also carries a plain LOW/MEDIUM/HIGH confidence read next to
 the numeric score, so the headline number comes with an at-a-glance
 signal before digging into individual indicators -- deliberately not a
@@ -515,7 +564,6 @@ one-line reason naming the specific factor behind it (e.g.
 "disqualified_director indicator at weight 6" or "2 corroborated
 pairs" or "total score 7"), so it's never a black box you have to
 reverse-engineer by hand. --limit
-caps how many candidates are pulled per source per
 caps how many candidates are pulled per source per
 query term (default 5) to bound the number of live API calls. --output
 writes the report (in whichever format --json selects) to a file

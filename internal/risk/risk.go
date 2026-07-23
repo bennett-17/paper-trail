@@ -72,6 +72,16 @@ type Entity struct {
 	// inference from circumstantial evidence -- it's a fact the source
 	// already states.
 	LinkedGroup string `json:"linkedGroup,omitempty"`
+
+	// UltimateParentID is a human-readable "name (LEI)" identifier for
+	// this entity's ultimate parent -- currently only populated for
+	// GLEIF entities. Used only by SharedUltimateParent, which is
+	// unlike every other Shared* check here: two entities can share an
+	// ultimate parent while having completely different names,
+	// addresses, phone numbers, and even countries, so this is the one
+	// signal in this package that can connect entities with no other
+	// visible overlap at all.
+	UltimateParentID string `json:"ultimateParentId,omitempty"`
 }
 
 // NewEntity builds an Entity from its core fields (addresses/people may
@@ -435,6 +445,36 @@ func SharedBeneficialOwners(entities []Entity) []Indicator {
 	)
 }
 
+// SharedUltimateParent flags groups of two or more distinct entities
+// that share the same GLEIF-reported ultimate parent. Unlike every
+// other Shared* check in this package, which all depend on some
+// visible overlap -- an address, a name, a phone number -- this can
+// connect two entities with completely different names, addresses,
+// and even countries, whose only common thread is who ultimately owns
+// them both. Confirmed live that GLEIF's own ultimate-parent data
+// supports exactly this: a large conglomerate's ultimate parent (e.g.
+// The Goldman Sachs Group, Inc.) has hundreds of reported subsidiaries
+// worldwide, none of which would otherwise be linked by an address or
+// officer overlap. Weighted the same as SharedBeneficialOwners/
+// SharedChargees: real evidence of a relationship, but common
+// ownership within a large, legitimate corporate group is itself
+// routine, so this is a lead to investigate, not proof of anything
+// improper.
+func SharedUltimateParent(entities []Entity) []Indicator {
+	return sharedValueIndicators(entities,
+		func(e Entity) []string {
+			if e.UltimateParentID == "" {
+				return nil
+			}
+			return []string{e.UltimateParentID}
+		},
+		normalizeText,
+		"gleif_common_ultimate_parent",
+		"Multiple entities share the same GLEIF-reported ultimate parent -- unlike a shared address or officer, this can link entities with no other visible overlap at all, since it's common ownership rather than a common contact detail. Normal for a large, legitimate corporate group, so a lead to investigate, not proof of anything improper",
+		2,
+	)
+}
+
 // Assess runs every structural heuristic over entities and combines the
 // result with extra indicators the caller already built from other
 // sources (e.g. sanctions-list hits, which aren't a comparison between
@@ -452,8 +492,11 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SharedLinkedGroup(entities)...)
 	indicators = append(indicators, SharedChargees(entities)...)
 	indicators = append(indicators, SharedBeneficialOwners(entities)...)
+	indicators = append(indicators, SharedUltimateParent(entities)...)
+	indicators = append(indicators, SequentialRegistrationNumbers(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
+	indicators = append(indicators, ConvergentRisk(indicators)...)
 
 	// Sorted most-significant-first (stable, so indicators of equal
 	// weight keep the order they were computed in above) -- otherwise

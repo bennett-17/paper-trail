@@ -203,6 +203,45 @@ func TestSharedChargeesFlagsSameLender(t *testing.T) {
 	}
 }
 
+// TestSharedUltimateParentFlagsSiblingCompanies is modeled on the real,
+// live-confirmed case: two subsidiaries of the same conglomerate
+// (here modeled on Goldman Sachs International and a fictional sibling
+// both under "The Goldman Sachs Group, Inc.") sharing zero address,
+// officer, or phone overlap -- the whole point of this check is that
+// it links them anyway.
+func TestSharedUltimateParentFlagsSiblingCompanies(t *testing.T) {
+	entities := []Entity{
+		{Source: "gleif", ID: "W22LROWP2IHZNBB6K528", Name: "GOLDMAN SACHS INTERNATIONAL", UltimateParentID: "THE GOLDMAN SACHS GROUP, INC. (784F5XWPLTWKTBV3E584)"},
+		{Source: "gleif", ID: "391200F0GE1IGTRHL040", Name: "GOLDMAN SACHS GROUP EUROPE SE", UltimateParentID: "THE GOLDMAN SACHS GROUP, INC. (784F5XWPLTWKTBV3E584)"},
+		{Source: "gleif", ID: "549300CVFMQ34SOQAT28", Name: "Unrelated Fund", UltimateParentID: "SOME OTHER PARENT LTD (549300XXXX)"},
+	}
+
+	indicators := SharedUltimateParent(entities)
+	if len(indicators) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(indicators), indicators)
+	}
+	ind := indicators[0]
+	if ind.Code != "gleif_common_ultimate_parent" {
+		t.Errorf("Code = %q, want gleif_common_ultimate_parent", ind.Code)
+	}
+	if ind.Weight != 2 {
+		t.Errorf("Weight = %d, want 2", ind.Weight)
+	}
+	if len(ind.Entities) != 2 {
+		t.Errorf("Entities = %v, want 2 entries", ind.Entities)
+	}
+}
+
+func TestSharedUltimateParentIgnoresEmptyValue(t *testing.T) {
+	entities := []Entity{
+		{Source: "gleif", ID: "1", Name: "No Parent Reported A"},
+		{Source: "gleif", ID: "2", Name: "No Parent Reported B"},
+	}
+	if indicators := SharedUltimateParent(entities); len(indicators) != 0 {
+		t.Errorf("got %d indicators, want 0 (empty UltimateParentID must not group entities together)", len(indicators))
+	}
+}
+
 func TestSharedBeneficialOwnersFlagsSameFiler(t *testing.T) {
 	entities := []Entity{
 		{Source: "edgar", ID: "1", Name: "Example Corp", BeneficialOwners: []string{"Example Activist Fund LP"}},
@@ -269,15 +308,17 @@ func TestAssessSumsWeightsAcrossAllIndicators(t *testing.T) {
 	}
 
 	score := Assess(entities, extra)
-	// 1 shared_address (2) + 1 shared_person (3) + 1 sanctions_match (5) = 10
-	if score.Total != 10 {
-		t.Errorf("Total = %d, want 10", score.Total)
+	// 1 shared_address (2) + 1 shared_person (3) + 1 sanctions_match (5) = 10,
+	// plus a convergent_risk indicator on Example Corp (named by all three
+	// of those distinct codes) at weight 3 = 13.
+	if score.Total != 13 {
+		t.Errorf("Total = %d, want 13", score.Total)
 	}
 	if score.Confidence != "HIGH" {
 		t.Errorf("Confidence = %q, want HIGH (a weight-5 sanctions_match is present)", score.Confidence)
 	}
-	if len(score.Indicators) != 3 {
-		t.Fatalf("got %d indicators, want 3: %+v", len(score.Indicators), score.Indicators)
+	if len(score.Indicators) != 4 {
+		t.Fatalf("got %d indicators, want 4: %+v", len(score.Indicators), score.Indicators)
 	}
 }
 

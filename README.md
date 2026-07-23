@@ -166,7 +166,34 @@ And on top of all of the above, structural risk heuristics:
   bulk shelf-company-formation or nominee-director/-secretary service
   operates, which is often entirely lawful, but is also how a nominee
   is used to obscure who's actually behind a company, so it's a lead
-  to investigate rather than proof on its own. Each UK charity's own registered postcode is
+  to investigate rather than proof on its own. The mirror image gets
+  checked too -- an officer_resignation_burst indicator fires when
+  several other companies' appointments for the same officer all
+  *ended* within a single week, the bulk-handover signature of a
+  shelf-company-formation service completing or unwinding a batch.
+  Confirmed live against the same real corporate nominee-director
+  service: its resignations cluster even more tightly than its
+  appointments do (four separate companies had it resign on the very
+  same day, part of an 8-company wave inside a single week). Same
+  framing as officer_appointment_burst -- common in lawful bulk
+  formation services, but also how a nominee is unwound, so a lead to
+  investigate either way. Every Companies-House-
+  sourced entity in a scan (including ones found only via the officer
+  fan-out above) is also cross-referenced by registration number: a
+  sequential_registration_numbers indicator fires when two or more
+  fall within a tight numeric span of each other, within the same
+  jurisdiction/type prefix (a plain England/Wales number vs. a
+  Scottish "SC" one are different sequences entirely, so those are
+  never compared to each other). This needs to be much tighter than
+  same-day: confirmed live that even 85 companies incorporated the
+  same day at the same known mail-drop address (see mail_drop_address
+  below) spanned numeric gaps in the thousands, since Companies House
+  processes thousands of incorporations nationwide per working day --
+  so a gap this tight is a stronger, more specific signal than
+  formation_cluster's same-day/week grouping alone, closer to "filed
+  back-to-back in one session" than just "the same busy week", though
+  a busy formation agent's ordinary queue can still produce this by
+  chance. Each UK charity's own registered postcode is
   also checked against Companies House's advanced search for how many
   companies register-wide share it -- a mail_drop_address indicator
   fires when that count is unusually high, consistent with a
@@ -322,7 +349,20 @@ And on top of all of the above, structural risk heuristics:
   higher). Same framing as multi_jurisdiction_ownership: a normal
   structure for many multinational corporate groups, and also a known
   technique for obscuring ultimate control, so a lead to investigate,
-  not proof on its own.
+  not proof on its own. That same ultimate-parent lookup also feeds a
+  gleif_common_ultimate_parent indicator, unlike every other Shared*
+  check in this tool: two entities can share an ultimate parent while
+  having completely different names, addresses, phone numbers, and
+  countries, so this is the one signal here that can link entities
+  with no other visible overlap at all. Confirmed live: querying
+  "Goldman Sachs International" and "Goldman Sachs Group Europe SE"
+  together correctly links them via their shared parent, The Goldman
+  Sachs Group, Inc. -- and in that real case the two also turned out to
+  share a registered address, so the existing corroborated-pairs rollup
+  picked up both signals on the same pair automatically, no extra code
+  needed. Same framing as the cross-border check: common ownership
+  within a large, legitimate corporate group is itself routine, so a
+  lead to investigate, not proof of anything improper.
   Officer/trustee names sourced from Companies House and the UK
   Charity Commission are also checked against Companies House's
   disqualified-directors register -- unlike every other indicator here
@@ -401,7 +441,21 @@ And on top of all of the above, structural risk heuristics:
   officer is a materially stronger combination) -- it adds no weight of
   its own, since every point is already counted by the indicators that
   produced it; it's a reorganization of that evidence, surfacing a
-  pattern a flat indicator list makes easy to miss. Every report also
+  pattern a flat indicator list makes easy to miss. The single-entity
+  version of that same idea gets its own real indicator instead: a
+  convergent_risk indicator fires when one entity alone is independently
+  named by three or more *distinct* indicator codes at once -- three
+  weak signals converging on the same place is a materially stronger
+  lead than the same three signals scattered across three unrelated
+  entities. Unlike Corroborated pairs, this one does carry its own
+  weight (one point per distinct converging code, capped at 6, this
+  tool's own ceiling) since the convergence itself, not just the sum of
+  the parts it's built from, is treated as an independent finding worth
+  calling out rather than a silent side effect buried in the total.
+  Still just a lead: a large, well-documented entity can legitimately
+  rack up several unrelated weak hits (say, a shared registered-agent
+  address plus a common institutional director) with nothing improper
+  going on. Every report also
   carries a plain LOW/MEDIUM/HIGH confidence read next to the numeric
   score -- deliberately not a pure function of the total, since summing
   many weak signals shouldn't outrank one strong one: a single

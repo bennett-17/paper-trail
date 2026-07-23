@@ -220,9 +220,12 @@ func parseIndicatorCodes(flagValue string) []string {
 // score and how many were removed. Unlike filterIndicators/
 // truncateIndicators (--min-weight/--indicator/--top), which only
 // limit what's *shown*, this means "I've already reviewed this and
-// it's not a real finding" -- so Total, Confidence, and Corroborations
-// are all recomputed from what's left, not left reflecting indicators
-// that no longer count. An empty terms is a no-op (the default).
+// it's not a real finding" -- so Total, Confidence, Corroborations, and
+// any convergent_risk indicator are all recomputed from what's left,
+// not left reflecting indicators that no longer count (a
+// convergent_risk hit computed before the removal could otherwise keep
+// claiming a convergence that one of the excluded codes was part of).
+// An empty terms is a no-op (the default).
 func excludeIndicators(score risk.Score, terms []string) (risk.Score, int) {
 	if len(terms) == 0 {
 		return score, 0
@@ -250,6 +253,7 @@ func excludeIndicators(score risk.Score, terms []string) (risk.Score, int) {
 	if excluded == 0 {
 		return score, 0
 	}
+	kept = risk.RecomputeConvergentRisk(kept)
 	total := 0
 	for _, ind := range kept {
 		total += ind.Weight

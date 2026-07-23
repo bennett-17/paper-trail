@@ -354,33 +354,43 @@ func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, ca
 			// GLEIF exposes no officer/director data at all -- People
 			// is always nil for this source, so it can't contribute to
 			// the shared-person check, only shared-address/formation-
-			// clustering (via FormedOn below) and the cross-border-
-			// parent check.
+			// clustering (via FormedOn below), the cross-border-parent
+			// check, and the sibling-company check (via
+			// UltimateParentID below).
 			e := risk.NewEntity("gleif", rec.LEI, rec.Name, addrs, nil)
 			e.FormedOn = rec.CreationDate
-			termEntities = append(termEntities, e)
 
-			if rec.Jurisdiction == "" {
-				continue
+			if rec.Jurisdiction != "" {
+				parent, err := gleifClient.UltimateParent(rec.LEI)
+				if err != nil {
+					note("%s ultimate parent: %v", rec.Name, err)
+				} else if parent != nil {
+					// Captured on every entity with a reported parent,
+					// regardless of country -- risk.SharedUltimateParent
+					// (a separate cross-reference over the whole final
+					// entity pool, not this per-entity gather step) is
+					// what actually flags two DIFFERENT entities found
+					// here sharing the same one -- e.g. two subsidiaries
+					// of the same conglomerate that share no address,
+					// officer, or phone number at all, and so would
+					// otherwise never be linked by anything else in this
+					// tool.
+					e.UltimateParentID = fmt.Sprintf("%s (%s)", parent.Name, parent.LEI)
+
+					if parent.Jurisdiction != "" && gleif.Country(parent.Jurisdiction) != gleif.Country(rec.Jurisdiction) {
+						r.extra = append(r.extra, risk.Indicator{
+							Code:        "gleif_cross_border_parent",
+							Description: "This entity's GLEIF-reported ultimate parent is registered in a different country -- a normal structure for many multinational corporate groups, but also a known technique for layering ownership across borders to obscure who ultimately controls an entity",
+							Weight:      2,
+							Entities:    []string{e.Label()},
+							Evidence:    fmt.Sprintf("%s (%s) -- ultimate parent %s (%s)", rec.Name, rec.Jurisdiction, parent.Name, parent.Jurisdiction),
+						})
+					}
+				}
+				// parent == nil means no parent reported -- confirmed
+				// live to be a normal, common outcome, not an error.
 			}
-			parent, err := gleifClient.UltimateParent(rec.LEI)
-			if err != nil {
-				note("%s ultimate parent: %v", rec.Name, err)
-				continue
-			}
-			if parent == nil || parent.Jurisdiction == "" {
-				continue // no parent reported -- confirmed live to be a normal, common outcome, not an error
-			}
-			if gleif.Country(parent.Jurisdiction) == gleif.Country(rec.Jurisdiction) {
-				continue // same country -- an ordinary domestic group structure
-			}
-			r.extra = append(r.extra, risk.Indicator{
-				Code:        "gleif_cross_border_parent",
-				Description: "This entity's GLEIF-reported ultimate parent is registered in a different country -- a normal structure for many multinational corporate groups, but also a known technique for layering ownership across borders to obscure who ultimately controls an entity",
-				Weight:      2,
-				Entities:    []string{e.Label()},
-				Evidence:    fmt.Sprintf("%s (%s) -- ultimate parent %s (%s)", rec.Name, rec.Jurisdiction, parent.Name, parent.Jurisdiction),
-			})
+			termEntities = append(termEntities, e)
 		}
 		r.entities = termEntities
 		cache.Set(cacheKey, termEntities)
@@ -781,12 +791,22 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 					chNote("%s appointments for %s: %v", o.Name, detail.Name, err)
 					continue
 				}
-				// Appointment-burst check reuses this same fetch --
-				// no extra API call needed.
+				// Appointment-burst and resignation-burst checks both
+				// reuse this same fetch -- no extra API call needed for
+				// either.
 				if desc := appointmentBurst(appointments); desc != "" {
 					r.extra = append(r.extra, risk.Indicator{
 						Code:        "officer_appointment_burst",
 						Description: "An officer of this entity was appointed to several other companies within a short span -- a known nominee-director/shelf-company-formation pattern (confirmed live against a real UK corporate nominee-director service with hundreds of register-wide appointments, several landing on the very same day), though bulk company-formation services also use this same pattern lawfully, so it's a lead to investigate rather than proof on its own",
+						Weight:      2,
+						Entities:    []string{e.Label()},
+						Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
+					})
+				}
+				if desc := resignationBurst(appointments); desc != "" {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "officer_resignation_burst",
+						Description: "An officer of this entity had their appointment at several other companies all end within a short span -- the bulk-handover signature of a shelf-company-formation service completing (or unwinding) a batch of companies at once (confirmed live against the same real UK corporate nominee-director service officer_appointment_burst cites, whose resignations cluster even more tightly than its appointments do), though this is also how a lawful bulk company-formation service normally operates, so it's a lead to investigate rather than proof on its own",
 						Weight:      2,
 						Entities:    []string{e.Label()},
 						Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
@@ -1038,33 +1058,23 @@ func frequentRenaming(previousNames []companieshouse.PreviousName) string {
 const appointmentBurstWindow = 7 * 24 * time.Hour
 const appointmentBurstThreshold = 3
 
-// appointmentBurst scans one officer's full register-wide appointment
-// history (as returned by GetOfficerAppointments) for the largest
-// number of distinct companies (deduped by company number, in case an
-// officer resigns and is later reappointed to the same one) that
-// appointed them within any single appointmentBurstWindow-wide span,
+// datedCompany is one (date, company) pair used by burstDescription --
+// shared by appointmentBurst (AppointedOn dates) and resignationBurst
+// (ResignedOn dates), since the clustering logic itself is identical,
+// just applied to a different date field.
+type datedCompany struct {
+	when   time.Time
+	number string
+	name   string
+}
+
+// burstDescription finds the largest number of distinct companies
+// (deduped by company number, in case the same company appears twice)
+// within any single appointmentBurstWindow-wide span of dates,
 // returning a human-readable description once that count reaches
-// appointmentBurstThreshold, or "" otherwise. A bulk shelf-company-
-// formation or nominee-director/-secretary service signing onto
-// several newly formed companies in the same week is common and often
-// entirely lawful (confirmed live: this is exactly how "Corporate
-// Directors Limited" above operates), but it's also how a nominee is
-// used to obscure who's actually behind a company, so it's worth
-// surfacing as a lead either way.
-func appointmentBurst(appointments []companieshouse.Appointment) string {
-	type dated struct {
-		when   time.Time
-		number string
-		name   string
-	}
-	var dates []dated
-	for _, a := range appointments {
-		t, err := time.Parse("2006-01-02", a.AppointedOn)
-		if err != nil {
-			continue
-		}
-		dates = append(dates, dated{when: t, number: a.CompanyNumber, name: a.CompanyName})
-	}
+// appointmentBurstThreshold, or "" otherwise. verb is the leading word
+// of the description ("appointed to" or "resigned from").
+func burstDescription(dates []datedCompany, verb string) string {
 	sort.Slice(dates, func(i, j int) bool { return dates[i].when.Before(dates[j].when) })
 
 	var bestNames []string
@@ -1085,5 +1095,56 @@ func appointmentBurst(appointments []companieshouse.Appointment) string {
 	if len(bestNames) < appointmentBurstThreshold {
 		return ""
 	}
-	return fmt.Sprintf("appointed to %d companies within %d days: %s", len(bestNames), int(appointmentBurstWindow/(24*time.Hour)), strings.Join(bestNames, ", "))
+	return fmt.Sprintf("%s %d companies within %d days: %s", verb, len(bestNames), int(appointmentBurstWindow/(24*time.Hour)), strings.Join(bestNames, ", "))
+}
+
+// appointmentBurst scans one officer's full register-wide appointment
+// history (as returned by GetOfficerAppointments) for an appointment
+// burst -- see burstDescription. A bulk shelf-company-formation or
+// nominee-director/-secretary service signing onto several newly
+// formed companies in the same week is common and often entirely
+// lawful (confirmed live: this is exactly how "Corporate Directors
+// Limited" above operates), but it's also how a nominee is used to
+// obscure who's actually behind a company, so it's worth surfacing as
+// a lead either way.
+func appointmentBurst(appointments []companieshouse.Appointment) string {
+	var dates []datedCompany
+	for _, a := range appointments {
+		t, err := time.Parse("2006-01-02", a.AppointedOn)
+		if err != nil {
+			continue
+		}
+		dates = append(dates, datedCompany{when: t, number: a.CompanyNumber, name: a.CompanyName})
+	}
+	return burstDescription(dates, "appointed to")
+}
+
+// resignationBurst is the mirror of appointmentBurst: scans the same
+// register-wide appointment history (reusing whatever's already been
+// fetched, no extra API call) for a RESIGNATION burst instead -- many
+// different companies' officer positions all ending within the same
+// short window, the bulk-handover signature of a shelf-company-
+// formation service completing (or unwinding) a batch. Confirmed live
+// against the same real "Corporate Directors Limited" history
+// appointmentBurst cites: four separate companies (Burndell Limited,
+// Coldbrook Services Limited, Courtwick Services Ltd, Ventmor Ltd) all
+// had this same corporate director resign on 2016-04-27 alone, part of
+// a wave of 8 distinct companies' resignations within a single week
+// that April -- a larger, cleaner cluster than the appointment side of
+// the same officer's history shows. Only appointments that actually
+// record a resignation date are considered; a still-active appointment
+// has none.
+func resignationBurst(appointments []companieshouse.Appointment) string {
+	var dates []datedCompany
+	for _, a := range appointments {
+		if a.ResignedOn == "" {
+			continue
+		}
+		t, err := time.Parse("2006-01-02", a.ResignedOn)
+		if err != nil {
+			continue
+		}
+		dates = append(dates, datedCompany{when: t, number: a.CompanyNumber, name: a.CompanyName})
+	}
+	return burstDescription(dates, "resigned from")
 }

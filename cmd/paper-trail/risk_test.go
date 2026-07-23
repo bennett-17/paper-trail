@@ -261,6 +261,33 @@ func TestExcludeIndicatorsRecomputesConfidenceAndCorroborations(t *testing.T) {
 	}
 }
 
+func TestExcludeIndicatorsRecomputesConvergentRisk(t *testing.T) {
+	a := risk.Indicator{Code: "shared_address", Weight: 1, Evidence: "123 Main St", Entities: []string{"x"}}
+	b := risk.Indicator{Code: "shared_person", Weight: 1, Evidence: "cleared officer", Entities: []string{"x"}}
+	c := risk.Indicator{Code: "formation_cluster", Weight: 1, Evidence: "same-day formation", Entities: []string{"x"}}
+	score := risk.Assess(nil, []risk.Indicator{a, b, c})
+
+	hasConvergent := func(inds []risk.Indicator) bool {
+		for _, ind := range inds {
+			if ind.Code == "convergent_risk" {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasConvergent(score.Indicators) {
+		t.Fatalf("precondition failed: expected a convergent_risk indicator before excluding, got %+v", score.Indicators)
+	}
+
+	got, excluded := excludeIndicators(score, []string{"cleared officer"})
+	if excluded != 1 {
+		t.Fatalf("excluded = %d, want 1", excluded)
+	}
+	if hasConvergent(got.Indicators) {
+		t.Errorf("convergent_risk indicator survived excluding one of its 3 contributing codes, now stale: %+v", got.Indicators)
+	}
+}
+
 func TestParseExcludeTermsCombinesFlagAndFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "exclude.txt")
 	content := "Cleared Corp\n\n# a comment\nAnother Cleared Entity\n"
