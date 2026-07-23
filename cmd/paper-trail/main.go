@@ -85,7 +85,7 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
 
@@ -226,16 +226,21 @@ beneficial owners) are pulled in alongside its Charity Commission
 trustees -- often the same people under a different governance role,
 sometimes not, and either way a company's directors and beneficial
 owners are otherwise invisible to this tool since ukcharity itself
-only exposes trustees. Each current officer is also fanned out one hop
-further via Companies House's per-person appointment record: every
-OTHER company that same officer directs or is secretary of,
-register-wide, is pulled in too -- not just companies the query terms
-themselves happen to find. This is how a shared director between two
-otherwise-unconnected organizations shows up even when neither one's
-own name search would ever surface the other (confirmed live: an
-officer of a well-known charity's trading company turned out to also
-be an officer of several unrelated companies invisible to every other
-heuristic here). That same per-person appointment history is also
+only exposes trustees. Each current officer is also fanned out via
+Companies House's per-person appointment record: every OTHER company
+that same officer directs or is secretary of, register-wide, is
+pulled in too -- not just companies the query terms themselves happen
+to find. This is how a shared director between two otherwise-
+unconnected organizations shows up even when neither one's own name
+search would ever surface the other (confirmed live: an officer of a
+well-known charity's trading company turned out to also be an officer
+of several unrelated companies invisible to every other heuristic
+here). This goes two hops deep, not one: each company found this way
+also has its own current officers pulled in and fanned out again in
+turn, bounded to the first 5 such companies (officerHop2MaxCompanies)
+so the extra API calls stay fixed rather than scaling with a large
+charity's network -- deep enough to surface a director-of-a-director
+connection a single hop would miss. That same per-person appointment history is also
 scanned for an appointment burst (officer_appointment_burst): three or
 more distinct companies appointing the same officer within a single
 week, reusing this fetch rather than needing a separate one.
@@ -495,6 +500,18 @@ zoom. Each node is also sized by the highest-weight indicator it's
 involved in, with a red outline for one at or above weight 5 (this
 project's own "HIGH confidence" threshold), so the highest-priority
 leads are visually obvious without reading every edge label first.
+--report-html is different from --graph/--html: instead of the
+entity/indicator graph, it writes a single self-contained HTML file
+mirroring the full text/--json report itself -- entities, notes, the
+score and confidence band, every indicator with its evidence,
+corroborated pairs, and the --diff section if one applies -- for
+opening in a browser or handing to someone who doesn't have
+paper-trail installed, rather than reading a wall of terminal text or
+a raw JSON file. Same no-server/no-CDN/fully-offline approach as
+--html, built with Go's html/template so live entity/evidence text
+from external APIs is safely escaped rather than risking broken markup
+or a script-tag injection from a company name or evidence string this
+program doesn't control.
 --graph-csv writes the same nodes/edges as a single denormalized
 edge-list CSV (each endpoint's label/type included directly on the
 row), readable in a spreadsheet or importable into a dedicated
@@ -554,6 +571,25 @@ shouldn't exit the process on a hit, it should keep watching -- so
 pair --watch with --webhook instead (see below) to get alerted only
 when something actually changes, not on some external process's exit
 code.
+--batch scores every <query>/--input-file entry independently instead
+of cross-referencing them together the way a normal scan deliberately
+does -- one scorecard row per entity (query, entities found, score,
+confidence, confidence reason, indicator count, and the single
+highest-weight indicator's code) written as CSV (or a JSON array with
+--json) to --output/stdout. This is the missing capability for
+screening a list of vendors/donors/grantees where what's wanted is N
+separate verdicts, not one combined report where a shared address
+between two unrelated entities on the list would otherwise show up as
+a false "connection" purely because they happened to be checked in
+the same run. Entries are scored sequentially, not concurrently --
+each one already fans out into a dozen-plus concurrent API calls of
+its own, and this is meant for an occasional screening run, not
+hammering every configured source with N scans' worth of requests all
+at once. Mutually exclusive with --diff/--watch/--fail-on/--webhook
+(all assume a single overall score for the whole run); --top/
+--min-weight/--indicator/--min-corroboration/--summary/--graph/--html/
+--graph-csv/--graph-graphml/--entities-csv are simply ignored in this
+mode, since none of them apply to a one-row-per-entity scorecard.
 --top <n> shows only the <n> highest-weight indicators (already sorted
 highest-first) instead of the full list, noting how many were hidden --
 useful when a large scan turns up dozens of low-weight indicators and

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +44,14 @@ const fewTrusteesThreshold = 2
 // calls bounded and to guard against an ownership cycle (not observed
 // live, but cheap to guard against regardless).
 const pscChainMaxDepth = 3
+
+// officerHop2MaxCompanies bounds how many hop-1 fanned-out companies
+// get their own officers fanned out one hop further (a "director of a
+// director"), regardless of how many officers or companies a large
+// charity's network happens to include -- same reasoning as
+// pscChainMaxDepth: a fixed cap keeps the extra API calls bounded
+// rather than scaling with the data.
+const officerHop2MaxCompanies = 5
 
 // highOfficerCompensationRatio and highOfficerCompensationMinExpenses
 // together gate the high_officer_compensation indicator: total
@@ -328,6 +338,17 @@ func validateWatchFlags(watch time.Duration, failOn, webhookURL string) error {
 		return fmt.Errorf("--webhook requires --fail-on or --watch to be set too -- otherwise there's no threshold or new-finding trigger to alert on")
 	}
 	return nil
+}
+
+// diffSourceLabel describes what a diff was computed against, for
+// display in the text report and --report-html: the --diff path
+// itself, or a fixed label when it came from --watch's own
+// auto-chaining instead (diffPath is empty in that case).
+func diffSourceLabel(diffPath string) string {
+	if diffPath == "" {
+		return "previous --watch run"
+	}
+	return diffPath
 }
 
 // diffRiskReports compares a freshly computed report against a
@@ -653,6 +674,265 @@ func applyConfigFileDefaults(fs *flag.FlagSet, explicitlySet map[string]bool, pa
 	return warnings
 }
 
+// gatherAndScore runs the full Phase 1 (entity-gathering) + Phase 2
+// (cross-referencing screens) pipeline for a set of query terms and
+// returns the resulting entities, diagnostic notes, and computed
+// risk.Score -- the shared core of both a normal risk scan and each
+// individual entity's scan in --batch mode (see runRiskBatch).
+// Cross-referencing (shared address/phone/officer/etc.) only sees
+// entities gathered together in one call, which is exactly the
+// difference between a normal multi-term scan (one call across every
+// term, so a connection between two different terms' results
+// surfaces) and --batch (one call per entity, so each gets its own
+// independent, un-cross-referenced score). Every source is
+// best-effort: a missing credential or a failed/empty lookup is
+// recorded as a note and skipped, never fatal.
+func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string, score risk.Score) {
+	var extra []risk.Indicator
+	note := func(source, format string, a ...any) {
+		notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
+	}
+
+	// SEC EDGAR -- one client shared across every query term (and
+	// reused below for the full-text mentions step), so a missing
+	// credential is reported once, not once per term.
+	var edgarClient *edgar.Client
+	if c, err := edgar.NewClient(""); err != nil {
+		note("SEC EDGAR", "skipped (%v)", err)
+	} else {
+		edgarClient = c
+	}
+
+	// UK Companies House -- one client shared across every charity
+	// below, so a missing credential is reported once, not once per
+	// charity. Adds real director data for UK charities that are also
+	// registered companies, alongside their Charity Commission
+	// trustees: ukcharity alone only exposes trustees, so a company's
+	// directors would otherwise be invisible to the shared_person check.
+	chClient, chErr := companieshouse.NewClient("")
+	if chErr != nil {
+		note("Companies House", "skipped (%v)", chErr)
+		chClient = nil
+	}
+
+	// Phase 1: every source below resolves query terms into entities
+	// independently of the others -- EDGAR, IRS Form 990, ACNC, and UK
+	// Charity Commission (with its nested Companies House lookups) each
+	// hit entirely separate APIs with their own client-level throttling,
+	// so running them concurrently is safe and cuts wall-clock time
+	// substantially on a large multi-term scan (confirmed live: a
+	// 25-term run that previously needed several minutes sequential).
+	// Each gathers into its own local slices, not the shared ones above,
+	// so there's nothing to protect with a mutex -- they're merged in a
+	// fixed order below, after every goroutine finishes, so output stays
+	// deterministic regardless of which source happens to finish first.
+	var edgarEntities, npEntities, acncEntities, ukEntities []risk.Entity
+	var edgarExtra, npExtra, ukExtra []risk.Indicator
+	var edgarNotes, npNotes, acncNotes, ukNotes []string
+	var wg sync.WaitGroup
+
+	if edgarClient != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, limit, cache, cacheTTL, progress)
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, limit, cache, cacheTTL, progress)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		acncEntities, acncNotes = gatherACNCEntities(queries, limit, cache, cacheTTL, progress)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress)
+	}()
+	wg.Wait()
+
+	entities = append(entities, edgarEntities...)
+	entities = append(entities, npEntities...)
+	entities = append(entities, acncEntities...)
+	entities = append(entities, ukEntities...)
+	extra = append(extra, edgarExtra...)
+	extra = append(extra, npExtra...)
+	extra = append(extra, ukExtra...)
+	notes = append(notes, edgarNotes...)
+	notes = append(notes, npNotes...)
+	notes = append(notes, acncNotes...)
+	notes = append(notes, ukNotes...)
+
+	// Phase 2: every check below only reads the now-final entities pool
+	// (built above) -- it doesn't add to it -- so, like phase 1, these
+	// six are independent of each other and safe to run concurrently.
+	// US sanctions, UK sanctions, UN sanctions, ICIJ Offshore Leaks,
+	// and the disqualified-directors check each screen every query
+	// term plus every distinct person name found; EDGAR full-text
+	// mentions screens query terms only (see its own comment below for
+	// why). Merged in the same fixed order as before so output stays
+	// deterministic.
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes []string
+	var wg2 sync.WaitGroup
+
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		usExtra, usNotes = screenUSSanctions(queries, entities, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		unExtra, unNotes = screenUNSanctions(queries, entities, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, limit, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
+	}()
+	wg2.Wait()
+
+	extra = append(extra, usExtra...)
+	extra = append(extra, ukSanctionsExtra...)
+	extra = append(extra, unExtra...)
+	extra = append(extra, dqExtra...)
+	extra = append(extra, ftExtra...)
+	extra = append(extra, icijExtra...)
+	notes = append(notes, usNotes...)
+	notes = append(notes, ukSanctionsNotes...)
+	notes = append(notes, unNotes...)
+	notes = append(notes, dqNotes...)
+	notes = append(notes, ftNotes...)
+	notes = append(notes, icijNotes...)
+
+	// Cross-referencing runs once over the combined pool from every
+	// query term -- this is the whole point of taking multiple terms:
+	// an officer/trustee or address shared between, say, a "Narconon
+	// UK" result and a "Criminon UK" result only surfaces if both are
+	// in the same Assess() call.
+	cache.Save() // no-op if --cache-ttl wasn't set
+
+	score = risk.Assess(entities, extra)
+	return entities, notes, score
+}
+
+// riskBatchRow is one entity's independent scorecard in --batch mode
+// -- a single row, not the full indicator-by-indicator report.
+type riskBatchRow struct {
+	Query            string `json:"query"`
+	EntitiesFound    int    `json:"entitiesFound"`
+	Score            int    `json:"score"`
+	Confidence       string `json:"confidence"`
+	ConfidenceReason string `json:"confidenceReason"`
+	IndicatorCount   int    `json:"indicatorCount"`
+	// TopIndicator is the highest-weight indicator's code (risk.Assess
+	// already sorts Indicators highest-weight-first), empty if none.
+	TopIndicator string `json:"topIndicator,omitempty"`
+}
+
+// runRiskBatch scores every entry in queries independently -- its own
+// gatherAndScore call, so nothing about one entry's officers/addresses
+// can cross-reference with another's the way a normal multi-term scan
+// deliberately allows. Processed sequentially, not concurrently: each
+// entry already fans out into a dozen-plus concurrent API calls of its
+// own (see gatherAndScore's Phase 1/2), and this is meant for
+// screening a list of vendors/donors/grantees occasionally, not
+// hammering every configured source with N scans' worth of requests
+// all at once.
+func runRiskBatch(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, excludeTerms []string, output string, asJSON, quiet bool) {
+	var progress *progressReporter
+	if !quiet {
+		progress = newProgressReporter(os.Stderr)
+	}
+
+	rows := make([]riskBatchRow, 0, len(queries))
+	for i, query := range queries {
+		if progress != nil {
+			progress.report("batch", "entity %d/%d: %q", i+1, len(queries), query)
+		}
+		entities, _, score := gatherAndScore([]string{query}, limit, cache, cacheTTL, progress)
+		score, _ = excludeIndicators(score, excludeTerms)
+		top := ""
+		if len(score.Indicators) > 0 {
+			top = score.Indicators[0].Code
+		}
+		rows = append(rows, riskBatchRow{
+			Query:            query,
+			EntitiesFound:    len(entities),
+			Score:            score.Total,
+			Confidence:       score.Confidence,
+			ConfidenceReason: score.ConfidenceReason,
+			IndicatorCount:   len(score.Indicators),
+			TopIndicator:     top,
+		})
+	}
+	cache.Save() // no-op if --cache-ttl wasn't set
+
+	var w io.Writer = os.Stdout
+	if output != "" {
+		f, err := os.Create(output)
+		exitOnErr(err)
+		defer f.Close()
+		w = f
+	}
+	exitOnErr(writeBatchRows(w, rows, asJSON))
+
+	if output != "" {
+		fmt.Printf("Wrote batch scorecard (%d entities) to %s\n", len(rows), output)
+	}
+}
+
+// writeBatchRows encodes --batch's scorecard rows as CSV (the
+// default) or, with asJSON, a JSON array -- split out from
+// runRiskBatch so it's testable without the live API calls
+// gatherAndScore makes.
+func writeBatchRows(w io.Writer, rows []riskBatchRow, asJSON bool) error {
+	if asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	}
+	cw := csv.NewWriter(w)
+	if err := cw.Write([]string{"query", "entities_found", "score", "confidence", "confidence_reason", "indicator_count", "top_indicator"}); err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if err := cw.Write([]string{
+			r.Query,
+			strconv.Itoa(r.EntitiesFound),
+			strconv.Itoa(r.Score),
+			r.Confidence,
+			r.ConfidenceReason,
+			strconv.Itoa(r.IndicatorCount),
+			r.TopIndicator,
+		}); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
 // runRisk queries every configured source for candidates matching
 // query, normalizes whatever address/officer data each source exposes
 // into risk.Entity values, and runs the structural heuristics over the
@@ -667,6 +947,7 @@ func runRisk(args []string) {
 	output := fs.String("output", "", "write results to this file instead of stdout")
 	graphPath := fs.String("graph", "", "additionally write a node/edge graph JSON (entities as nodes, indicators as edges) to this path")
 	htmlPath := fs.String("html", "", "additionally write a self-contained, offline-viewable HTML graph (same nodes/edges as --graph) to this path")
+	reportHTMLPath := fs.String("report-html", "", "additionally write a self-contained, offline-viewable HTML version of the full report (indicators, evidence, corroborations, diff) to this path -- unlike --html/--graph, which render the entity/indicator graph, this mirrors the text/--json report itself, for opening in a browser or sharing with someone who doesn't have paper-trail installed")
 	csvPath := fs.String("graph-csv", "", "additionally write the graph (same nodes/edges as --graph) as a denormalized edge-list CSV, for spreadsheets or import into Gephi/yEd")
 	entitiesCSVPath := fs.String("entities-csv", "", "additionally write a flat CSV of every entity found (source, id, name, addresses, people, phones, emails, websites, chargees, beneficial owners) to this path -- unlike --graph-csv, this is the entity list itself, not the indicator relationships between them")
 	graphMLPath := fs.String("graph-graphml", "", "additionally write the graph (same nodes/edges as --graph) as GraphML, for import into Gephi/yEd or other graph-analysis tools")
@@ -685,6 +966,7 @@ func runRisk(args []string) {
 	summary := fs.Bool("summary", false, "print (or, with --json, encode) a compact one-line/one-object summary -- score, confidence, and entity/indicator counts -- instead of the full report, for scripting/dashboards/monitoring where the full indicator-by-indicator report is too verbose")
 	webhookURL := fs.String("webhook", "", "POST a JSON alert to this URL when --fail-on's threshold is met (requires --fail-on, unless --watch is also set -- see --watch) -- a hooks.slack.com or discord.com/api/webhooks URL gets that platform's own minimal message format, anything else gets the full compact summary as JSON")
 	watch := fs.Duration("watch", 0, "re-run this scan every this-long, forever, until interrupted (Ctrl+C) -- each run is automatically diffed against the previous one (no need to also pass --diff) and rewritten to the same --output/--json/--graph/etc. destinations. Minimum 1m, to stay polite to the public sources being queried. Mutually exclusive with --fail-on (a continuous monitor shouldn't exit the process); combine with --webhook instead to get alerted only when a run's diff shows new entities/indicators since the last check")
+	batch := fs.Bool("batch", false, "score every <query>/--input-file entry independently instead of cross-referencing them together -- one scorecard row per entity (query, entities found, score, confidence, indicator count, top indicator) written as CSV (or a JSON array with --json) to --output/stdout, for screening a list of vendors/donors/grantees where you want N separate verdicts, not one combined report. Mutually exclusive with --diff/--watch/--fail-on/--webhook (all assume a single overall score); --top/--min-weight/--indicator/--min-corroboration/--summary/--graph/--html/--graph-csv/--graph-graphml/--entities-csv are ignored in this mode")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
@@ -700,7 +982,7 @@ func runRisk(args []string) {
 		}
 	}
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -747,6 +1029,10 @@ func runRisk(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	if *batch && (*diffPath != "" || *watch != 0 || *failOn != "" || *webhookURL != "") {
+		fmt.Fprintln(os.Stderr, "Error: --batch is mutually exclusive with --diff/--watch/--fail-on/--webhook -- those all assume a single overall score for the whole run, but --batch produces one independent score per entity")
+		os.Exit(1)
+	}
 
 	// Caching is opt-in: this tool's whole point is checking *current*
 	// public registry state, so silently reusing stale data by default
@@ -766,6 +1052,11 @@ func runRisk(args []string) {
 		cache = riskcache.New()
 	}
 
+	if *batch {
+		runRiskBatch(queries, *limit, cache, cacheTTL, excludeTerms, *output, *asJSON, *quiet)
+		return
+	}
+
 	// Everything from here to the end of the function is one scan --
 	// with --watch set, this whole block repeats forever (until
 	// interrupted) rather than running once. previousReport is
@@ -780,153 +1071,7 @@ func runRisk(args []string) {
 			progress = newProgressReporter(os.Stderr)
 		}
 
-		var entities []risk.Entity
-		var extra []risk.Indicator
-		var notes []string
-		note := func(source, format string, a ...any) {
-			notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
-		}
-
-		// SEC EDGAR -- one client shared across every query term (and
-		// reused below for the full-text mentions step), so a missing
-		// credential is reported once, not once per term.
-		var edgarClient *edgar.Client
-		if c, err := edgar.NewClient(""); err != nil {
-			note("SEC EDGAR", "skipped (%v)", err)
-		} else {
-			edgarClient = c
-		}
-
-		// UK Companies House -- one client shared across every charity
-		// below, so a missing credential is reported once, not once per
-		// charity. Adds real director data for UK charities that are also
-		// registered companies, alongside their Charity Commission
-		// trustees: ukcharity alone only exposes trustees, so a company's
-		// directors would otherwise be invisible to the shared_person check.
-		chClient, chErr := companieshouse.NewClient("")
-		if chErr != nil {
-			note("Companies House", "skipped (%v)", chErr)
-			chClient = nil
-		}
-
-		// Phase 1: every source below resolves query terms into entities
-		// independently of the others -- EDGAR, IRS Form 990, ACNC, and UK
-		// Charity Commission (with its nested Companies House lookups) each
-		// hit entirely separate APIs with their own client-level throttling,
-		// so running them concurrently is safe and cuts wall-clock time
-		// substantially on a large multi-term scan (confirmed live: a
-		// 25-term run that previously needed several minutes sequential).
-		// Each gathers into its own local slices, not the shared ones above,
-		// so there's nothing to protect with a mutex -- they're merged in a
-		// fixed order below, after every goroutine finishes, so output stays
-		// deterministic regardless of which source happens to finish first.
-		var edgarEntities, npEntities, acncEntities, ukEntities []risk.Entity
-		var edgarExtra, npExtra, ukExtra []risk.Indicator
-		var edgarNotes, npNotes, acncNotes, ukNotes []string
-		var wg sync.WaitGroup
-
-		if edgarClient != nil {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, *limit, cache, cacheTTL, progress)
-			}()
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, *limit, cache, cacheTTL, progress)
-		}()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			acncEntities, acncNotes = gatherACNCEntities(queries, *limit, cache, cacheTTL, progress)
-		}()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, *limit, cache, cacheTTL, progress)
-		}()
-		wg.Wait()
-
-		entities = append(entities, edgarEntities...)
-		entities = append(entities, npEntities...)
-		entities = append(entities, acncEntities...)
-		entities = append(entities, ukEntities...)
-		extra = append(extra, edgarExtra...)
-		extra = append(extra, npExtra...)
-		extra = append(extra, ukExtra...)
-		notes = append(notes, edgarNotes...)
-		notes = append(notes, npNotes...)
-		notes = append(notes, acncNotes...)
-		notes = append(notes, ukNotes...)
-
-		// Phase 2: every check below only reads the now-final entities pool
-		// (built above) -- it doesn't add to it -- so, like phase 1, these
-		// six are independent of each other and safe to run concurrently.
-		// US sanctions, UK sanctions, UN sanctions, ICIJ Offshore Leaks,
-		// and the disqualified-directors check each screen every query
-		// term plus every distinct person name found; EDGAR full-text
-		// mentions screens query terms only (see its own comment below for
-		// why). Merged in the same fixed order as before so output stays
-		// deterministic.
-		var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra []risk.Indicator
-		var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes []string
-		var wg2 sync.WaitGroup
-
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			usExtra, usNotes = screenUSSanctions(queries, entities, progress)
-		}()
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities, progress)
-		}()
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			unExtra, unNotes = screenUNSanctions(queries, entities, progress)
-		}()
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities, progress)
-		}()
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, *limit, progress)
-		}()
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
-		}()
-		wg2.Wait()
-
-		extra = append(extra, usExtra...)
-		extra = append(extra, ukSanctionsExtra...)
-		extra = append(extra, unExtra...)
-		extra = append(extra, dqExtra...)
-		extra = append(extra, ftExtra...)
-		extra = append(extra, icijExtra...)
-		notes = append(notes, usNotes...)
-		notes = append(notes, ukSanctionsNotes...)
-		notes = append(notes, unNotes...)
-		notes = append(notes, dqNotes...)
-		notes = append(notes, ftNotes...)
-		notes = append(notes, icijNotes...)
-
-		// Cross-referencing runs once over the combined pool from every
-		// query term -- this is the whole point of taking multiple terms:
-		// an officer/trustee or address shared between, say, a "Narconon
-		// UK" result and a "Criminon UK" result only surfaces if both are
-		// in the same Assess() call.
-		cache.Save() // no-op if --cache-ttl wasn't set
-
-		score := risk.Assess(entities, extra)
+		entities, notes, score := gatherAndScore(queries, *limit, cache, cacheTTL, progress)
 
 		// --exclude/--exclude-file apply before everything else below,
 		// including --diff: unlike --top/--min-weight/--indicator, which
@@ -1041,10 +1186,7 @@ func runRisk(args []string) {
 			fmt.Fprintln(w, "This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
 
 			if diff != nil {
-				diffSource := *diffPath
-				if diffSource == "" {
-					diffSource = "previous --watch run"
-				}
+				diffSource := diffSourceLabel(*diffPath)
 				fmt.Fprintf(w, "\nDiff against %s:\n", diffSource)
 				fmt.Fprintf(w, "  Score: %d -> %d (%+d)\n", diff.ScoreBefore, diff.ScoreAfter, diff.ScoreAfter-diff.ScoreBefore)
 				fmt.Fprintf(w, "  %d new entit(ies):\n", len(diff.NewEntities))
@@ -1067,6 +1209,11 @@ func runRisk(args []string) {
 		if *entitiesCSVPath != "" {
 			exitOnErr(risk.WriteEntitiesCSV(entities, *entitiesCSVPath))
 			fmt.Printf("Wrote entity list CSV (%d entities) to %s\n", len(entities), *entitiesCSVPath)
+		}
+
+		if *reportHTMLPath != "" {
+			exitOnErr(writeReportHTML(report, diff, diffSourceLabel(*diffPath), *reportHTMLPath))
+			fmt.Printf("Wrote HTML report (%d entities, score %d) to %s -- open it directly in a browser\n", len(entities), score.Total, *reportHTMLPath)
 		}
 
 		if *graphPath != "" || *htmlPath != "" || *csvPath != "" || *graphMLPath != "" {

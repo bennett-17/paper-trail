@@ -824,6 +824,57 @@ func TestApplyConfigFileDefaultsWarnsOnUnrecognizedKey(t *testing.T) {
 	}
 }
 
+func TestWriteBatchRowsCSVFormat(t *testing.T) {
+	rows := []riskBatchRow{
+		{Query: "Example Corp", EntitiesFound: 2, Score: 7, Confidence: "MEDIUM", ConfidenceReason: "sanctions_match indicator at weight 5", IndicatorCount: 3, TopIndicator: "sanctions_match"},
+		{Query: "Clean Org, Inc", EntitiesFound: 1, Score: 0, Confidence: "LOW", ConfidenceReason: "no indicators found", IndicatorCount: 0},
+	}
+	var buf bytes.Buffer
+	if err := writeBatchRows(&buf, rows, false); err != nil {
+		t.Fatalf("writeBatchRows: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "query,entities_found,score,confidence,confidence_reason,indicator_count,top_indicator") {
+		t.Errorf("missing header row: %q", out)
+	}
+	if !strings.Contains(out, "Example Corp,2,7,MEDIUM,sanctions_match indicator at weight 5,3,sanctions_match") {
+		t.Errorf("missing/malformed first row: %q", out)
+	}
+	// A name containing a comma must come back quoted (real CSV
+	// escaping, not just naive comma-joining) -- encoding/csv handles
+	// this, but worth guarding against a future hand-rolled rewrite.
+	if !strings.Contains(out, `"Clean Org, Inc"`) {
+		t.Errorf("comma-containing query not quoted: %q", out)
+	}
+}
+
+func TestWriteBatchRowsJSONFormat(t *testing.T) {
+	rows := []riskBatchRow{
+		{Query: "Example Corp", EntitiesFound: 2, Score: 7, Confidence: "MEDIUM", ConfidenceReason: "sanctions_match indicator at weight 5", IndicatorCount: 3, TopIndicator: "sanctions_match"},
+	}
+	var buf bytes.Buffer
+	if err := writeBatchRows(&buf, rows, true); err != nil {
+		t.Fatalf("writeBatchRows: %v", err)
+	}
+	var decoded []riskBatchRow
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decoding JSON output: %v", err)
+	}
+	if len(decoded) != 1 || decoded[0] != rows[0] {
+		t.Errorf("decoded = %+v, want %+v", decoded, rows)
+	}
+}
+
+func TestWriteBatchRowsEmptyStillWritesHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeBatchRows(&buf, nil, false); err != nil {
+		t.Fatalf("writeBatchRows: %v", err)
+	}
+	if !strings.Contains(buf.String(), "query,entities_found,score,confidence,confidence_reason,indicator_count,top_indicator") {
+		t.Errorf("expected the header row even with zero rows: %q", buf.String())
+	}
+}
+
 func TestApplyConfigFileDefaultsWarnsOnBadValue(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".paper-trailrc")
 	if err := os.WriteFile(path, []byte("limit = not-a-number\n"), 0o644); err != nil {

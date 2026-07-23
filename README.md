@@ -137,13 +137,18 @@ And on top of all of the above, structural risk heuristics:
   pulled in alongside its Charity Commission trustees -- otherwise a
   company's directors and beneficial owners would be invisible to this
   tool entirely, since ukcharity itself only exposes trustees. Each
-  current officer is also fanned out one hop further via Companies
-  House's per-person appointment record, pulling in every OTHER
-  company that same person directs or is secretary of register-wide --
-  not just the companies the original search terms happen to find.
-  This is how a shared director between two otherwise-unconnected
-  organizations shows up even when neither one's own name search would
-  ever surface the other. That same per-person appointment history is
+  current officer is also fanned out via Companies House's per-person
+  appointment record, pulling in every OTHER company that same person
+  directs or is secretary of register-wide -- not just the companies
+  the original search terms happen to find. This is how a shared
+  director between two otherwise-unconnected organizations shows up
+  even when neither one's own name search would ever surface the
+  other. This fan-out goes two hops deep, not just one: each company
+  found this way also has its own current officers pulled in and
+  fanned out again in turn (bounded to the first 5 such companies, to
+  keep the extra API calls fixed rather than scaling with the data) --
+  deep enough to surface a "director of a director" connection that a
+  single hop would miss entirely. That same per-person appointment history is
   also scanned for an appointment burst -- three or more distinct
   companies appointing the same officer within a single week gets an
   officer_appointment_burst indicator, reusing this fetch rather than
@@ -379,7 +384,21 @@ And on top of all of the above, structural risk heuristics:
   tick. Minimum interval 1m, to stay polite to the sources queried;
   mutually exclusive with `--fail-on` (a continuous monitor shouldn't
   exit the process) -- pair it with `--webhook` instead to get alerted
-  only when something actually changes. `--top <n>` shows only the
+  only when something actually changes. `--batch` scores every
+  `<query>`/`--input-file` entry independently instead of
+  cross-referencing them together the way a normal scan deliberately
+  does -- one scorecard row per entity (query, entities found, score,
+  confidence, indicator count, top indicator code) as CSV (or JSON
+  array with `--json`), for screening a vendor/donor/grantee list where
+  N separate verdicts are wanted, not one combined report where a
+  shared address between two unrelated entities would otherwise read
+  as a false "connection" just because they were checked together.
+  Entries are scored sequentially, not concurrently, to avoid hammering
+  every source with N scans' worth of requests at once. Mutually
+  exclusive with `--diff`/`--watch`/`--fail-on`/`--webhook` (all assume
+  one overall score); `--top`/`--min-weight`/`--indicator`/
+  `--min-corroboration`/`--summary`/graph exports are ignored in this
+  mode, since none apply to a one-row-per-entity scorecard. `--top <n>` shows only the
   `<n>` highest-weight indicators, noting how many were hidden.
   `--min-weight <n>` and `--indicator <codes>` filter by relevance
   instead of count -- only indicators at or above a weight, or matching
@@ -607,6 +626,12 @@ go run ./cmd/paper-trail risk "Example Name" --graph risk_graph.json
 # red outline at weight >= 5, so top-priority leads stand out at a glance
 go run ./cmd/paper-trail risk "Example Name" --html risk_graph.html
 
+# Or export the full report itself (not the graph) as a single
+# self-contained HTML file -- same offline/no-CDN approach as --html,
+# for opening in a browser or sharing with someone who doesn't have
+# paper-trail installed
+go run ./cmd/paper-trail risk "Example Name" --report-html risk_report.html
+
 # Or export as a CSV edge list or GraphML, for Gephi/yEd or a spreadsheet
 go run ./cmd/paper-trail risk "Example Name" --graph-csv risk_graph.csv
 go run ./cmd/paper-trail risk "Example Name" --graph-graphml risk_graph.graphml
@@ -656,6 +681,13 @@ go run ./cmd/paper-trail risk --input-file watchlist.txt --fail-on HIGH --webhoo
 # tick) -- --fail-on isn't used here since the process is meant to keep
 # running, not exit on a hit
 go run ./cmd/paper-trail risk --input-file watchlist.txt --watch 6h --webhook https://hooks.slack.com/services/... --quiet
+
+# Screen a list of vendors/donors/grantees for an independent verdict
+# on each one -- unlike a normal multi-entry scan, --batch never
+# cross-references entries with each other, so a shared address
+# between two unrelated ones on the list won't misleadingly read as a
+# connection just because they were checked in the same run
+go run ./cmd/paper-trail risk --input-file vendors.txt --batch --quiet > scorecard.csv
 
 # Set defaults for flags you always use -- explicit CLI flags still override
 cat > ~/.paper-trailrc <<'RCEOF'
@@ -809,9 +841,11 @@ applies to its output.
       renders the same graph as a self-contained, interactive,
       force-directed HTML viewer (drag, click-to-highlight, zoom) with
       no server or external dependency, `--graph-csv`/`--graph-graphml`
-      export the same graph for Gephi/yEd or a spreadsheet, and
+      export the same graph for Gephi/yEd or a spreadsheet,
       `--entities-csv` exports a flat entity list (not a graph/edge
-      list at all) for a plain spreadsheet of what was found
+      list at all) for a plain spreadsheet of what was found, and
+      `--report-html` renders the full report itself (not the graph)
+      as a self-contained HTML file
 - [x] Phase 6: private-company coverage -- name resolution (`lookup`,
       `risk`) falls back to a Form D search for companies/funds that
       have a CIK but no ticker, widening coverage past public

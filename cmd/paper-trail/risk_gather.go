@@ -675,10 +675,14 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			// register-wide -- not just the ones a name search
 			// happens to find. This surfaces a shared director who
 			// never appears in either organization's own search
-			// results otherwise. Deliberately one hop only (the
-			// companies found this way aren't fanned out further)
-			// to keep the number of API calls bounded.
+			// results otherwise. Bounded to two hops -- the root's
+			// officers' other companies (hop 1), then those
+			// companies' own other officers' other companies in turn
+			// (hop 2, capped at officerHop2MaxCompanies companies) --
+			// deep enough to surface a director-of-a-director
+			// connection without fanning out indefinitely.
 			fannedOut := map[string]bool{}
+			var hop1Companies []companieshouse.Appointment
 			for _, o := range currentOfficers {
 				if o.OfficerID == "" {
 					continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
@@ -705,6 +709,46 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 					}
 					fannedOut[appt.CompanyNumber] = true
 					termEntities = append(termEntities, risk.NewEntity("companieshouse", appt.CompanyNumber, appt.CompanyName, nil, []string{o.Name}))
+					hop1Companies = append(hop1Companies, appt)
+				}
+			}
+
+			// Hop 2: pull each hop-1 company's own current officers
+			// (a separate call -- the appointments fetch above only
+			// names the company, not its other officers) and fan out
+			// through each of those the same way, one hop further.
+			// Not recursed again beyond this. appointmentBurst isn't
+			// re-checked here: a hop-2 officer isn't an officer of
+			// this entity itself, so attributing their own burst
+			// pattern to this entity's indicator list would overstate
+			// how directly it relates.
+			hop2Officers := map[string]bool{}
+			for i, hop1 := range hop1Companies {
+				if i >= officerHop2MaxCompanies {
+					break
+				}
+				officers, err := chClient.GetOfficers(hop1.CompanyNumber, limit)
+				if err != nil {
+					chNote("%s (hop 2 officers): %v", hop1.CompanyName, err)
+					continue
+				}
+				for _, o2 := range officers {
+					if o2.ResignedOn != "" || o2.OfficerID == "" || hop2Officers[o2.OfficerID] {
+						continue
+					}
+					hop2Officers[o2.OfficerID] = true
+					appointments2, err := chClient.GetOfficerAppointments(o2.OfficerID, limit)
+					if err != nil {
+						chNote("%s appointments (hop 2) for %s: %v", o2.Name, hop1.CompanyName, err)
+						continue
+					}
+					for _, appt2 := range appointments2 {
+						if appt2.ResignedOn != "" || sameCompanyNumber(appt2.CompanyNumber, detail.CompaniesHouseNumber) || fannedOut[appt2.CompanyNumber] {
+							continue
+						}
+						fannedOut[appt2.CompanyNumber] = true
+						termEntities = append(termEntities, risk.NewEntity("companieshouse", appt2.CompanyNumber, appt2.CompanyName, nil, []string{o2.Name}))
+					}
 				}
 			}
 		}
