@@ -716,19 +716,20 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	}
 
 	// Phase 1: every source below resolves query terms into entities
-	// independently of the others -- EDGAR, IRS Form 990, ACNC, and UK
-	// Charity Commission (with its nested Companies House lookups) each
-	// hit entirely separate APIs with their own client-level throttling,
-	// so running them concurrently is safe and cuts wall-clock time
-	// substantially on a large multi-term scan (confirmed live: a
-	// 25-term run that previously needed several minutes sequential).
-	// Each gathers into its own local slices, not the shared ones above,
-	// so there's nothing to protect with a mutex -- they're merged in a
-	// fixed order below, after every goroutine finishes, so output stays
-	// deterministic regardless of which source happens to finish first.
-	var edgarEntities, npEntities, acncEntities, ukEntities []risk.Entity
-	var edgarExtra, npExtra, ukExtra []risk.Indicator
-	var edgarNotes, npNotes, acncNotes, ukNotes []string
+	// independently of the others -- EDGAR, IRS Form 990, ACNC, GLEIF,
+	// and UK Charity Commission (with its nested Companies House
+	// lookups) each hit entirely separate APIs with their own
+	// client-level throttling, so running them concurrently is safe and
+	// cuts wall-clock time substantially on a large multi-term scan
+	// (confirmed live: a 25-term run that previously needed several
+	// minutes sequential). Each gathers into its own local slices, not
+	// the shared ones above, so there's nothing to protect with a
+	// mutex -- they're merged in a fixed order below, after every
+	// goroutine finishes, so output stays deterministic regardless of
+	// which source happens to finish first.
+	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities []risk.Entity
+	var edgarExtra, npExtra, gleifExtra, ukExtra []risk.Indicator
+	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes []string
 	var wg sync.WaitGroup
 
 	if edgarClient != nil {
@@ -751,6 +752,11 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		gleifEntities, gleifExtra, gleifNotes = gatherGLEIFEntities(queries, limit, cache, cacheTTL, progress)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Wait()
@@ -758,26 +764,29 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	entities = append(entities, edgarEntities...)
 	entities = append(entities, npEntities...)
 	entities = append(entities, acncEntities...)
+	entities = append(entities, gleifEntities...)
 	entities = append(entities, ukEntities...)
 	extra = append(extra, edgarExtra...)
 	extra = append(extra, npExtra...)
+	extra = append(extra, gleifExtra...)
 	extra = append(extra, ukExtra...)
 	notes = append(notes, edgarNotes...)
 	notes = append(notes, npNotes...)
 	notes = append(notes, acncNotes...)
+	notes = append(notes, gleifNotes...)
 	notes = append(notes, ukNotes...)
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these
-	// six are independent of each other and safe to run concurrently.
+	// eight are independent of each other and safe to run concurrently.
 	// US sanctions, UK sanctions, UN sanctions, ICIJ Offshore Leaks,
-	// and the disqualified-directors check each screen every query
-	// term plus every distinct person name found; EDGAR full-text
-	// mentions screens query terms only (see its own comment below for
-	// why). Merged in the same fixed order as before so output stays
-	// deterministic.
-	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes []string
+	// SAM.gov Exclusions, and the disqualified-directors check each
+	// screen every query term plus every distinct person name found;
+	// EDGAR full-text mentions and GDELT news mentions both screen
+	// query terms only (see their own comments below for why). Merged
+	// in the same fixed order as before so output stays deterministic.
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes []string
 	var wg2 sync.WaitGroup
 
 	wg2.Add(1)
@@ -810,6 +819,16 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer wg2.Done()
 		icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
 	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		gdeltExtra, gdeltNotes = screenGDELTMentions(queries, limit, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		samExtra, samNotes = screenSAMExclusions(queries, entities, progress)
+	}()
 	wg2.Wait()
 
 	extra = append(extra, usExtra...)
@@ -818,12 +837,16 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	extra = append(extra, dqExtra...)
 	extra = append(extra, ftExtra...)
 	extra = append(extra, icijExtra...)
+	extra = append(extra, gdeltExtra...)
+	extra = append(extra, samExtra...)
 	notes = append(notes, usNotes...)
 	notes = append(notes, ukSanctionsNotes...)
 	notes = append(notes, unNotes...)
 	notes = append(notes, dqNotes...)
 	notes = append(notes, ftNotes...)
 	notes = append(notes, icijNotes...)
+	notes = append(notes, gdeltNotes...)
+	notes = append(notes, samNotes...)
 
 	// Cross-referencing runs once over the combined pool from every
 	// query term -- this is the whole point of taking multiple terms:

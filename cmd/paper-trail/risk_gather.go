@@ -10,6 +10,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/aucharity"
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
+	"github.com/bennett-17/paper-trail/internal/gleif"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/riskcache"
@@ -298,6 +299,94 @@ func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cac
 		}
 	}
 	return entities, notes
+}
+
+// gatherGLEIFEntities resolves every query term against the Global
+// LEI Foundation's legal entity database -- unlike every other source
+// here, GLEIF isn't scoped to one jurisdiction (an LEI is required for
+// financial-market transaction reporting worldwide), so this is the
+// only source that can surface an entity outside the UK/US/AU this
+// project otherwise covers. For each match, checks whether its
+// GLEIF-reported ultimate parent's country differs from the entity's
+// own. Deliberately checks the ultimate parent, not the direct one:
+// confirmed live that a direct parent is often still same-country even
+// when the group is genuinely multinational (Nestlé USA, Inc.'s direct
+// parent, Nestlé Holdings, Inc., is itself US-registered -- the
+// cross-border jump to Nestlé's real Swiss parent, Nestlé S.A., only
+// shows up at the ultimate-parent level). GLEIF resolves the ultimate
+// parent server-side across the whole chain, so this needs one lookup,
+// not a hop-by-hop walk the way this project's UK PSC chain-following
+// does. Country (not the raw jurisdiction string, which can carry a
+// US-state-style suffix) is what's compared, so a same-country
+// different-state relationship is correctly treated as domestic, not
+// cross-border.
+func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+	gleifClient := gleif.NewClient()
+	results := runConcurrentQueries(queries, func(i int, query string) queryResult {
+		progress.report("GLEIF", "term %d/%d: %q", i+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) {
+			r.notes = append(r.notes, "GLEIF: "+fmt.Sprintf(format, a...))
+		}
+
+		cacheKey := riskcache.Key("gleif", query, limit)
+		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = cached
+			return r
+		}
+
+		records, err := gleifClient.SearchByName(query, limit)
+		if err != nil {
+			note("%v", err)
+			return r
+		}
+		if len(records) == 0 {
+			note("no match for %q", query)
+			cache.Set(cacheKey, nil)
+			return r
+		}
+		var termEntities []risk.Entity
+		for _, rec := range records {
+			var addrs []string
+			if addr := rec.LegalAddress.AsSingleLine(); addr != "" {
+				addrs = append(addrs, addr)
+			}
+			// GLEIF exposes no officer/director data at all -- People
+			// is always nil for this source, so it can't contribute to
+			// the shared-person check, only shared-address/formation-
+			// clustering (via FormedOn below) and the cross-border-
+			// parent check.
+			e := risk.NewEntity("gleif", rec.LEI, rec.Name, addrs, nil)
+			e.FormedOn = rec.CreationDate
+			termEntities = append(termEntities, e)
+
+			if rec.Jurisdiction == "" {
+				continue
+			}
+			parent, err := gleifClient.UltimateParent(rec.LEI)
+			if err != nil {
+				note("%s ultimate parent: %v", rec.Name, err)
+				continue
+			}
+			if parent == nil || parent.Jurisdiction == "" {
+				continue // no parent reported -- confirmed live to be a normal, common outcome, not an error
+			}
+			if gleif.Country(parent.Jurisdiction) == gleif.Country(rec.Jurisdiction) {
+				continue // same country -- an ordinary domestic group structure
+			}
+			r.extra = append(r.extra, risk.Indicator{
+				Code:        "gleif_cross_border_parent",
+				Description: "This entity's GLEIF-reported ultimate parent is registered in a different country -- a normal structure for many multinational corporate groups, but also a known technique for layering ownership across borders to obscure who ultimately controls an entity",
+				Weight:      2,
+				Entities:    []string{e.Label()},
+				Evidence:    fmt.Sprintf("%s (%s) -- ultimate parent %s (%s)", rec.Name, rec.Jurisdiction, parent.Name, parent.Jurisdiction),
+			})
+		}
+		r.entities = termEntities
+		cache.Set(cacheKey, termEntities)
+		return r
+	})
+	return flattenQueryResults(results)
 }
 
 // gatherUKCharityEntities resolves every query term against the UK

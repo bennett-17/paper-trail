@@ -197,9 +197,10 @@ person-search API for EDGAR, US nonprofits, or the AU/UK charity
 registers in this tool.
 
 risk runs one or more <query> terms against every source above that's
-configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission, and a
-sanctions screen), normalizes whatever address/officer/contact data each
-source exposes, and flags structural patterns across the *combined*
+configured (SEC EDGAR, IRS Form 990, ACNC, UK Charity Commission,
+GLEIF, and a sanctions screen), normalizes whatever address/officer/
+contact data each source exposes, and flags structural patterns across
+the *combined*
 pool of everything every term found. --input-file reads additional
 terms from a file, one per line (blank lines and #-prefixed comment
 lines are ignored) -- combined with any <query> arguments given
@@ -348,7 +349,18 @@ text-similarity score alone, which stays well above zero even for an
 unrelated name that merely shares a word), and inclusion in the
 database is explicitly not itself evidence of wrongdoing -- many
 entities in it are entirely legal offshore structures -- so this is
-weighted lower than a sanctions match, per ICIJ's own guidance. And,
+weighted lower than a sanctions match, per ICIJ's own guidance. The
+same scope also gets checked against the US SAM.gov Exclusions list
+(sam_exclusion) -- firms, individuals, and vessels debarred,
+suspended, or otherwise excluded from federal contracts or assistance.
+Distinct from a sanctions match: exclusion is a federal-procurement
+eligibility action, not a sanctions designation, and the two lists
+only partly overlap. Unlike every other US/UK source here, SAM.gov has
+no keyless option -- requires your own free SAM_GOV_API_KEY, register
+at https://sam.gov, go to your Account Details page, and request a
+public API key (shown once -- copy it immediately) -- and this screen
+is skipped cleanly, same as companieshouse/ukcharity without their own
+keys, when it isn't set. And,
 when a sanctions hit's own country (or, for a UK hit, its sanctions
 regime, when that regime happens to be named after a country) is on
 FATF's high-risk or increased-monitoring list, a separate
@@ -387,7 +399,24 @@ restricts the simplest version of this directly, so a genuine hit is
 rare and higher-weighted than multi_jurisdiction_ownership -- a known
 technique for obscuring ultimate control in more complex or offshore
 structures, though a data or filing error somewhere in the chain is
-also possible. Officer/trustee names sourced from Companies House and
+also possible. GLEIF-sourced entities (the Global LEI Foundation's
+worldwide legal-entity database, not scoped to one jurisdiction the
+way every other source here is) get a similar
+check with global reach: a gleif_cross_border_parent indicator fires
+when an entity's GLEIF-reported ultimate parent is registered in a
+different country -- confirmed live against real multinational groups
+(Nestlé USA, Inc.'s ultimate parent correctly resolves to
+Switzerland's Nestlé S.A.; Goldman Sachs International's UK entity
+correctly resolves to its US parent). GLEIF resolves this server-side
+across the whole ownership chain, so it's one lookup, not a hop-by-hop
+walk. Deliberately checks the ultimate parent, not the direct one:
+confirmed live that a direct parent is often still same-country even
+when the group is genuinely multinational (Nestlé USA's own direct
+parent is itself US-registered -- the cross-border jump only shows up
+one level higher). Same framing as multi_jurisdiction_ownership: a
+normal structure for many multinational groups and also a known
+technique for obscuring ultimate control, so a lead to investigate,
+not proof on its own. Officer/trustee names sourced from Companies House and
 the UK Charity Commission are also checked against Companies House's
 disqualified-directors register (a disqualified_director indicator) --
 unlike every other indicator here this is an already-adjudicated
@@ -407,7 +436,17 @@ index (see fulltext above) for a mention in some *other* company's
 filing -- e.g. a related-party footnote -- with its own
 filing_mention indicator, scored lowest of all of these since a filing
 can mention a name for reasons that have nothing to do with any real
-connection. Each primary resolved EDGAR company is also checked
+connection. Each query term is separately checked against the GDELT
+Project's indexed worldwide news coverage too (gdelt_news_mention) --
+broader and more current than filing_mention, but less structured:
+this catches a name turning up anywhere in global news, not just
+inside another company's SEC filing (confirmed live against a real,
+current story -- a Swedbank fine tied to the Panama Papers). Scored
+the same low weight, same "lead to verify" framing. GDELT enforces a
+strict rate limit of one request every 5 seconds (confirmed live, far
+stricter than any other source this tool uses), so this check alone
+can dominate a large multi-term scan's wall-clock time -- an accepted
+tradeoff of using it, not a bug. Each primary resolved EDGAR company is also checked
 against SEC's XBRL "company concept" API for its most recently
 reported total assets -- a shell_company_assets indicator flags
 anything under $150,000 despite being an active filer, SEC's own
@@ -707,7 +746,8 @@ Environment:
   UK_CHARITY_API_KEY_SECONDARY optional rotation fallback for ukcharity (see above)
   CSL_API_KEY_PRIMARY          required for the sanctions command only (see above)
   CSL_API_KEY_SECONDARY        optional rotation fallback for sanctions (see above)
-  COMPANIES_HOUSE_API_KEY      required for the companieshouse and person commands (see above)`)
+  COMPANIES_HOUSE_API_KEY      required for the companieshouse and person commands (see above)
+  SAM_GOV_API_KEY              required for risk's SAM.gov Exclusions screen only (see above) -- risk works without it, that one screen is just skipped`)
 }
 
 // versionString builds paper-trail's --version output from Go's own

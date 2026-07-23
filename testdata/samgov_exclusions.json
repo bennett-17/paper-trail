@@ -1,0 +1,63 @@
+{
+  "totalRecords": 2,
+  "excludedEntity": [
+    {
+      "exclusionDetails": {
+        "classificationType": "Firm",
+        "exclusionType": "Ineligible (Proceedings)",
+        "exclusionProgram": "Reciprocal",
+        "excludingAgencyName": "ENVIRONMENTAL PROTECTION AGENCY"
+      },
+      "exclusionIdentification": {
+        "entityName": "EXAMPLE HOLDINGS LLC",
+        "firstName": "",
+        "middleName": "",
+        "lastName": ""
+      },
+      "exclusionActions": {
+        "listOfActions": [
+          {
+            "activateDate": "01/15/2020",
+            "terminationDate": ""
+          }
+        ]
+      },
+      "exclusionPrimaryAddress": {
+        "addressLine1": "100 Example St",
+        "city": "Springfield",
+        "stateOrProvinceCode": "IL",
+        "zipCode": "62701",
+        "countryCode": "USA"
+      }
+    },
+    {
+      "exclusionDetails": {
+        "classificationType": "Individual",
+        "exclusionType": "Prohibition/Restriction",
+        "exclusionProgram": "",
+        "excludingAgencyName": "DEPARTMENT OF DEFENSE"
+      },
+      "exclusionIdentification": {
+        "entityName": "",
+        "firstName": "Jane",
+        "middleName": "Q",
+        "lastName": "Example"
+      },
+      "exclusionActions": {
+        "listOfActions": [
+          {
+            "activateDate": "06/01/2019",
+            "terminationDate": "06/01/2024"
+          }
+        ]
+      },
+      "exclusionPrimaryAddress": {
+        "addressLine1": "",
+        "city": "",
+        "stateOrProvinceCode": "",
+        "zipCode": "",
+        "countryCode": "USA"
+      }
+    }
+  ]
+}

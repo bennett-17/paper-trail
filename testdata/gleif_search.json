@@ -1,0 +1,48 @@
+{
+  "data": [
+    {
+      "type": "lei-records",
+      "id": "W22LROWP2IHZNBB6K528",
+      "attributes": {
+        "lei": "W22LROWP2IHZNBB6K528",
+        "entity": {
+          "legalName": {"name": "GOLDMAN SACHS INTERNATIONAL", "language": "en"},
+          "otherNames": [
+            {"name": "TRUSHELFCO (NO.1266) LIMITED", "language": "en", "type": "PREVIOUS_LEGAL_NAME"}
+          ],
+          "legalAddress": {
+            "city": "London",
+            "region": "GB-LND",
+            "country": "GB",
+            "postalCode": "EC4A 4AU"
+          },
+          "registeredAs": "02263951",
+          "jurisdiction": "GB",
+          "status": "ACTIVE",
+          "creationDate": "1988-06-02T00:00:00Z"
+        }
+      }
+    },
+    {
+      "type": "lei-records",
+      "id": "549300CVFMQ34SOQAT28",
+      "attributes": {
+        "lei": "549300CVFMQ34SOQAT28",
+        "entity": {
+          "legalName": {"name": "Goldman Sachs International Fund", "language": "en"},
+          "otherNames": [],
+          "legalAddress": {
+            "city": "Dublin",
+            "region": "",
+            "country": "IE",
+            "postalCode": "D02"
+          },
+          "registeredAs": "",
+          "jurisdiction": "IE",
+          "status": "ACTIVE",
+          "creationDate": "2005-11-14T00:00:00Z"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "data": {
+    "type": "lei-records",
+    "id": "549300RQT6K4WXZL3083",
+    "attributes": {
+      "lei": "549300RQT6K4WXZL3083",
+      "entity": {
+        "legalName": {"name": "GOLDMAN SACHS GROUP UK LIMITED", "language": "en"},
+        "otherNames": [],
+        "legalAddress": {
+          "city": "London",
+          "region": "GB-LND",
+          "country": "GB",
+          "postalCode": "EC4A 4AU"
+        },
+        "registeredAs": "01202857",
+        "jurisdiction": "GB",
+        "status": "ACTIVE",
+        "creationDate": "1976-07-14T00:00:00Z"
+      }
+    }
+  }
+}

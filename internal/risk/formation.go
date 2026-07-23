@@ -11,8 +11,10 @@ import (
 // registration/incorporation/ruling date in, confirmed live: the UK
 // Charity Commission's detail endpoint sends a full ISO datetime,
 // Companies House and ProPublica's ruling_date send a plain ISO date,
-// and Australia's ACNC sends UK/AU-style DD/MM/YYYY.
+// Australia's ACNC sends UK/AU-style DD/MM/YYYY, and GLEIF's
+// creationDate sends a full RFC3339 datetime with a trailing "Z".
 var dateLayouts = []string{
+	"2006-01-02T15:04:05Z",
 	"2006-01-02T15:04:05",
 	"2006-01-02",
 	"02/01/2006",

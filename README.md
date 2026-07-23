@@ -87,6 +87,12 @@ Separately, for organizations that don't file with the SEC at all:
   and secured-lending data for UK charities that are also registered
   companies, since the Charity Commission API itself only exposes
   trustees (requires your own free API key -- see Setup)
+- Searches the Global LEI Foundation's (GLEIF) Legal Entity Identifier
+  database by name -- unlike every other source above, GLEIF isn't
+  scoped to one jurisdiction (an LEI is required for financial-market
+  transaction reporting worldwide), so this is the only source that
+  can surface an entity outside the UK/US/AU this project otherwise
+  covers. No API key needed.
 
 And separately, for sanctions screening:
 
@@ -252,7 +258,16 @@ And on top of all of the above, structural risk heuristics:
   a strong match). Appearing in one of these leaks covers many
   entirely legal offshore structures, so on its own this is not
   evidence of wrongdoing, per ICIJ's own guidance -- weighted lower
-  than a sanctions match accordingly. And a separate flag when a sanctions
+  than a sanctions match accordingly. The same scope also gets checked
+  against the US SAM.gov Exclusions list (sam_exclusion) -- firms,
+  individuals, and vessels debarred, suspended, or otherwise excluded
+  from federal contracts or assistance. Distinct from a sanctions
+  match: exclusion is a federal-procurement eligibility action, not a
+  sanctions designation, and the two lists only partly overlap. Unlike
+  every other US/UK source here, SAM.gov has no keyless option --
+  requires your own free `SAM_GOV_API_KEY` (see Setup) -- and this
+  screen is skipped cleanly (like companieshouse/ukcharity without
+  their own keys) when it isn't set. And a separate flag when a sanctions
   hit's own country (or, for a UK hit, its sanctions regime, when
   that regime happens to be named after a country) is on FATF's
   high-risk or increased-monitoring list (a manually maintained
@@ -291,6 +306,23 @@ And on top of all of the above, structural risk heuristics:
   multi_jurisdiction_ownership -- a known technique for obscuring
   ultimate control in more complex or offshore structures, though a
   data or filing error somewhere in the chain is also possible.
+  GLEIF-sourced entities get a similar check with global reach: a
+  gleif_cross_border_parent indicator fires when an entity's
+  GLEIF-reported ultimate parent is registered in a different country
+  -- confirmed live against real multinational groups (Nestlé USA,
+  Inc.'s ultimate parent correctly resolves to Switzerland's Nestlé
+  S.A.; Goldman Sachs International's UK entity correctly resolves to
+  its US parent, The Goldman Sachs Group, Inc.). GLEIF resolves this
+  server-side across the whole ownership chain, so it needs one lookup,
+  not a hop-by-hop walk the way the PSC chain above works. Deliberately
+  checks the *ultimate* parent, not the direct one: confirmed live that
+  a direct parent is often still same-country even when the group is
+  genuinely multinational (Nestlé USA's own direct parent is itself
+  US-registered -- the cross-border jump only shows up one level
+  higher). Same framing as multi_jurisdiction_ownership: a normal
+  structure for many multinational corporate groups, and also a known
+  technique for obscuring ultimate control, so a lead to investigate,
+  not proof on its own.
   Officer/trustee names sourced from Companies House and the UK
   Charity Commission are also checked against Companies House's
   disqualified-directors register -- unlike every other indicator here
@@ -309,7 +341,18 @@ And on top of all of the above, structural risk heuristics:
   fulltext above) for a mention in some *other* company's filing --
   its own indicator, scored lowest of the bunch since a filing can
   mention a name for reasons that have nothing to do with any real
-  connection. Each primary resolved EDGAR company is also checked
+  connection. Each query term is separately checked against the GDELT
+  Project's indexed worldwide news coverage too (gdelt_news_mention) --
+  a broader, more current, but less structured version of the same
+  idea: this catches a name turning up anywhere in global news, not
+  just inside another company's SEC filing. Confirmed live against a
+  real, current story (a Swedbank fine tied to the Panama Papers).
+  Scored the same low weight and treated the same way -- a lead to
+  verify, not a finding. Confirmed live that GDELT enforces a strict
+  rate limit of one request every 5 seconds, far stricter than any
+  other source this tool uses, so this check alone can dominate a
+  large multi-term scan's wall-clock time -- an accepted tradeoff of
+  using it, not a bug. Each primary resolved EDGAR company is also checked
   against SEC's XBRL data for its most recently reported total assets
   -- a shell_company_assets indicator flags anything under $150,000
   despite being an active filer, SEC's own working definition of a
@@ -500,14 +543,15 @@ either by exporting it:
 export EDGAR_USER_AGENT="Your Name your.email@example.com"
 ```
 
-`ukcharity`, `sanctions`, and `companieshouse` are the three
-exceptions to this project's no-API-key model: each of these APIs
-requires a registered key (free, but there's no keyless live-query
-alternative the way there is for SEC EDGAR, ProPublica, or ACNC).
-`ukcharity` and `sanctions` sit behind Azure API Management, which
-issues every subscription two keys, primary and secondary, so you can
-rotate one without downtime; `companieshouse` issues a single key
-instead. To use `ukcharity`:
+`ukcharity`, `sanctions`, `companieshouse`, and `risk`'s SAM.gov
+Exclusions screen are the exceptions to this project's no-API-key
+model: each of these APIs requires a registered key (free, but
+there's no keyless live-query alternative the way there is for SEC
+EDGAR, ProPublica, or ACNC). `ukcharity` and `sanctions` sit behind
+Azure API Management, which issues every subscription two keys,
+primary and secondary, so you can rotate one without downtime;
+`companieshouse` and SAM.gov each issue a single key instead. To use
+`ukcharity`:
 
 1. Sign up for a free account at
    [api-portal.charitycommission.gov.uk](https://api-portal.charitycommission.gov.uk)
@@ -536,6 +580,16 @@ And to use `companieshouse`:
    -- those are for a browser-embedded widget and a real-time change
    feed respectively, neither of which this tool uses)
 3. Set `COMPANIES_HOUSE_API_KEY` to it
+
+And to use `risk`'s SAM.gov Exclusions screen:
+
+1. Sign up for a free account at [sam.gov](https://sam.gov)
+2. Go to your Account Details page and request a public API key --
+   it's shown once, so copy it immediately
+3. Set `SAM_GOV_API_KEY` to it. The public tier is 10 requests/day;
+   registering a business entity and requesting the elevated "Data
+   Entry" role raises that to 1,000/day, but isn't required just to
+   use this
 
 Or set them all by copying `.env.example` to `.env` and filling it in:
 

@@ -6,9 +6,11 @@ import (
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
+	"github.com/bennett-17/paper-trail/internal/gdelt"
 	"github.com/bennett-17/paper-trail/internal/icij"
 	"github.com/bennett-17/paper-trail/internal/ofsi"
 	"github.com/bennett-17/paper-trail/internal/risk"
+	"github.com/bennett-17/paper-trail/internal/samgov"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
 	"github.com/bennett-17/paper-trail/internal/unsc"
 )
@@ -298,6 +300,61 @@ func screenUNSanctions(queries []string, entities []risk.Entity, progress *progr
 	return extra, notes
 }
 
+// screenSAMExclusions screens the same scope as screenUSSanctions
+// (every query term, plus every distinct person name found) against
+// the US SAM.gov Exclusions list -- firms, individuals, and vessels
+// debarred, suspended, or otherwise excluded from federal contracts or
+// assistance. Distinct from sanctions_match: exclusion is a domestic
+// federal-procurement eligibility action, not a sanctions designation,
+// and the two lists' populations only partly overlap. Skipped
+// entirely (like ukcharity/companieshouse) when SAM_GOV_API_KEY isn't
+// set, since this is the one screen in this project with no keyless
+// option, same as UK Companies House and the Charity Commission.
+func screenSAMExclusions(queries []string, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "SAM.gov Exclusions: "+fmt.Sprintf(format, a...))
+	}
+	samClient, err := samgov.NewClient("")
+	if err != nil {
+		note("skipped (%v)", err)
+		return nil, notes
+	}
+
+	screened := map[string]bool{}
+	screen := func(name, screenedFor string) {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || screened[key] {
+			return
+		}
+		screened[key] = true
+		progress.report("SAM.gov Exclusions", "checking %q (%d so far)", name, len(screened))
+		exclusions, err := samClient.SearchByName(name, 0)
+		if err != nil {
+			note("%q: %v", name, err)
+			return
+		}
+		for _, ex := range exclusions {
+			extra = append(extra, risk.Indicator{
+				Code:        "sam_exclusion",
+				Description: "Name matched the US SAM.gov Exclusions list -- an already-adjudicated federal debarment/suspension/exclusion action barring this firm or individual from federal contracts or assistance, not a correlation, but still a name-only match to verify like any other list hit here",
+				Weight:      5,
+				Entities:    []string{screenedFor},
+				Evidence:    fmt.Sprintf("%s -- %s, %s (%s)", ex.Name, ex.Classification, ex.ExclusionType, ex.ExcludingAgency),
+			})
+		}
+	}
+
+	for _, query := range queries {
+		screen(query, fmt.Sprintf("search query: %q", query))
+	}
+	for _, e := range entities {
+		for _, p := range e.People {
+			screen(p, e.Label())
+		}
+	}
+	return extra, notes
+}
+
 // screenDisqualifiedDirectors checks officer/trustee names sourced
 // from Companies House and the UK Charity Commission specifically
 // (that's the register this actually covers) against Companies
@@ -422,6 +479,53 @@ func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, en
 
 	for _, query := range queries {
 		mention(query, fmt.Sprintf("search query: %q", query))
+	}
+	return extra, notes
+}
+
+// screenGDELTMentions checks every query term (not every discovered
+// person -- same "query terms only" scoping as
+// screenEDGARFullTextMentions above, for the same noise-avoidance
+// reason: screening individual names would flood this with low-value
+// hits, e.g. a well-known executive's name turning up in unrelated
+// news coverage everywhere) against GDELT's indexed worldwide news
+// coverage. Distinct from filing_mention: this is any news article
+// anywhere, not specifically another company's SEC filing -- a
+// broader, more current, but less structured signal, so it gets the
+// same low weight and the same "lead to verify" framing. GDELT
+// enforces a strict rate limit of one request every 5 seconds
+// (confirmed live -- far stricter than any other source this project
+// uses), so this screen alone can dominate a large multi-term scan's
+// wall-clock time -- an accepted, documented tradeoff of using it, not
+// something worth engineering around.
+func screenGDELTMentions(queries []string, limit int, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "GDELT: "+fmt.Sprintf(format, a...))
+	}
+	gdeltClient := gdelt.NewClient()
+
+	screened := map[string]bool{}
+	for _, query := range queries {
+		key := strings.ToLower(strings.TrimSpace(query))
+		if key == "" || screened[key] {
+			continue
+		}
+		screened[key] = true
+		progress.report("GDELT", "checking %q (%d so far)", query, len(screened))
+		articles, err := gdeltClient.SearchArticles(query, limit)
+		if err != nil {
+			note("%q: %v", query, err)
+			continue
+		}
+		for _, a := range articles {
+			extra = append(extra, risk.Indicator{
+				Code:        "gdelt_news_mention",
+				Description: "Name appears in global news coverage indexed by GDELT -- could be entirely unrelated context, routine business coverage, or a real red flag; verify the actual article before treating this as meaningful",
+				Weight:      1,
+				Entities:    []string{fmt.Sprintf("search query: %q", query)},
+				Evidence:    fmt.Sprintf("%s -- %s (%s, %s)", a.Title, a.Domain, a.SourceCountry, a.SeenDate),
+			})
+		}
 	}
 	return extra, notes
 }

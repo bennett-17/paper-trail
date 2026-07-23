@@ -1,0 +1,24 @@
+{
+  "articles": [
+    {
+      "url": "https://www.icij.org/investigations/panama-papers/swedbank-fined-50-million-by-new-york-authorities-over-panama-papers-revelations/",
+      "url_mobile": "",
+      "title": "Swedbank fined $50 million by New York authorities over Panama Papers revelations",
+      "seendate": "20260717T224500Z",
+      "socialimage": "",
+      "domain": "icij.org",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://www.americanbanker.com/news/ny-regulators-fine-swedbank-50m-in-panama-papers-probe",
+      "url_mobile": "",
+      "title": "NY regulators fine Swedbank $50M in Panama Papers probe",
+      "seendate": "20260716T231500Z",
+      "socialimage": "",
+      "domain": "americanbanker.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    }
+  ]
+}
