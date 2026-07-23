@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "type": "creditors-voluntary-liquidation",
+      "number": "1",
+      "dates": [
+        {"type": "wound-up-on", "date": "1994-08-05"},
+        {"type": "dissolved-on", "date": "1996-03-22"}
+      ],
+      "practitioners": [
+        {
+          "name": "Ronan Duffy",
+          "role": "practitioner",
+          "address": {
+            "address_line_1": "27 Templemore Business Park",
+            "locality": "Derry",
+            "postal_code": "BT48 OLD"
+          }
+        },
+        {
+          "name": " ",
+          "role": "practitioner",
+          "address": {
+            "address_line_1": "Fermanagh House",
+            "locality": "Belfast"
+          }
+        }
+      ]
+    }
+  ],
+  "status": ["liquidation"]
+}

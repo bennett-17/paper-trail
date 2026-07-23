@@ -6,6 +6,7 @@ import (
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
+	"github.com/bennett-17/paper-trail/internal/icij"
 	"github.com/bennett-17/paper-trail/internal/ofsi"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
@@ -146,6 +147,60 @@ func screenUKSanctions(queries []string, entities []risk.Entity, progress *progr
 					Evidence:    fmt.Sprintf("%s -- %s", hit.Name, listName),
 				})
 			}
+		}
+	}
+
+	for _, query := range queries {
+		screen(query, fmt.Sprintf("search query: %q", query))
+	}
+	for _, e := range entities {
+		for _, p := range e.People {
+			screen(p, e.Label())
+		}
+	}
+	return extra, notes
+}
+
+// screenICIJOffshoreLeaks screens the same scope as screenUSSanctions
+// (every query term, plus every distinct person name found) against
+// the ICIJ Offshore Leaks Database -- the combined Panama Papers,
+// Paradise Papers, Pandora Papers, Offshore Leaks, and Bahamas Leaks
+// investigations. Confirmed live that ICIJ's own Match flag (rather
+// than Score alone, which stays well above zero even for an unrelated
+// name that merely shares a word) is the reliable signal: an
+// exact-name query for a real Panama Papers intermediary returns
+// Match=true/Score=100, while a common name like "John Smith" pulls
+// back address/entity results that merely mention it, all
+// Match=false. Only Match=true results are flagged here.
+func screenICIJOffshoreLeaks(queries []string, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "ICIJ Offshore Leaks Database: "+fmt.Sprintf(format, a...))
+	}
+	icijClient := icij.NewClient()
+	screened := map[string]bool{}
+	screen := func(name, screenedFor string) {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || screened[key] {
+			return
+		}
+		screened[key] = true
+		progress.report("ICIJ Offshore Leaks Database", "checking %q (%d so far)", name, len(screened))
+		matches, err := icijClient.Search(name, 10)
+		if err != nil {
+			note("%q: %v", name, err)
+			return
+		}
+		for _, m := range matches {
+			if !m.Match {
+				continue
+			}
+			extra = append(extra, risk.Indicator{
+				Code:        "icij_offshore_leaks_match",
+				Description: "Name matched a record in the ICIJ Offshore Leaks Database (Panama Papers/Paradise Papers/Pandora Papers/Offshore Leaks/Bahamas Leaks) -- inclusion reflects appearing in one of these leaks, which covers many entirely legal offshore structures, so on its own this is not evidence of wrongdoing, per ICIJ's own guidance, but it's a specific, real lead worth investigating further",
+				Weight:      3,
+				Entities:    []string{screenedFor},
+				Evidence:    fmt.Sprintf("%s -- %s (%s)", m.Name, m.Description, m.Type),
+			})
 		}
 	}
 

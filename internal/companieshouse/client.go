@@ -289,6 +289,13 @@ type Company struct {
 	// financials -- a company can be current on one and overdue on the
 	// other.
 	ConfirmationStatementOverdue bool `json:"confirmationStatementOverdue,omitempty"`
+	// HasInsolvencyHistory is confirmed live on the company profile
+	// itself (has_insolvency_history) -- true whenever the dedicated
+	// /company/{number}/insolvency endpoint (see GetInsolvency) has
+	// real case data, so it's cheap to check here first rather than
+	// calling that endpoint for every company (confirmed live: it
+	// 404s for a company with no insolvency involvement at all).
+	HasInsolvencyHistory bool `json:"hasInsolvencyHistory,omitempty"`
 }
 
 type companyResponse struct {
@@ -313,6 +320,7 @@ type companyResponse struct {
 	ConfirmationStatement struct {
 		Overdue bool `json:"overdue"`
 	} `json:"confirmation_statement"`
+	HasInsolvencyHistory bool `json:"has_insolvency_history"`
 }
 
 // zeroPadCompanyNumber left-pads a company number to Companies House's
@@ -365,7 +373,73 @@ func (c *Client) GetCompany(number string) (Company, error) {
 		AccountsOverdue:              resp.Accounts.Overdue,
 		LastAccountsType:             resp.Accounts.LastAccounts.Type,
 		ConfirmationStatementOverdue: resp.ConfirmationStatement.Overdue,
+		HasInsolvencyHistory:         resp.HasInsolvencyHistory,
 	}, nil
+}
+
+// InsolvencyDate is one dated milestone within an InsolvencyCase, e.g.
+// {"wound-up-on", "2008-11-20"} or {"administration-started-on",
+// "2015-07-08"} -- both confirmed live.
+type InsolvencyDate struct {
+	Type string `json:"type"`
+	Date string `json:"date"`
+}
+
+// InsolvencyCase is one insolvency case against a company, as returned
+// by GetInsolvency -- confirmed live to include compulsory and
+// creditors' voluntary liquidations, administrations, and company
+// voluntary arrangements, sometimes several for the same company
+// across its history (e.g. a voluntary arrangement, then
+// administration, then liquidation, each its own case).
+type InsolvencyCase struct {
+	Type          string           `json:"type"` // e.g. "compulsory-liquidation", "creditors-voluntary-liquidation", "administration", "corporate-voluntary-arrangement"
+	Dates         []InsolvencyDate `json:"dates,omitempty"`
+	Practitioners []string         `json:"practitioners,omitempty"` // insolvency practitioner names, if any were appointed and named
+}
+
+type insolvencyResponse struct {
+	Cases []struct {
+		Type          string           `json:"type"`
+		Dates         []InsolvencyDate `json:"dates"`
+		Practitioners []struct {
+			Name string `json:"name"`
+		} `json:"practitioners"`
+	} `json:"cases"`
+}
+
+// GetInsolvency fetches a company's insolvency case history by its
+// exact company number. Confirmed live that this 404s for a company
+// with no insolvency involvement at all -- check
+// Company.HasInsolvencyHistory (from GetCompany, already fetched
+// elsewhere) before calling this, to avoid a wasted request for the
+// common case.
+func (c *Client) GetInsolvency(number string) ([]InsolvencyCase, error) {
+	number = zeroPadCompanyNumber(number)
+	body, err := c.get(c.BaseURL + "/company/" + url.PathEscape(number) + "/insolvency")
+	if err != nil {
+		return nil, err
+	}
+
+	var resp insolvencyResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing insolvency history: %v", err)
+	}
+
+	cases := make([]InsolvencyCase, 0, len(resp.Cases))
+	for _, item := range resp.Cases {
+		var practitioners []string
+		for _, p := range item.Practitioners {
+			if name := strings.TrimSpace(p.Name); name != "" {
+				practitioners = append(practitioners, name)
+			}
+		}
+		cases = append(cases, InsolvencyCase{
+			Type:          item.Type,
+			Dates:         item.Dates,
+			Practitioners: practitioners,
+		})
+	}
+	return cases, nil
 }
 
 // Officer is a single company officer (director, secretary, etc.),
@@ -475,6 +549,15 @@ type PSC struct {
 	// the significant control) has no nationality at all.
 	Nationality        string `json:"nationality,omitempty"`
 	CountryOfResidence string `json:"countryOfResidence,omitempty"`
+	// CorporateRegistrationNumber and CorporateCountryRegistered are
+	// both confirmed live on a real corporate PSC record (e.g. Tesco
+	// Stores Limited's PSC, Tesco Holdings Limited, exposes its own
+	// registration number "00243011") -- only populated when Kind is
+	// "corporate-entity-person-with-significant-control", never for an
+	// individual PSC. This is what lets a PSC chain be followed one
+	// hop further: fetch this registration number's own PSCs in turn.
+	CorporateRegistrationNumber string `json:"corporateRegistrationNumber,omitempty"`
+	CorporateCountryRegistered  string `json:"corporateCountryRegistered,omitempty"`
 }
 
 type pscResponse struct {
@@ -486,6 +569,10 @@ type pscResponse struct {
 		CeasedOn           string   `json:"ceased_on"`
 		Nationality        string   `json:"nationality"`
 		CountryOfResidence string   `json:"country_of_residence"`
+		Identification     struct {
+			RegistrationNumber string `json:"registration_number"`
+			CountryRegistered  string `json:"country_registered"`
+		} `json:"identification"`
 	} `json:"items"`
 	TotalResults int `json:"total_results"`
 }
@@ -517,13 +604,15 @@ func (c *Client) GetPersonsWithSignificantControl(number string, limit int) ([]P
 			continue // a PSC "statement" (e.g. none identified), not an actual person/company
 		}
 		pscs = append(pscs, PSC{
-			Name:               item.Name,
-			Kind:               item.Kind,
-			NaturesOfControl:   item.NaturesOfControl,
-			NotifiedOn:         item.NotifiedOn,
-			CeasedOn:           item.CeasedOn,
-			Nationality:        item.Nationality,
-			CountryOfResidence: item.CountryOfResidence,
+			Name:                        item.Name,
+			Kind:                        item.Kind,
+			NaturesOfControl:            item.NaturesOfControl,
+			NotifiedOn:                  item.NotifiedOn,
+			CeasedOn:                    item.CeasedOn,
+			Nationality:                 item.Nationality,
+			CountryOfResidence:          item.CountryOfResidence,
+			CorporateRegistrationNumber: item.Identification.RegistrationNumber,
+			CorporateCountryRegistered:  item.Identification.CountryRegistered,
 		})
 	}
 	return pscs, nil

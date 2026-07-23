@@ -1,0 +1,14 @@
+{
+  "company_name": "EXAMPLE INSOLVENT TRADING LIMITED",
+  "company_number": "00884099",
+  "company_status": "liquidation",
+  "type": "ltd",
+  "date_of_creation": "1994-08-05",
+  "registered_office_address": {
+    "address_line_1": "2 Example Place",
+    "locality": "London",
+    "postal_code": "E20 1JQ"
+  },
+  "sic_codes": ["70100"],
+  "has_insolvency_history": true
+}

@@ -143,7 +143,19 @@ And on top of all of the above, structural risk heuristics:
   not just the companies the original search terms happen to find.
   This is how a shared director between two otherwise-unconnected
   organizations shows up even when neither one's own name search would
-  ever surface the other. Each UK charity's own registered postcode is
+  ever surface the other. That same per-person appointment history is
+  also scanned for an appointment burst -- three or more distinct
+  companies appointing the same officer within a single week gets an
+  officer_appointment_burst indicator, reusing this fetch rather than
+  needing a separate one. Calibrated against a real Companies House
+  corporate nominee-director service confirmed live with hundreds of
+  register-wide appointments, several landing on the very same day
+  (e.g. three separate companies all gaining the same corporate
+  director on one day in its real history) -- this is exactly how a
+  bulk shelf-company-formation or nominee-director/-secretary service
+  operates, which is often entirely lawful, but is also how a nominee
+  is used to obscure who's actually behind a company, so it's a lead
+  to investigate rather than proof on its own. Each UK charity's own registered postcode is
   also checked against Companies House's advanced search for how many
   companies register-wide share it -- a mail_drop_address indicator
   fires when that count is unusually high, consistent with a
@@ -169,9 +181,16 @@ And on top of all of the above, structural risk heuristics:
   confirmation_statement_overdue indicator flags the same for the
   confirmation statement -- the annual filing confirming current
   officers/PSCs/shareholders, not financials, so a company can be
-  current on one and overdue on the other. Each of these three
-  signals is common and often innocuous on its own, but worth a second
-  look for an otherwise-active organization. Each UK charity's own
+  current on one and overdue on the other. That same company profile
+  also flags whether Companies House has ever recorded an insolvency
+  case against it (liquidation, administration, or a company voluntary
+  arrangement) -- an insolvency_history indicator, checked via a
+  dedicated endpoint only when the profile itself says there's real
+  case data there (confirmed live: it 404s otherwise), so no wasted
+  call for the common case. Each of these four signals is common and
+  often innocuous on its own -- a wind-down or restructuring is often
+  routine and entirely lawful -- but worth a second look for an
+  otherwise-active organization. Each UK charity's own
   trustee count (already fetched, no extra API call needed) is checked
   for governance concentration too: two or fewer trustees gets a
   few_trustees indicator (confirmed live against a real charity with
@@ -206,7 +225,20 @@ And on top of all of the above, structural risk heuristics:
   project doesn't take -- plus any
   hit against either the US sanctions screen or the UK Sanctions List
   (the two overlap heavily but not completely, so both are checked) on
-  any name or person found, and a separate flag when a sanctions
+  any name or person found, plus a match against the ICIJ Offshore
+  Leaks Database (icij_offshore_leaks_match) -- the combined Panama
+  Papers, Paradise Papers, Pandora Papers, Offshore Leaks, and Bahamas
+  Leaks investigations, queried live via ICIJ's free, keyless
+  reconciliation API (confirmed live, no registration found). Only a
+  result ICIJ itself flags as a strong match is used (confirmed live
+  this is far more reliable than that API's own text-similarity score
+  alone, which stays well above zero even for an unrelated name that
+  merely shares a word -- a common name like "John Smith" pulls back
+  several address/entity results this way, correctly none flagged as
+  a strong match). Appearing in one of these leaks covers many
+  entirely legal offshore structures, so on its own this is not
+  evidence of wrongdoing, per ICIJ's own guidance -- weighted lower
+  than a sanctions match accordingly. And a separate flag when a sanctions
   hit's own country (or, for a UK hit, its sanctions regime, when
   that regime happens to be named after a country) is on FATF's
   high-risk or increased-monitoring list (a manually maintained
@@ -218,6 +250,24 @@ And on top of all of the above, structural risk heuristics:
   producing a person_jurisdiction_risk indicator on their own --
   weaker than the sanctions-linked check above, but a signal this tool
   would otherwise never surface at all.
+  Each active corporate PSC (a beneficial owner that's itself a
+  company, not a person) also gets its own PSC chain followed up to
+  three hops further via Companies House's registration-number
+  linkage, collecting every distinct country the chain's companies
+  are registered in. Confirmed live against the real Tesco corporate
+  group that a chain can legitimately end without ever reaching an
+  individual at all (Tesco Plc, at the top of Tesco Stores Limited's
+  ownership chain, has zero PSCs of its own -- UK law exempts
+  already-exchange-regulated public companies from PSC reporting), so
+  this deliberately does NOT flag on chain length or on failing to
+  resolve to a person. Instead a multi_jurisdiction_ownership
+  indicator fires only when the chain crosses two or more distinct
+  registration countries (e.g. UK -> Jersey -> BVI) -- a same-country
+  domestic group like Tesco's (England -> England) does not trigger
+  this. Layering ownership across borders is a known technique for
+  obscuring ultimate control, though multinational corporate groups
+  also legitimately span jurisdictions for tax or regulatory reasons,
+  so this is a lead to investigate, not proof on its own.
   Officer/trustee names sourced from Companies House and the UK
   Charity Commission are also checked against Companies House's
   disqualified-directors register -- unlike every other indicator here
@@ -689,6 +739,11 @@ kept out of `go test` and shouldn't be wired into CI on a schedule.
 ## Data license note
 
 SEC EDGAR filings are US government works and are in the public domain.
+The ICIJ Offshore Leaks Database (queried live for the
+icij_offshore_leaks_match indicator) is published under the Open
+Database License with attribution to the International Consortium of
+Investigative Journalists -- every match this tool reports names ICIJ
+and the database explicitly in its evidence text for that reason.
 Once OpenCorporates data is integrated in Phase 2, any *combined* output
 dataset will need to be published under the Open Database License (ODbL)
 with attribution to OpenCorporates, per their share-alike terms. The code

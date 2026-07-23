@@ -1,12 +1,230 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
 )
+
+// pscChainFixture serves a fixed one-item PSC response for a given
+// company number, modeled on the same shape confirmed live in
+// internal/companieshouse -- just enough fields for followPSCChain to
+// parse a single corporate PSC (or none at all, for an empty items
+// list terminating the chain).
+func pscChainFixture(t *testing.T, byCompanyNumber map[string]string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	for number, body := range byCompanyNumber {
+		body := body
+		mux.HandleFunc("/company/"+number+"/persons-with-significant-control", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, body)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func corporatePSCJSON(name, country, regNumber string) string {
+	return fmt.Sprintf(`{
+		"items_per_page": 25,
+		"items": [{
+			"name": %q,
+			"kind": "corporate-entity-person-with-significant-control",
+			"natures_of_control": ["ownership-of-shares-75-to-100-percent"],
+			"notified_on": "2016-04-06",
+			"identification": {
+				"country_registered": %q,
+				"registration_number": %q
+			}
+		}],
+		"start_index": 0,
+		"total_results": 1,
+		"active_count": 1,
+		"ceased_count": 0
+	}`, name, country, regNumber)
+}
+
+const emptyPSCJSON = `{"items_per_page": 25, "items": [], "start_index": 0, "total_results": 0, "active_count": 0, "ceased_count": 0}`
+
+func newChainTestClient(t *testing.T, srv *httptest.Server) *companieshouse.Client {
+	t.Helper()
+	c, err := companieshouse.NewClient("test-api-key")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	c.BaseURL = srv.URL
+	return c
+}
+
+func TestFollowPSCChainSameCountryDoesNotCrossJurisdictions(t *testing.T) {
+	// Modeled on the real, live-verified Tesco corporate group: Tesco
+	// Holdings Limited (start) -> Tesco Plc (00445790, England) -> no
+	// PSCs at all (Tesco Plc, an exchange-listed public company, is
+	// exempt from PSC reporting). Every hop is England, so this must
+	// NOT be reported as crossing jurisdictions.
+	srv := pscChainFixture(t, map[string]string{
+		"00445790": emptyPSCJSON,
+	})
+	c := newChainTestClient(t, srv)
+
+	start := companieshouse.PSC{
+		Name:                        "Tesco Holdings Limited",
+		Kind:                        "corporate-entity-person-with-significant-control",
+		CorporateCountryRegistered:  "England",
+		CorporateRegistrationNumber: "00445790",
+	}
+	countries := followPSCChain(c, start, 0)
+	if len(countries) != 1 || countries[0] != "England" {
+		t.Fatalf("countries = %v, want a single England entry (no cross-jurisdiction hop)", countries)
+	}
+}
+
+func TestFollowPSCChainCrossesJurisdictions(t *testing.T) {
+	// A chain that layers ownership across three distinct
+	// jurisdictions: England -> Jersey -> British Virgin Islands.
+	srv := pscChainFixture(t, map[string]string{
+		"00222222": corporatePSCJSON("BVI Holdco Limited", "British Virgin Islands", "00333333"),
+		"00333333": emptyPSCJSON,
+	})
+	c := newChainTestClient(t, srv)
+
+	start := companieshouse.PSC{
+		Name:                        "Jersey Holdco Limited",
+		Kind:                        "corporate-entity-person-with-significant-control",
+		CorporateCountryRegistered:  "Jersey",
+		CorporateRegistrationNumber: "00222222",
+	}
+	countries := followPSCChain(c, start, 0)
+	want := []string{"Jersey", "British Virgin Islands"}
+	if len(countries) != len(want) || countries[0] != want[0] || countries[1] != want[1] {
+		t.Fatalf("countries = %v, want %v", countries, want)
+	}
+}
+
+func TestFollowPSCChainStopsOnCycle(t *testing.T) {
+	// A (contrived, not observed live) ownership cycle -- company A's
+	// PSC is company B, and company B's PSC is company A again. The
+	// visited-registration-number guard must break out rather than
+	// looping until pscChainMaxDepth, and the resulting country list
+	// must not contain a duplicate.
+	srv := pscChainFixture(t, map[string]string{
+		"00000001": corporatePSCJSON("Company A", "England", "00000002"),
+		"00000002": corporatePSCJSON("Company B", "England", "00000001"),
+	})
+	c := newChainTestClient(t, srv)
+
+	start := companieshouse.PSC{
+		Name:                        "Company B",
+		Kind:                        "corporate-entity-person-with-significant-control",
+		CorporateCountryRegistered:  "England",
+		CorporateRegistrationNumber: "00000001",
+	}
+	countries := followPSCChain(c, start, 0)
+	if len(countries) != 1 || countries[0] != "England" {
+		t.Fatalf("countries = %v, want a single deduplicated England entry", countries)
+	}
+}
+
+func TestAppointmentBurstFlagsRealCorporateNomineeDirectorPattern(t *testing.T) {
+	// Modeled directly on real, live-confirmed appointment history for
+	// Companies House officer ID nEggfu04XePBqnRERobPjXjmHGk
+	// ("Corporate Directors Limited"): three separate companies all
+	// gained this same corporate director on 2014-12-09 alone.
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "00000001", CompanyName: "DRONSDALE LTD.", AppointedOn: "2014-12-09"},
+		{CompanyNumber: "00000002", CompanyName: "ROUNDSTONE NETWORK LTD.", AppointedOn: "2014-12-09"},
+		{CompanyNumber: "00000003", CompanyName: "DRUMMAND LTD", AppointedOn: "2014-12-09"},
+		{CompanyNumber: "00000004", CompanyName: "EASTBROOKE DEVELOPMENT LIMITED", AppointedOn: "2014-11-17"},
+	}
+	desc := appointmentBurst(appointments)
+	if desc == "" {
+		t.Fatal("got no flag, want a burst flagged for 3 companies on the same day")
+	}
+	if !strings.Contains(desc, "3 companies") {
+		t.Errorf("desc = %q, want it to report 3 companies", desc)
+	}
+}
+
+func TestAppointmentBurstIgnoresOrdinaryMultiDirectorshipsSpreadOverYears(t *testing.T) {
+	// A real board member of several unrelated companies, but spread
+	// over years rather than clustered in a week -- must not be
+	// flagged, since holding several legitimate directorships over a
+	// career is completely normal.
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "00000001", CompanyName: "FIRST COMPANY LTD", AppointedOn: "2010-01-01"},
+		{CompanyNumber: "00000002", CompanyName: "SECOND COMPANY LTD", AppointedOn: "2014-06-15"},
+		{CompanyNumber: "00000003", CompanyName: "THIRD COMPANY LTD", AppointedOn: "2019-11-30"},
+	}
+	if desc := appointmentBurst(appointments); desc != "" {
+		t.Errorf("got %q, want no flag for directorships spread over years", desc)
+	}
+}
+
+func TestAppointmentBurstDedupesRepeatAppointmentsToSameCompany(t *testing.T) {
+	// The same company number appearing twice within the window (e.g.
+	// a resign-then-reappoint) must count once, not twice, toward the
+	// threshold.
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "00000001", CompanyName: "SAME COMPANY LTD", AppointedOn: "2020-01-01", ResignedOn: "2020-01-02"},
+		{CompanyNumber: "00000001", CompanyName: "SAME COMPANY LTD", AppointedOn: "2020-01-03"},
+		{CompanyNumber: "00000002", CompanyName: "OTHER COMPANY LTD", AppointedOn: "2020-01-02"},
+	}
+	if desc := appointmentBurst(appointments); desc != "" {
+		t.Errorf("got %q, want no flag: only 2 distinct companies, below the threshold of 3", desc)
+	}
+}
+
+func TestAppointmentBurstSkipsUnparseableDates(t *testing.T) {
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "00000001", CompanyName: "A LTD", AppointedOn: "not-a-date"},
+		{CompanyNumber: "00000002", CompanyName: "B LTD", AppointedOn: "also-not-a-date"},
+		{CompanyNumber: "00000003", CompanyName: "C LTD", AppointedOn: "2020-01-01"},
+	}
+	// Must not panic, and the two unparseable entries can't contribute
+	// to any window, so this falls well short of the threshold.
+	if desc := appointmentBurst(appointments); desc != "" {
+		t.Errorf("got %q, want no flag when only 1 of 3 appointments has a parseable date", desc)
+	}
+}
+
+func TestFollowPSCChainStopsWhenNoCorporatePSCFound(t *testing.T) {
+	// The next hop's own PSC is an individual, not another corporate
+	// entity -- the chain must stop there rather than erroring, since
+	// an individual PSC is a normal, legitimate chain ending.
+	srv := pscChainFixture(t, map[string]string{
+		"00444444": `{
+			"items_per_page": 25,
+			"items": [{
+				"name": "Mrs Jane Example",
+				"kind": "individual-person-with-significant-control",
+				"natures_of_control": ["ownership-of-shares-75-to-100-percent"],
+				"notified_on": "2016-04-06"
+			}],
+			"start_index": 0,
+			"total_results": 1,
+			"active_count": 1,
+			"ceased_count": 0
+		}`,
+	})
+	c := newChainTestClient(t, srv)
+
+	start := companieshouse.PSC{
+		Name:                        "Holdco Limited",
+		Kind:                        "corporate-entity-person-with-significant-control",
+		CorporateCountryRegistered:  "England",
+		CorporateRegistrationNumber: "00444444",
+	}
+	countries := followPSCChain(c, start, 0)
+	if len(countries) != 1 || countries[0] != "England" {
+		t.Fatalf("countries = %v, want a single England entry (chain ends at an individual PSC)", countries)
+	}
+}
 
 func int64Ptr(v int64) *int64 { return &v }
 

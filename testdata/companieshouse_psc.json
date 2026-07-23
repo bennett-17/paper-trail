@@ -19,10 +19,23 @@
     {
       "kind": "statement",
       "notified_on": "2020-01-01"
+    },
+    {
+      "name": "Example Holdings Limited",
+      "kind": "corporate-entity-person-with-significant-control",
+      "natures_of_control": ["ownership-of-shares-75-to-100-percent"],
+      "notified_on": "2016-04-06",
+      "identification": {
+        "legal_form": "Limited By Shares",
+        "legal_authority": "United Kingdom (England)",
+        "country_registered": "England",
+        "place_registered": "Companies House",
+        "registration_number": "00243011"
+      }
     }
   ],
   "start_index": 0,
-  "total_results": 3,
-  "active_count": 1,
+  "total_results": 4,
+  "active_count": 2,
   "ceased_count": 1
 }

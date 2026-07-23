@@ -1,0 +1,32 @@
+{
+  "q0": {
+    "result": [
+      {
+        "id": "11011863",
+        "name": "MOSSACK FONSECA & CO.",
+        "description": "Intermediary node extracted from the Panama Papers data.",
+        "match": true,
+        "score": 100.0,
+        "types": [
+          {
+            "id": "https://offshoreleaks.icij.org/schema/oldb/intermediary",
+            "name": "Intermediary"
+          }
+        ]
+      },
+      {
+        "id": "11013508",
+        "name": "MOSSACK FONSECA & CO. CHILE",
+        "description": "Intermediary node extracted from the Panama Papers data.",
+        "match": false,
+        "score": 75.0,
+        "types": [
+          {
+            "id": "https://offshoreleaks.icij.org/schema/oldb/intermediary",
+            "name": "Intermediary"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -210,6 +210,76 @@ func TestGetCompanyParsesDormantAndOverdueAccounts(t *testing.T) {
 	}
 }
 
+func TestGetCompanyParsesHasInsolvencyHistory(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/00884099", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_company_insolvent.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	company, err := c.GetCompany("00884099")
+	if err != nil {
+		t.Fatalf("GetCompany: %v", err)
+	}
+	if company.Status != "liquidation" {
+		t.Errorf("Status = %q, want liquidation", company.Status)
+	}
+	if !company.HasInsolvencyHistory {
+		t.Error("HasInsolvencyHistory = false, want true")
+	}
+}
+
+func TestGetInsolvencyParsesCasesAndPractitioners(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/00884099/insolvency", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "companieshouse_insolvency.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	cases, err := c.GetInsolvency("00884099")
+	if err != nil {
+		t.Fatalf("GetInsolvency: %v", err)
+	}
+	if len(cases) != 1 {
+		t.Fatalf("got %d cases, want 1", len(cases))
+	}
+	if cases[0].Type != "creditors-voluntary-liquidation" {
+		t.Errorf("Type = %q", cases[0].Type)
+	}
+	if len(cases[0].Dates) != 2 || cases[0].Dates[0].Type != "wound-up-on" || cases[0].Dates[0].Date != "1994-08-05" {
+		t.Errorf("Dates = %+v", cases[0].Dates)
+	}
+	// The fixture's second practitioner has a blank (single-space)
+	// name, matching a real one confirmed live -- it must be dropped,
+	// not returned as a blank entry.
+	if len(cases[0].Practitioners) != 1 || cases[0].Practitioners[0] != "Ronan Duffy" {
+		t.Errorf("Practitioners = %v, want just [\"Ronan Duffy\"] (blank name dropped)", cases[0].Practitioners)
+	}
+}
+
+func TestGetInsolvencyReturns404ForACompanyWithNoInsolvencyHistory(t *testing.T) {
+	// Confirmed live: a company with no insolvency involvement at all
+	// gets a plain 404 from this endpoint, distinct from a company
+	// whose has_insolvency_history is true but has no active cases
+	// (which returns 200 with an empty cases array instead).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/00000001/insolvency", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"status":404,"error":"Not Found"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	if _, err := c.GetInsolvency("00000001"); err == nil {
+		t.Fatal("expected an error for a company with no insolvency history")
+	}
+}
+
 // TestGetCompanyZeroPadsNumber guards against a real bug found live:
 // the UK Charity Commission's CompaniesHouseNumber field returns
 // company numbers without leading zeros (e.g. "4325234"), but this API
@@ -357,10 +427,10 @@ func TestGetPersonsWithSignificantControlParsesCurrentAndFormer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPersonsWithSignificantControl: %v", err)
 	}
-	// The fixture has 3 items; the third is a "statement" entry with no
-	// name and must be dropped, not returned as a blank-named PSC.
-	if len(pscs) != 2 {
-		t.Fatalf("got %d PSCs, want 2 (the nameless statement entry should be dropped): %+v", len(pscs), pscs)
+	// The fixture has 4 items; one is a "statement" entry with no name
+	// and must be dropped, not returned as a blank-named PSC.
+	if len(pscs) != 3 {
+		t.Fatalf("got %d PSCs, want 3 (the nameless statement entry should be dropped): %+v", len(pscs), pscs)
 	}
 	if pscs[0].Name != "Mrs Jane Example" || pscs[0].CeasedOn != "" {
 		t.Errorf("pscs[0] = %+v", pscs[0])
@@ -370,6 +440,20 @@ func TestGetPersonsWithSignificantControlParsesCurrentAndFormer(t *testing.T) {
 	}
 	if pscs[1].Name != "Mr John Sample" || pscs[1].CeasedOn != "2018-07-17" {
 		t.Errorf("pscs[1] = %+v, want a ceased_on set (a former PSC)", pscs[1])
+	}
+	// The fourth (real) item is a corporate PSC -- confirmed live
+	// against a real example (Tesco Stores Limited's PSC, Tesco
+	// Holdings Limited) -- its own registration number must come
+	// through, since that's what lets a PSC chain be followed further.
+	corp := pscs[2]
+	if corp.Name != "Example Holdings Limited" || corp.Kind != "corporate-entity-person-with-significant-control" {
+		t.Fatalf("pscs[2] = %+v, want the corporate PSC", corp)
+	}
+	if corp.CorporateRegistrationNumber != "00243011" {
+		t.Errorf("CorporateRegistrationNumber = %q, want 00243011", corp.CorporateRegistrationNumber)
+	}
+	if corp.CorporateCountryRegistered != "England" {
+		t.Errorf("CorporateCountryRegistered = %q, want England", corp.CorporateCountryRegistered)
 	}
 }
 

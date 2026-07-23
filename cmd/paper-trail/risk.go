@@ -37,6 +37,12 @@ const mailDropAddressThreshold = 1000
 // decisions or funds -- two or fewer is the threshold used here.
 const fewTrusteesThreshold = 2
 
+// pscChainMaxDepth bounds how many corporate-PSC hops followPSCChain
+// will follow beyond the root company, both to keep the extra API
+// calls bounded and to guard against an ownership cycle (not observed
+// live, but cheap to guard against regardless).
+const pscChainMaxDepth = 3
+
 // highOfficerCompensationRatio and highOfficerCompensationMinExpenses
 // together gate the high_officer_compensation indicator: total
 // compensation to current officers/directors/trustees/key employees
@@ -821,14 +827,15 @@ func runRisk(args []string) {
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these
-	// four are independent of each other and safe to run concurrently.
-	// US sanctions, UK sanctions, and the disqualified-directors check
-	// each screen every query term plus every distinct person name
-	// found; EDGAR full-text mentions screens query terms only (see its
-	// own comment below for why). Merged in the same fixed order as
-	// before so output stays deterministic.
-	var usExtra, ukSanctionsExtra, dqExtra, ftExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, dqNotes, ftNotes []string
+	// five are independent of each other and safe to run concurrently.
+	// US sanctions, UK sanctions, ICIJ Offshore Leaks, and the
+	// disqualified-directors check each screen every query term plus
+	// every distinct person name found; EDGAR full-text mentions
+	// screens query terms only (see its own comment below for why).
+	// Merged in the same fixed order as before so output stays
+	// deterministic.
+	var usExtra, ukSanctionsExtra, dqExtra, ftExtra, icijExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, dqNotes, ftNotes, icijNotes []string
 	var wg2 sync.WaitGroup
 
 	wg2.Add(1)
@@ -851,16 +858,23 @@ func runRisk(args []string) {
 		defer wg2.Done()
 		ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, *limit, progress)
 	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
+	}()
 	wg2.Wait()
 
 	extra = append(extra, usExtra...)
 	extra = append(extra, ukSanctionsExtra...)
 	extra = append(extra, dqExtra...)
 	extra = append(extra, ftExtra...)
+	extra = append(extra, icijExtra...)
 	notes = append(notes, usNotes...)
 	notes = append(notes, ukSanctionsNotes...)
 	notes = append(notes, dqNotes...)
 	notes = append(notes, ftNotes...)
+	notes = append(notes, icijNotes...)
 
 	// Cross-referencing runs once over the combined pool from every
 	// query term -- this is the whole point of taking multiple terms:

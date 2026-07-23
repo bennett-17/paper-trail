@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -478,6 +479,35 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 							Evidence:    "confirmation statement overdue",
 						})
 					}
+					// Insolvency history: HasInsolvencyHistory is cheap to
+					// check here (it's on the same profile fetched above),
+					// and only true when the dedicated insolvency endpoint
+					// actually has case data -- confirmed live that it
+					// 404s otherwise, so this avoids a wasted call for the
+					// common case. A liquidation/administration on an
+					// otherwise-active organization's linked company is
+					// worth a second look, though many perfectly legitimate
+					// companies wind up in solvent/voluntary liquidation
+					// too (e.g. as part of an ordinary corporate
+					// restructuring), so this alone isn't proof of
+					// anything wrong.
+					if company.HasInsolvencyHistory {
+						if cases, err := chClient.GetInsolvency(detail.CompaniesHouseNumber); err != nil {
+							chNote("%s (company %s) insolvency: %v", detail.Name, detail.CompaniesHouseNumber, err)
+						} else if len(cases) > 0 {
+							types := make([]string, 0, len(cases))
+							for _, ic := range cases {
+								types = append(types, ic.Type)
+							}
+							r.extra = append(r.extra, risk.Indicator{
+								Code:        "insolvency_history",
+								Description: "This entity's linked Companies House company has one or more recorded insolvency cases (liquidation, administration, or a company voluntary arrangement) -- often a routine, lawful wind-down or restructuring, but worth a second look for an otherwise-active organization, especially alongside other indicators",
+								Weight:      1,
+								Entities:    []string{companyLabel},
+								Evidence:    strings.Join(types, ", "),
+							})
+						}
+					}
 				}
 			}
 			// ID includes the suffix -- confirmed a real bug fetching
@@ -549,6 +579,36 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				}
 			}
 
+			// Multi-jurisdiction PSC ownership-chain layering:
+			// confirmed live against the real Tesco corporate group
+			// that a corporate PSC's own PSC chain can legitimately
+			// terminate without ever reaching an individual (Tesco
+			// Plc, at the top of that chain, has zero PSCs at all --
+			// UK law exempts already-exchange-regulated public
+			// companies from PSC reporting), so this deliberately
+			// does NOT flag on chain length or on failing to resolve
+			// to a person. Instead it flags when the chain of
+			// corporate PSCs crosses 2+ distinct registration
+			// countries (e.g. UK -> Jersey -> BVI) -- a same-country
+			// domestic group like Tesco's (England -> England) does
+			// not trigger this.
+			for _, p := range activePSCs {
+				if p.Kind != "corporate-entity-person-with-significant-control" || p.CorporateRegistrationNumber == "" {
+					continue
+				}
+				countries := followPSCChain(chClient, p, limit)
+				if len(countries) < 2 {
+					continue
+				}
+				r.extra = append(r.extra, risk.Indicator{
+					Code:        "multi_jurisdiction_ownership",
+					Description: "This entity's corporate beneficial-ownership chain crosses multiple registration jurisdictions -- layering ownership across borders is a known technique for obscuring who ultimately controls an entity, though multinational corporate groups also legitimately span jurisdictions for tax or regulatory reasons",
+					Weight:      2,
+					Entities:    []string{e.Label()},
+					Evidence:    fmt.Sprintf("ownership chain: %s", strings.Join(countries, " -> ")),
+				})
+			}
+
 			// Officer/PSC jurisdiction risk: nationality and country of
 			// residence are both confirmed live on real officer/PSC
 			// records but otherwise unused. Unlike the existing
@@ -608,6 +668,17 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 					chNote("%s appointments for %s: %v", o.Name, detail.Name, err)
 					continue
 				}
+				// Appointment-burst check reuses this same fetch --
+				// no extra API call needed.
+				if desc := appointmentBurst(appointments); desc != "" {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "officer_appointment_burst",
+						Description: "An officer of this entity was appointed to several other companies within a short span -- a known nominee-director/shelf-company-formation pattern (confirmed live against a real UK corporate nominee-director service with hundreds of register-wide appointments, several landing on the very same day), though bulk company-formation services also use this same pattern lawfully, so it's a lead to investigate rather than proof on its own",
+						Weight:      2,
+						Entities:    []string{e.Label()},
+						Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
+					})
+				}
 				for _, appt := range appointments {
 					if appt.ResignedOn != "" || sameCompanyNumber(appt.CompanyNumber, detail.CompaniesHouseNumber) || fannedOut[appt.CompanyNumber] {
 						continue // former appointments, the charity's own company itself, and dupes across officers
@@ -622,6 +693,58 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 		return r
 	})
 	return flattenQueryResults(results)
+}
+
+// followPSCChain follows a corporate PSC's own persons-with-
+// significant-control chain up to pscChainMaxDepth hops beyond the
+// given starting PSC, returning every distinct country_registered
+// value encountered along the way (starting with the given PSC's own
+// country). A visited-registration-number set guards against an
+// ownership cycle; the chain simply stops (rather than erroring) the
+// moment a hop's PSC lookup fails, returns no active corporate PSC of
+// its own (e.g. an individual PSC, or no PSCs at all -- both
+// confirmed live to be normal, legitimate endings, not errors), or
+// would revisit an already-seen registration number.
+func followPSCChain(chClient *companieshouse.Client, start companieshouse.PSC, limit int) []string {
+	var countries []string
+	seenCountry := map[string]bool{}
+	addCountry := func(country string) {
+		country = strings.TrimSpace(country)
+		if country == "" || seenCountry[country] {
+			return
+		}
+		seenCountry[country] = true
+		countries = append(countries, country)
+	}
+
+	visited := map[string]bool{}
+	current := start
+	addCountry(current.CorporateCountryRegistered)
+	for depth := 0; depth < pscChainMaxDepth; depth++ {
+		regNumber := current.CorporateRegistrationNumber
+		if regNumber == "" || visited[regNumber] {
+			break
+		}
+		visited[regNumber] = true
+
+		pscs, err := chClient.GetPersonsWithSignificantControl(regNumber, limit)
+		if err != nil {
+			break
+		}
+		var next *companieshouse.PSC
+		for i := range pscs {
+			if pscs[i].CeasedOn == "" && pscs[i].Kind == "corporate-entity-person-with-significant-control" {
+				next = &pscs[i]
+				break
+			}
+		}
+		if next == nil {
+			break
+		}
+		addCountry(next.CorporateCountryRegistered)
+		current = *next
+	}
+	return countries
 }
 
 // financialAnomalyRatio is how large a year-over-year multiple in
@@ -739,4 +862,68 @@ func frequentRenaming(previousNames []companieshouse.PreviousName) string {
 		return ""
 	}
 	return fmt.Sprintf("%d name changes between %s and %s (~%.0f days)", len(previousNames), oldest.Format("2006-01-02"), mostRecent.Format("2006-01-02"), span.Hours()/24)
+}
+
+// appointmentBurstWindow and appointmentBurstThreshold are calibrated
+// against a real UK corporate nominee-director service confirmed live
+// on Companies House (officer ID nEggfu04XePBqnRERobPjXjmHGk,
+// "Corporate Directors Limited", 540 appointments register-wide over
+// its history): three separate companies (Dronsdale Ltd, Roundstone
+// Network Ltd, and Drummand Ltd) all gained this same corporate
+// director on 2014-12-09 alone, one of several same-day or
+// same-week clusters in its real appointment history. Three or more
+// distinct companies within a week is a real, recurring pattern for a
+// bulk shelf-company-formation/nominee-director (or -secretary)
+// service, not a hypothetical threshold.
+const appointmentBurstWindow = 7 * 24 * time.Hour
+const appointmentBurstThreshold = 3
+
+// appointmentBurst scans one officer's full register-wide appointment
+// history (as returned by GetOfficerAppointments) for the largest
+// number of distinct companies (deduped by company number, in case an
+// officer resigns and is later reappointed to the same one) that
+// appointed them within any single appointmentBurstWindow-wide span,
+// returning a human-readable description once that count reaches
+// appointmentBurstThreshold, or "" otherwise. A bulk shelf-company-
+// formation or nominee-director/-secretary service signing onto
+// several newly formed companies in the same week is common and often
+// entirely lawful (confirmed live: this is exactly how "Corporate
+// Directors Limited" above operates), but it's also how a nominee is
+// used to obscure who's actually behind a company, so it's worth
+// surfacing as a lead either way.
+func appointmentBurst(appointments []companieshouse.Appointment) string {
+	type dated struct {
+		when   time.Time
+		number string
+		name   string
+	}
+	var dates []dated
+	for _, a := range appointments {
+		t, err := time.Parse("2006-01-02", a.AppointedOn)
+		if err != nil {
+			continue
+		}
+		dates = append(dates, dated{when: t, number: a.CompanyNumber, name: a.CompanyName})
+	}
+	sort.Slice(dates, func(i, j int) bool { return dates[i].when.Before(dates[j].when) })
+
+	var bestNames []string
+	for i := range dates {
+		seen := map[string]bool{}
+		var names []string
+		for j := i; j < len(dates) && dates[j].when.Sub(dates[i].when) <= appointmentBurstWindow; j++ {
+			if seen[dates[j].number] {
+				continue
+			}
+			seen[dates[j].number] = true
+			names = append(names, dates[j].name)
+		}
+		if len(names) > len(bestNames) {
+			bestNames = names
+		}
+	}
+	if len(bestNames) < appointmentBurstThreshold {
+		return ""
+	}
+	return fmt.Sprintf("appointed to %d companies within %d days: %s", len(bestNames), int(appointmentBurstWindow/(24*time.Hour)), strings.Join(bestNames, ", "))
 }
