@@ -398,7 +398,20 @@ And on top of all of the above, structural risk heuristics:
   exclusive with `--diff`/`--watch`/`--fail-on`/`--webhook` (all assume
   one overall score); `--top`/`--min-weight`/`--indicator`/
   `--min-corroboration`/`--summary`/graph exports are ignored in this
-  mode, since none apply to a one-row-per-entity scorecard. `--top <n>` shows only the
+  mode, since none apply to a one-row-per-entity scorecard.
+  `--serve <port>` starts a local web server at
+  `http://127.0.0.1:<port>` (always loopback-only, never reachable
+  from the network) with a search form instead of running one scan --
+  type one name per line and get the same HTML report `--report-html`
+  writes to a file, rendered in the browser instead. Each search is its
+  own independent scan through the same live-query pipeline the CLI
+  itself uses, not a background job or a database, so it takes as long
+  as the equivalent command-line query would. Runs until interrupted
+  (Ctrl+C); takes no `<query>`/`--input-file`/`--batch` and is mutually
+  exclusive with `--diff`/`--watch`/`--fail-on`/`--webhook`, though
+  `--limit`/`--cache-ttl`/`--exclude`/`--exclude-file` still apply to
+  every search submitted through the form.
+  `--top <n>` shows only the
   `<n>` highest-weight indicators, noting how many were hidden.
   `--min-weight <n>` and `--indicator <codes>` filter by relevance
   instead of count -- only indicators at or above a weight, or matching
@@ -688,6 +701,11 @@ go run ./cmd/paper-trail risk --input-file watchlist.txt --watch 6h --webhook ht
 # between two unrelated ones on the list won't misleadingly read as a
 # connection just because they were checked in the same run
 go run ./cmd/paper-trail risk --input-file vendors.txt --batch --quiet > scorecard.csv
+
+# Start a local web UI instead of the CLI -- a search form at
+# http://127.0.0.1:8080, always loopback-only, for typing in names and
+# browsing results without re-invoking the command each time
+go run ./cmd/paper-trail risk --serve 8080
 
 # Set defaults for flags you always use -- explicit CLI flags still override
 cat > ~/.paper-trailrc <<'RCEOF'

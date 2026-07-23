@@ -967,6 +967,7 @@ func runRisk(args []string) {
 	webhookURL := fs.String("webhook", "", "POST a JSON alert to this URL when --fail-on's threshold is met (requires --fail-on, unless --watch is also set -- see --watch) -- a hooks.slack.com or discord.com/api/webhooks URL gets that platform's own minimal message format, anything else gets the full compact summary as JSON")
 	watch := fs.Duration("watch", 0, "re-run this scan every this-long, forever, until interrupted (Ctrl+C) -- each run is automatically diffed against the previous one (no need to also pass --diff) and rewritten to the same --output/--json/--graph/etc. destinations. Minimum 1m, to stay polite to the public sources being queried. Mutually exclusive with --fail-on (a continuous monitor shouldn't exit the process); combine with --webhook instead to get alerted only when a run's diff shows new entities/indicators since the last check")
 	batch := fs.Bool("batch", false, "score every <query>/--input-file entry independently instead of cross-referencing them together -- one scorecard row per entity (query, entities found, score, confidence, indicator count, top indicator) written as CSV (or a JSON array with --json) to --output/stdout, for screening a list of vendors/donors/grantees where you want N separate verdicts, not one combined report. Mutually exclusive with --diff/--watch/--fail-on/--webhook (all assume a single overall score); --top/--min-weight/--indicator/--min-corroboration/--summary/--graph/--html/--graph-csv/--graph-graphml/--entities-csv are ignored in this mode")
+	servePort := fs.String("serve", "", "start a local web server at http://127.0.0.1:<port> (always loopback-only, regardless of what's passed) with a search form instead of running one scan -- type one name per line and get the same HTML report --report-html writes to a file, rendered in the browser instead, one independent scan per search. Runs until interrupted (Ctrl+C). Takes no <query>/--input-file/--batch/--diff/--watch/--fail-on/--webhook -- --limit/--cache-ttl/--exclude/--exclude-file still apply to every search")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
@@ -982,7 +983,17 @@ func runRisk(args []string) {
 		}
 	}
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+
+	if *servePort != "" && (len(positional) > 0 || *inputFile != "" || *batch) {
+		fmt.Fprintln(os.Stderr, "Error: --serve takes no <query>/--input-file/--batch -- queries come from the search form in the browser instead")
+		os.Exit(1)
+	}
+	if *servePort != "" && (*diffPath != "" || *watch != 0 || *failOn != "" || *webhookURL != "") {
+		fmt.Fprintln(os.Stderr, "Error: --serve is mutually exclusive with --diff/--watch/--fail-on/--webhook -- it never completes a single run to diff/watch/gate on")
+		os.Exit(1)
+	}
+
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -992,7 +1003,7 @@ func runRisk(args []string) {
 		}
 		queries = append(queries, fromFile...)
 	}
-	if len(queries) < 1 {
+	if len(queries) < 1 && *servePort == "" {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
 	}
@@ -1054,6 +1065,11 @@ func runRisk(args []string) {
 
 	if *batch {
 		runRiskBatch(queries, *limit, cache, cacheTTL, excludeTerms, *output, *asJSON, *quiet)
+		return
+	}
+
+	if *servePort != "" {
+		runRiskServe(*servePort, *limit, cache, cacheTTL, excludeTerms, *quiet)
 		return
 	}
 

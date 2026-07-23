@@ -85,7 +85,7 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
 
@@ -590,6 +590,20 @@ at once. Mutually exclusive with --diff/--watch/--fail-on/--webhook
 --min-weight/--indicator/--min-corroboration/--summary/--graph/--html/
 --graph-csv/--graph-graphml/--entities-csv are simply ignored in this
 mode, since none of them apply to a one-row-per-entity scorecard.
+--serve <port> starts a local web server at http://127.0.0.1:<port>
+(always loopback-only, regardless of what's passed -- there's no
+legitimate reason for this local investigation tool to be reachable
+from the network) with a search form instead of running one scan.
+Type one name per line and submit to get the same HTML report
+--report-html writes to a file, rendered in the browser instead --
+each search is its own independent scan through the same live-query
+pipeline the CLI itself uses, not a background job or a database, so
+it takes as long as the same query would from the command line. Runs
+until interrupted (Ctrl+C). Takes no <query>/--input-file/--batch, and
+is mutually exclusive with --diff/--watch/--fail-on/--webhook (none of
+which make sense when there's no single run to diff/watch/gate on);
+--limit/--cache-ttl/--exclude/--exclude-file still apply to every
+search submitted through the form.
 --top <n> shows only the <n> highest-weight indicators (already sorted
 highest-first) instead of the full list, noting how many were hidden --
 useful when a large scan turns up dozens of low-weight indicators and

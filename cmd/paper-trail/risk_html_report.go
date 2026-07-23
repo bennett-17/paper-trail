@@ -52,16 +52,12 @@ func confidenceClass(band string) string {
 	}
 }
 
-// writeReportHTML writes a single self-contained HTML file rendering
-// the full risk report (indicators, evidence, corroborations, and the
-// diff against a previous run if any) -- unlike --html/--graph (the
-// entity/indicator graph view), this mirrors the full text/--json
-// report itself, for opening in a browser or handing to someone else
-// who doesn't have paper-trail installed. No server, no CDN, no
-// external JS/CSS -- everything needed is embedded in the file, same
-// approach as internal/graph's WriteHTML.
-func writeReportHTML(report riskReportJSON, diff *riskReportDiff, diffSource, path string) error {
-	view := reportHTMLView{
+// newReportHTMLView builds the view reportBodyTemplate renders from a
+// riskReportJSON -- shared by writeReportHTML (the --report-html file
+// output) and --serve's per-request handler, so both go through the
+// exact same report rendering.
+func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource string) reportHTMLView {
+	return reportHTMLView{
 		Queries:       report.Queries,
 		Entities:      report.Entities,
 		Notes:         report.Notes,
@@ -71,12 +67,36 @@ func writeReportHTML(report riskReportJSON, diff *riskReportDiff, diffSource, pa
 		DiffSource:    diffSource,
 		GeneratedAt:   time.Now().Format("2006-01-02 15:04:05 MST"),
 	}
+}
 
-	tmpl, err := template.New("report").Funcs(template.FuncMap{
+// reportTemplate parses page (a full HTML document's worth of
+// template text, e.g. reportPageTemplate or --serve's
+// servePageTemplate) together with reportBodyTemplate, which defines
+// the "reportBody" named block both invoke via
+// {{template "reportBody" .}} to render the actual report content --
+// so the report itself (indicators, evidence, corroborations, diff)
+// is written once and shared between the file-output and served-page
+// cases, not duplicated.
+func reportTemplate(name, page string) (*template.Template, error) {
+	return template.New(name).Funcs(template.FuncMap{
 		"weightClass":     weightClass,
 		"confidenceClass": confidenceClass,
 		"sub":             func(a, b int) int { return a - b },
-	}).Parse(reportHTMLTemplate)
+	}).Parse(page + reportBodyTemplate)
+}
+
+// writeReportHTML writes a single self-contained HTML file rendering
+// the full risk report (indicators, evidence, corroborations, and the
+// diff against a previous run if any) -- unlike --html/--graph (the
+// entity/indicator graph view), this mirrors the full text/--json
+// report itself, for opening in a browser or handing to someone else
+// who doesn't have paper-trail installed. No server, no CDN, no
+// external JS/CSS -- everything needed is embedded in the file, same
+// approach as internal/graph's WriteHTML.
+func writeReportHTML(report riskReportJSON, diff *riskReportDiff, diffSource, path string) error {
+	view := newReportHTMLView(report, diff, diffSource)
+
+	tmpl, err := reportTemplate("report", reportPageTemplate)
 	if err != nil {
 		return err
 	}
@@ -89,13 +109,9 @@ func writeReportHTML(report riskReportJSON, diff *riskReportDiff, diffSource, pa
 	return tmpl.Execute(f, view)
 }
 
-const reportHTMLTemplate = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>paper-trail risk report</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
+// reportStyle is the CSS shared by --report-html's file output and
+// --serve's browser page, so the two always look consistent.
+const reportStyle = `<style>
   :root {
     color-scheme: light dark;
     --bg: #ffffff;
@@ -189,10 +205,29 @@ const reportHTMLTemplate = `<!DOCTYPE html>
     color: var(--muted);
   }
   .diff-score { font-weight: 600; }
-</style>
+</style>`
+
+// reportPageTemplate is the full HTML document --report-html writes
+// to a file: a normal page wrapping reportBodyTemplate's "reportBody"
+// block.
+const reportPageTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paper-trail risk report</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+` + reportStyle + `
 </head>
 <body>
+{{template "reportBody" .}}
+</body>
+</html>
+`
 
+// reportBodyTemplate defines the "reportBody" named block -- the
+// report content itself, shared verbatim between reportPageTemplate
+// (--report-html's file output) and --serve's servePageTemplate.
+const reportBodyTemplate = `{{define "reportBody"}}
 <h1>Risk assessment for {{range $i, $q := .Queries}}{{if $i}}, {{end}}&#34;{{$q}}&#34;{{end}}</h1>
 <div class="meta">Generated {{.GeneratedAt}} &middot; {{len .Entities}} entit{{if ne (len .Entities) 1}}ies{{else}}y{{end}} found</div>
 
@@ -271,7 +306,4 @@ const reportHTMLTemplate = `<!DOCTYPE html>
 <div class="disclaimer">
   This is a lead-generation report, not a finding &mdash; verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.
 </div>
-
-</body>
-</html>
-`
+{{end}}`
