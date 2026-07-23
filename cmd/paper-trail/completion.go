@@ -23,7 +23,7 @@ var completionFlags = map[string]string{
 	"uksanctions":    "--limit --json",
 	"companieshouse": "--number --officer --limit --json",
 	"person":         "--limit --json",
-	"risk":           "--input-file --limit --output --graph --html --graph-csv --entities-csv --graph-graphml --cache-ttl --diff --top --min-weight --indicator --min-corroboration --exclude --exclude-file --fail-on --webhook --summary --no-color --quiet --json",
+	"risk":           "--input-file --limit --output --graph --html --graph-csv --entities-csv --graph-graphml --cache-ttl --diff --watch --top --min-weight --indicator --min-corroboration --exclude --exclude-file --fail-on --webhook --summary --no-color --quiet --json",
 }
 
 const bashCompletionScript = `# paper-trail bash completion

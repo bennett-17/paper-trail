@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bennett-17/paper-trail/internal/risk"
 )
@@ -299,6 +300,46 @@ func TestValidateFailOnAcceptsKnownBandsCaseInsensitively(t *testing.T) {
 func TestValidateFailOnRejectsUnknownValue(t *testing.T) {
 	if err := validateFailOn("SEVERE"); err == nil {
 		t.Error("expected an error for an unrecognized --fail-on value")
+	}
+}
+
+func TestValidateWatchFlagsAllowsUnwatchedDefaults(t *testing.T) {
+	if err := validateWatchFlags(0, "", ""); err != nil {
+		t.Errorf("validateWatchFlags(0, \"\", \"\") = %v, want nil", err)
+	}
+	if err := validateWatchFlags(0, "HIGH", ""); err != nil {
+		t.Errorf("--fail-on alone (no --watch) should still be allowed: %v", err)
+	}
+	if err := validateWatchFlags(0, "HIGH", "https://example.com/hook"); err != nil {
+		t.Errorf("--webhook with --fail-on (no --watch) should still be allowed: %v", err)
+	}
+}
+
+func TestValidateWatchFlagsRejectsFailOnTogetherWithWatch(t *testing.T) {
+	if err := validateWatchFlags(time.Hour, "HIGH", ""); err == nil {
+		t.Error("expected an error combining --watch with --fail-on")
+	}
+}
+
+func TestValidateWatchFlagsRejectsIntervalBelowMinimum(t *testing.T) {
+	if err := validateWatchFlags(30*time.Second, "", ""); err == nil {
+		t.Error("expected an error for a --watch interval under the 1m floor")
+	}
+	if err := validateWatchFlags(watchMinInterval, "", ""); err != nil {
+		t.Errorf("the minimum interval itself should be accepted: %v", err)
+	}
+}
+
+func TestValidateWatchFlagsAllowsWebhookWithWatchAloneNoFailOn(t *testing.T) {
+	// --watch's own alert trigger doesn't need --fail-on at all.
+	if err := validateWatchFlags(time.Hour, "", "https://example.com/hook"); err != nil {
+		t.Errorf("validateWatchFlags(1h, \"\", webhook) = %v, want nil", err)
+	}
+}
+
+func TestValidateWatchFlagsRejectsWebhookWithNeitherFailOnNorWatch(t *testing.T) {
+	if err := validateWatchFlags(0, "", "https://example.com/hook"); err == nil {
+		t.Error("expected an error for --webhook with neither --fail-on nor --watch set")
 	}
 }
 

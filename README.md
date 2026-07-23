@@ -225,7 +225,16 @@ And on top of all of the above, structural risk heuristics:
   project doesn't take -- plus any
   hit against either the US sanctions screen or the UK Sanctions List
   (the two overlap heavily but not completely, so both are checked) on
-  any name or person found, plus a match against the ICIJ Offshore
+  any name or person found, plus a third, independent designee list --
+  the UN Security Council Consolidated Sanctions List
+  (un_sanctions_match). Unlike the US/UK sources, the UN publishes no
+  live per-query search API at all, just a single bulk file (confirmed
+  live: ~1,000 individuals and entities combined), so this one matches
+  client-side against the whole list, using the same full-token-set
+  name comparison as shared_person_fuzzy -- and only for a name of two
+  or more words, since a single-word match against ~1,000 entries with
+  nothing narrowing the field server-side first (the way the US/UK
+  screens' own query already does) would be too noisy to trust. Plus a match against the ICIJ Offshore
   Leaks Database (icij_offshore_leaks_match) -- the combined Panama
   Papers, Paradise Papers, Pandora Papers, Offshore Leaks, and Bahamas
   Leaks investigations, queried live via ICIJ's free, keyless
@@ -267,7 +276,16 @@ And on top of all of the above, structural risk heuristics:
   this. Layering ownership across borders is a known technique for
   obscuring ultimate control, though multinational corporate groups
   also legitimately span jurisdictions for tax or regulatory reasons,
-  so this is a lead to investigate, not proof on its own.
+  so this is a lead to investigate, not proof on its own. That same
+  chain walk also checks whether it ever loops back to the entity it
+  started from -- an ownership_loop indicator, fired when a company's
+  own traced PSC chain eventually points back to that same company
+  (i.e. it indirectly, and impossibly, ends up owning a stake in
+  itself). UK company law itself restricts the simplest version of
+  this directly, so a genuine hit is rare and higher-weighted than
+  multi_jurisdiction_ownership -- a known technique for obscuring
+  ultimate control in more complex or offshore structures, though a
+  data or filing error somewhere in the chain is also possible.
   Officer/trustee names sourced from Companies House and the UK
   Charity Commission are also checked against Companies House's
   disqualified-directors register -- unlike every other indicator here
@@ -351,7 +369,17 @@ And on top of all of the above, structural risk heuristics:
   against a previously saved `--output --json` report and shows only
   what's new -- entities, indicators, and the score change -- for
   re-checking the same watchlist over time without manually spotting
-  what changed in a wall of repeated output. `--top <n>` shows only the
+  what changed in a wall of repeated output. `--watch <duration>`
+  re-runs this same scan every `<duration>`, forever, until interrupted
+  (Ctrl+C), automatically diffing each run against the previous one --
+  an automatic, self-chaining `--diff`, so there's no need to manage a
+  saved `--output` file between runs yourself (an initial `--diff` is
+  still honored as the very first watch iteration's baseline). Every
+  `--output`/`--json`/`--graph`/etc. destination is rewritten each
+  tick. Minimum interval 1m, to stay polite to the sources queried;
+  mutually exclusive with `--fail-on` (a continuous monitor shouldn't
+  exit the process) -- pair it with `--webhook` instead to get alerted
+  only when something actually changes. `--top <n>` shows only the
   `<n>` highest-weight indicators, noting how many were hidden.
   `--min-weight <n>` and `--indicator <codes>` filter by relevance
   instead of count -- only indicators at or above a weight, or matching
@@ -383,13 +411,17 @@ And on top of all of the above, structural risk heuristics:
   either applies -- for scripting/dashboards. Combine with `--fail-on`
   and `--quiet` for a silent CI check that only prints one line and
   exits non-zero on a real hit.
-  `--webhook <url>` requires `--fail-on` too: when the threshold is
-  met, a JSON alert is POSTed to `<url>` before exiting. A
-  `hooks.slack.com` or `discord.com/api/webhooks` URL gets that
-  platform's own minimal message format (confirmed live against each
-  platform's current docs); any other URL gets the full compact
-  summary as the POST body. A failed send is a warning, not a change
-  to the exit status -- `--fail-on` already communicates that.
+  `--webhook <url>` requires `--fail-on` or `--watch` too: with
+  `--fail-on`, a JSON alert is POSTed to `<url>` when the threshold is
+  met, before exiting; with `--watch` instead, an alert fires on any
+  tick whose diff shows new entities or indicators since the last
+  check (never otherwise). A `hooks.slack.com` or
+  `discord.com/api/webhooks` URL gets that platform's own minimal
+  message format (confirmed live against each platform's current
+  docs); any other URL gets the full compact summary as the POST body.
+  A failed send is a warning, not a change to the exit status --
+  `--fail-on` already communicates that (and under `--watch` there's no
+  exit status to speak of, since the process keeps running).
   The text report (not `--json`) colors the confidence band and each
   indicator's weight (red 5+, yellow 3-4, green below), auto-disabled
   when the `NO_COLOR` env var is set or output isn't an interactive
@@ -617,6 +649,13 @@ go run ./cmd/paper-trail risk --input-file watchlist.txt --summary --quiet
 # own message format automatically, or a plain JSON summary to any
 # other URL for a custom integration to parse
 go run ./cmd/paper-trail risk --input-file watchlist.txt --fail-on HIGH --webhook https://hooks.slack.com/services/... --quiet
+
+# Run continuously instead of once -- re-checks the watchlist every 6h,
+# forever, auto-diffing each run against the last, and posts to Slack
+# only on a tick that actually finds something new (never on a quiet
+# tick) -- --fail-on isn't used here since the process is meant to keep
+# running, not exit on a hit
+go run ./cmd/paper-trail risk --input-file watchlist.txt --watch 6h --webhook https://hooks.slack.com/services/... --quiet
 
 # Set defaults for flags you always use -- explicit CLI flags still override
 cat > ~/.paper-trailrc <<'RCEOF'

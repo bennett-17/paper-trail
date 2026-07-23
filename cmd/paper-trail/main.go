@@ -85,7 +85,7 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
 
@@ -323,7 +323,16 @@ Unicode normalization, since that needs a dependency this stdlib-only
 project doesn't take -- plus any hit against either the US
 sanctions screen (sanctions_match) or the UK Sanctions List
 (uk_sanctions_match, via uksanctions above -- the two lists overlap
-heavily but not completely, so both are checked), plus any
+heavily but not completely, so both are checked), plus the UN
+Security Council Consolidated Sanctions List (un_sanctions_match) --
+a third, independent list with its own designees, unlike the US and
+UK sources this one publishes no live per-query search API at all, so
+matching happens client-side against the whole ~1,000-entry list
+(confirmed live), using the same full-token-set name comparison as
+shared_person_fuzzy, and only for a name of two or more words (a
+single-word match against the whole list unfiltered would be too
+noisy to trust, since nothing narrowed the field server-side first
+the way the US/UK screens' own query does). Plus any
 match (icij_offshore_leaks_match) against the ICIJ Offshore Leaks
 Database -- the combined Panama Papers/Paradise Papers/Pandora
 Papers/Offshore Leaks/Bahamas Leaks investigations, queried live via
@@ -364,7 +373,16 @@ same-country domestic group like Tesco's (England -> England) does
 not trigger this; layering ownership across borders is a known
 technique for obscuring ultimate control, though multinational
 corporate groups also legitimately span jurisdictions for tax or
-regulatory reasons. Officer/trustee names sourced from Companies House and
+regulatory reasons. That same chain walk also checks whether it ever
+loops back to the entity it started from -- an ownership_loop
+indicator, fired when a company's own traced PSC chain eventually
+points back to that same company (i.e. it indirectly, and
+impossibly, ends up owning a stake in itself). UK company law itself
+restricts the simplest version of this directly, so a genuine hit is
+rare and higher-weighted than multi_jurisdiction_ownership -- a known
+technique for obscuring ultimate control in more complex or offshore
+structures, though a data or filing error somewhere in the chain is
+also possible. Officer/trustee names sourced from Companies House and
 the UK Charity Commission are also checked against Companies House's
 disqualified-directors register (a disqualified_director indicator) --
 unlike every other indicator here this is an already-adjudicated
@@ -523,6 +541,19 @@ entities that weren't in the old report, indicators that weren't in
 the old report, and the plain score change -- useful for re-checking
 the same watchlist (see --input-file above) over time without having
 to manually spot what changed in a wall of repeated output.
+--watch <duration> re-runs this same scan every <duration>, forever,
+until interrupted (Ctrl+C), automatically diffing each run against the
+previous one -- effectively an automatic, self-chaining --diff, so
+there's no need to also pass --diff or manage a saved --output file
+yourself between runs (though an initial --diff is still honored as
+the baseline for the very first watch iteration). Every --output/
+--json/--graph/etc. destination is rewritten on each tick. The minimum
+interval is 1m, to stay polite to the public sources being queried.
+--watch and --fail-on are mutually exclusive -- a continuous monitor
+shouldn't exit the process on a hit, it should keep watching -- so
+pair --watch with --webhook instead (see below) to get alerted only
+when something actually changes, not on some external process's exit
+code.
 --top <n> shows only the <n> highest-weight indicators (already sorted
 highest-first) instead of the full list, noting how many were hidden --
 useful when a large scan turns up dozens of low-weight indicators and
@@ -569,15 +600,21 @@ scripting/dashboards/monitoring where the full report is too verbose.
 It's independent of --fail-on: use them together for a completely
 silent CI check (--summary --fail-on HIGH --quiet exits non-zero on a
 real hit and prints nothing at all beyond the one summary line).
---webhook <url> requires --fail-on to also be set: when the threshold
-is met, a JSON alert is POSTed to <url> before exiting. A hooks.slack.com
-or discord.com/api/webhooks URL gets that platform's own minimal
-message format (confirmed live against Slack's and Discord's current
-docs: {"text": "..."} and {"content": "..."} respectively); any other
-URL gets the full compact summary (the same shape --summary --json
-prints) as the POST body, for a custom integration to parse. A failed
-send is reported as a warning but never changes the exit status --
---fail-on's own exit code already communicates the failure state.
+--webhook <url> requires --fail-on or --watch to also be set: with
+--fail-on, when the threshold is met, a JSON alert is POSTed to <url>
+before exiting; with --watch instead, an alert is POSTed on any tick
+whose diff shows new entities or indicators since the last check (and
+never otherwise -- a monitor that pages someone every tick regardless
+of change would just get ignored). A hooks.slack.com or
+discord.com/api/webhooks URL gets that platform's own minimal message
+format (confirmed live against Slack's and Discord's current docs:
+{"text": "..."} and {"content": "..."} respectively); any other URL
+gets the full compact summary (the same shape --summary --json prints)
+as the POST body, for a custom integration to parse. A failed send is
+reported as a warning but never changes the exit status -- with
+--fail-on, its own exit code already communicates the failure state;
+with --watch, there's no exit status to speak of anyway since the
+process keeps running.
 The text report (not --json) colors the confidence band and each
 indicator's weight (red 5+, yellow 3-4, green below -- the same scale
 confidenceBand itself uses), auto-disabled when the NO_COLOR env var

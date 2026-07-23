@@ -596,7 +596,27 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				if p.Kind != "corporate-entity-person-with-significant-control" || p.CorporateRegistrationNumber == "" {
 					continue
 				}
-				countries := followPSCChain(chClient, p, limit)
+				countries, loopedBack := followPSCChain(chClient, detail.CompaniesHouseNumber, p, limit)
+				// Ownership loop: the chain traced from this entity's
+				// own corporate PSC eventually points back to this same
+				// entity -- i.e. this company indirectly, and
+				// impossibly, ends up owning a stake in itself. A
+				// known structuring technique for obscuring who
+				// ultimately controls an entity in complex or offshore
+				// corporate groups; UK company law itself restricts the
+				// simplest version of this (a subsidiary holding shares
+				// directly in its own parent), so a genuine hit here is
+				// a rare, high-signal find, not a routine one like
+				// multi_jurisdiction_ownership below.
+				if loopedBack {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "ownership_loop",
+						Description: "This entity's own corporate beneficial-ownership chain loops back to itself -- structurally unusual (a company indirectly owning a stake in itself) and a known technique for obscuring who ultimately controls an entity, though a data or filing error somewhere in the chain is also possible",
+						Weight:      4,
+						Entities:    []string{e.Label()},
+						Evidence:    fmt.Sprintf("PSC chain starting from %s loops back to this same company", p.Name),
+					})
+				}
 				if len(countries) < 2 {
 					continue
 				}
@@ -699,14 +719,17 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 // significant-control chain up to pscChainMaxDepth hops beyond the
 // given starting PSC, returning every distinct country_registered
 // value encountered along the way (starting with the given PSC's own
-// country). A visited-registration-number set guards against an
-// ownership cycle; the chain simply stops (rather than erroring) the
-// moment a hop's PSC lookup fails, returns no active corporate PSC of
-// its own (e.g. an individual PSC, or no PSCs at all -- both
-// confirmed live to be normal, legitimate endings, not errors), or
-// would revisit an already-seen registration number.
-func followPSCChain(chClient *companieshouse.Client, start companieshouse.PSC, limit int) []string {
-	var countries []string
+// country), and whether the chain ever loops back to rootNumber --
+// the company whose PSC this chain started from (i.e. rootNumber
+// indirectly, and impossibly, ends up owning a stake in itself). A
+// visited-registration-number set guards against any OTHER cycle, so
+// the walk always terminates within pscChainMaxDepth hops either way;
+// the chain simply stops (rather than erroring) the moment a hop's
+// PSC lookup fails, returns no active corporate PSC of its own (e.g.
+// an individual PSC, or no PSCs at all -- both confirmed live to be
+// normal, legitimate endings, not errors), or would revisit an
+// already-seen registration number.
+func followPSCChain(chClient *companieshouse.Client, rootNumber string, start companieshouse.PSC, limit int) (countries []string, loopedBack bool) {
 	seenCountry := map[string]bool{}
 	addCountry := func(country string) {
 		country = strings.TrimSpace(country)
@@ -723,6 +746,10 @@ func followPSCChain(chClient *companieshouse.Client, start companieshouse.PSC, l
 	for depth := 0; depth < pscChainMaxDepth; depth++ {
 		regNumber := current.CorporateRegistrationNumber
 		if regNumber == "" || visited[regNumber] {
+			break
+		}
+		if sameCompanyNumber(regNumber, rootNumber) {
+			loopedBack = true
 			break
 		}
 		visited[regNumber] = true
@@ -744,7 +771,7 @@ func followPSCChain(chClient *companieshouse.Client, start companieshouse.PSC, l
 		addCountry(next.CorporateCountryRegistered)
 		current = *next
 	}
-	return countries
+	return countries, loopedBack
 }
 
 // financialAnomalyRatio is how large a year-over-year multiple in

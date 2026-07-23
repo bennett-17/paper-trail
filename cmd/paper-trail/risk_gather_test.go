@@ -79,9 +79,12 @@ func TestFollowPSCChainSameCountryDoesNotCrossJurisdictions(t *testing.T) {
 		CorporateCountryRegistered:  "England",
 		CorporateRegistrationNumber: "00445790",
 	}
-	countries := followPSCChain(c, start, 0)
+	countries, loopedBack := followPSCChain(c, "00000099", start, 0)
 	if len(countries) != 1 || countries[0] != "England" {
 		t.Fatalf("countries = %v, want a single England entry (no cross-jurisdiction hop)", countries)
+	}
+	if loopedBack {
+		t.Error("loopedBack = true, want false: the chain never returns to the root company")
 	}
 }
 
@@ -100,10 +103,13 @@ func TestFollowPSCChainCrossesJurisdictions(t *testing.T) {
 		CorporateCountryRegistered:  "Jersey",
 		CorporateRegistrationNumber: "00222222",
 	}
-	countries := followPSCChain(c, start, 0)
+	countries, loopedBack := followPSCChain(c, "00000099", start, 0)
 	want := []string{"Jersey", "British Virgin Islands"}
 	if len(countries) != len(want) || countries[0] != want[0] || countries[1] != want[1] {
 		t.Fatalf("countries = %v, want %v", countries, want)
+	}
+	if loopedBack {
+		t.Error("loopedBack = true, want false: the chain never returns to the root company")
 	}
 }
 
@@ -125,9 +131,12 @@ func TestFollowPSCChainStopsOnCycle(t *testing.T) {
 		CorporateCountryRegistered:  "England",
 		CorporateRegistrationNumber: "00000001",
 	}
-	countries := followPSCChain(c, start, 0)
+	countries, loopedBack := followPSCChain(c, "00000099", start, 0)
 	if len(countries) != 1 || countries[0] != "England" {
 		t.Fatalf("countries = %v, want a single deduplicated England entry", countries)
+	}
+	if loopedBack {
+		t.Error("loopedBack = true, want false: this cycle never involves the root company")
 	}
 }
 
@@ -220,9 +229,61 @@ func TestFollowPSCChainStopsWhenNoCorporatePSCFound(t *testing.T) {
 		CorporateCountryRegistered:  "England",
 		CorporateRegistrationNumber: "00444444",
 	}
-	countries := followPSCChain(c, start, 0)
+	countries, loopedBack := followPSCChain(c, "00000099", start, 0)
 	if len(countries) != 1 || countries[0] != "England" {
 		t.Fatalf("countries = %v, want a single England entry (chain ends at an individual PSC)", countries)
+	}
+	if loopedBack {
+		t.Error("loopedBack = true, want false: the chain ends at an individual, never reaching the root company")
+	}
+}
+
+func TestFollowPSCChainDetectsDirectLoopBackToRoot(t *testing.T) {
+	// The starting PSC's own registration number IS the root company
+	// (e.g. rootNumber's direct corporate PSC turns out to itself carry
+	// rootNumber -- a 1-hop loop). No server calls should even be
+	// needed since this is caught before the first fetch.
+	srv := pscChainFixture(t, map[string]string{})
+	c := newChainTestClient(t, srv)
+
+	start := companieshouse.PSC{
+		Name:                        "Root Company Limited",
+		Kind:                        "corporate-entity-person-with-significant-control",
+		CorporateCountryRegistered:  "England",
+		CorporateRegistrationNumber: "00000001",
+	}
+	countries, loopedBack := followPSCChain(c, "00000001", start, 0)
+	if !loopedBack {
+		t.Error("loopedBack = false, want true: the starting PSC's own registration number is the root company")
+	}
+	if len(countries) != 1 || countries[0] != "England" {
+		t.Fatalf("countries = %v, want a single England entry", countries)
+	}
+}
+
+func TestFollowPSCChainDetectsIndirectLoopBackToRoot(t *testing.T) {
+	// A two-hop loop: root's PSC is Company A, Company A's PSC is the
+	// root company itself under a different registration-number
+	// casing/padding -- sameCompanyNumber must ignore that padding
+	// difference (confirmed live elsewhere that some sources return
+	// company numbers unpadded).
+	srv := pscChainFixture(t, map[string]string{
+		"00000002": corporatePSCJSON("Root Company Limited", "England", "1"),
+	})
+	c := newChainTestClient(t, srv)
+
+	start := companieshouse.PSC{
+		Name:                        "Company A Limited",
+		Kind:                        "corporate-entity-person-with-significant-control",
+		CorporateCountryRegistered:  "England",
+		CorporateRegistrationNumber: "00000002",
+	}
+	countries, loopedBack := followPSCChain(c, "00000001", start, 0)
+	if !loopedBack {
+		t.Error("loopedBack = false, want true: Company A's own PSC is the root company (registration number 1 vs 00000001)")
+	}
+	if len(countries) != 1 || countries[0] != "England" {
+		t.Fatalf("countries = %v, want a single England entry", countries)
 	}
 }
 

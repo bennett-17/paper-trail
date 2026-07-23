@@ -304,6 +304,32 @@ func shouldFailOn(confidence, threshold string) bool {
 	return confidenceBandRank[strings.ToUpper(confidence)] >= confidenceBandRank[strings.ToUpper(threshold)]
 }
 
+// watchMinInterval is the minimum --watch interval accepted -- a
+// floor to stay polite to the public sources a scan queries, not a
+// technical limit.
+const watchMinInterval = time.Minute
+
+// validateWatchFlags checks --watch's own constraints and its
+// interaction with --fail-on/--webhook: --watch and --fail-on are
+// mutually exclusive (a continuous monitor shouldn't exit the
+// process), --watch must be at least watchMinInterval when set, and
+// --webhook needs either --fail-on or --watch to be set too --
+// otherwise there's no threshold or new-finding trigger to alert on.
+// watch == 0 means --watch wasn't passed (the default, matching how
+// flag.Duration itself represents "unset" for a duration flag).
+func validateWatchFlags(watch time.Duration, failOn, webhookURL string) error {
+	if watch != 0 && failOn != "" {
+		return fmt.Errorf("--watch and --fail-on are mutually exclusive -- a continuous monitor shouldn't exit the process; use --webhook (with --watch, no --fail-on needed) to get alerted on new findings instead")
+	}
+	if watch != 0 && watch < watchMinInterval {
+		return fmt.Errorf("--watch must be at least %s, to stay polite to the public sources being queried", watchMinInterval)
+	}
+	if webhookURL != "" && failOn == "" && watch == 0 {
+		return fmt.Errorf("--webhook requires --fail-on or --watch to be set too -- otherwise there's no threshold or new-finding trigger to alert on")
+	}
+	return nil
+}
+
 // diffRiskReports compares a freshly computed report against a
 // previously saved one (see --diff).
 func diffRiskReports(previous riskReportJSON, entities []risk.Entity, score risk.Score) riskReportDiff {
@@ -657,7 +683,8 @@ func runRisk(args []string) {
 	excludeFile := fs.String("exclude-file", "", "read additional --exclude terms from this file too, one per line (blank lines and lines starting with # are ignored)")
 	failOn := fs.String("fail-on", "", "exit with a non-zero status if the final confidence band reaches this level or higher (LOW, MEDIUM, or HIGH) -- lets a scan act as a gate in CI/cron/pre-merge automation instead of requiring someone to read the output")
 	summary := fs.Bool("summary", false, "print (or, with --json, encode) a compact one-line/one-object summary -- score, confidence, and entity/indicator counts -- instead of the full report, for scripting/dashboards/monitoring where the full indicator-by-indicator report is too verbose")
-	webhookURL := fs.String("webhook", "", "POST a JSON alert to this URL when --fail-on's threshold is met (requires --fail-on) -- a hooks.slack.com or discord.com/api/webhooks URL gets that platform's own minimal message format, anything else gets the full compact summary as JSON")
+	webhookURL := fs.String("webhook", "", "POST a JSON alert to this URL when --fail-on's threshold is met (requires --fail-on, unless --watch is also set -- see --watch) -- a hooks.slack.com or discord.com/api/webhooks URL gets that platform's own minimal message format, anything else gets the full compact summary as JSON")
+	watch := fs.Duration("watch", 0, "re-run this scan every this-long, forever, until interrupted (Ctrl+C) -- each run is automatically diffed against the previous one (no need to also pass --diff) and rewritten to the same --output/--json/--graph/etc. destinations. Minimum 1m, to stay polite to the public sources being queried. Mutually exclusive with --fail-on (a continuous monitor shouldn't exit the process); combine with --webhook instead to get alerted only when a run's diff shows new entities/indicators since the last check")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
@@ -673,7 +700,7 @@ func runRisk(args []string) {
 		}
 	}
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
 	queries := positional
 	if *inputFile != "" {
 		fromFile, err := readQueryTermsFile(*inputFile)
@@ -716,8 +743,8 @@ func runRisk(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: --fail-on %v\n", err)
 		os.Exit(1)
 	}
-	if *webhookURL != "" && *failOn == "" {
-		fmt.Fprintln(os.Stderr, "Error: --webhook requires --fail-on to be set too -- otherwise there's no threshold to alert on")
+	if err := validateWatchFlags(*watch, *failOn, *webhookURL); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -739,325 +766,369 @@ func runRisk(args []string) {
 		cache = riskcache.New()
 	}
 
-	var progress *progressReporter
-	if !*quiet {
-		progress = newProgressReporter(os.Stderr)
-	}
+	// Everything from here to the end of the function is one scan --
+	// with --watch set, this whole block repeats forever (until
+	// interrupted) rather than running once. previousReport is
+	// reassigned at the end of each watch iteration to that
+	// iteration's own report, so each subsequent run auto-diffs
+	// against the last one without the user re-passing --diff; without
+	// --watch this loop always runs exactly once, identical to the
+	// pre-existing one-shot behavior.
+	for {
+		var progress *progressReporter
+		if !*quiet {
+			progress = newProgressReporter(os.Stderr)
+		}
 
-	var entities []risk.Entity
-	var extra []risk.Indicator
-	var notes []string
-	note := func(source, format string, a ...any) {
-		notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
-	}
+		var entities []risk.Entity
+		var extra []risk.Indicator
+		var notes []string
+		note := func(source, format string, a ...any) {
+			notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
+		}
 
-	// SEC EDGAR -- one client shared across every query term (and
-	// reused below for the full-text mentions step), so a missing
-	// credential is reported once, not once per term.
-	var edgarClient *edgar.Client
-	if c, err := edgar.NewClient(""); err != nil {
-		note("SEC EDGAR", "skipped (%v)", err)
-	} else {
-		edgarClient = c
-	}
+		// SEC EDGAR -- one client shared across every query term (and
+		// reused below for the full-text mentions step), so a missing
+		// credential is reported once, not once per term.
+		var edgarClient *edgar.Client
+		if c, err := edgar.NewClient(""); err != nil {
+			note("SEC EDGAR", "skipped (%v)", err)
+		} else {
+			edgarClient = c
+		}
 
-	// UK Companies House -- one client shared across every charity
-	// below, so a missing credential is reported once, not once per
-	// charity. Adds real director data for UK charities that are also
-	// registered companies, alongside their Charity Commission
-	// trustees: ukcharity alone only exposes trustees, so a company's
-	// directors would otherwise be invisible to the shared_person check.
-	chClient, chErr := companieshouse.NewClient("")
-	if chErr != nil {
-		note("Companies House", "skipped (%v)", chErr)
-		chClient = nil
-	}
+		// UK Companies House -- one client shared across every charity
+		// below, so a missing credential is reported once, not once per
+		// charity. Adds real director data for UK charities that are also
+		// registered companies, alongside their Charity Commission
+		// trustees: ukcharity alone only exposes trustees, so a company's
+		// directors would otherwise be invisible to the shared_person check.
+		chClient, chErr := companieshouse.NewClient("")
+		if chErr != nil {
+			note("Companies House", "skipped (%v)", chErr)
+			chClient = nil
+		}
 
-	// Phase 1: every source below resolves query terms into entities
-	// independently of the others -- EDGAR, IRS Form 990, ACNC, and UK
-	// Charity Commission (with its nested Companies House lookups) each
-	// hit entirely separate APIs with their own client-level throttling,
-	// so running them concurrently is safe and cuts wall-clock time
-	// substantially on a large multi-term scan (confirmed live: a
-	// 25-term run that previously needed several minutes sequential).
-	// Each gathers into its own local slices, not the shared ones above,
-	// so there's nothing to protect with a mutex -- they're merged in a
-	// fixed order below, after every goroutine finishes, so output stays
-	// deterministic regardless of which source happens to finish first.
-	var edgarEntities, npEntities, acncEntities, ukEntities []risk.Entity
-	var edgarExtra, npExtra, ukExtra []risk.Indicator
-	var edgarNotes, npNotes, acncNotes, ukNotes []string
-	var wg sync.WaitGroup
+		// Phase 1: every source below resolves query terms into entities
+		// independently of the others -- EDGAR, IRS Form 990, ACNC, and UK
+		// Charity Commission (with its nested Companies House lookups) each
+		// hit entirely separate APIs with their own client-level throttling,
+		// so running them concurrently is safe and cuts wall-clock time
+		// substantially on a large multi-term scan (confirmed live: a
+		// 25-term run that previously needed several minutes sequential).
+		// Each gathers into its own local slices, not the shared ones above,
+		// so there's nothing to protect with a mutex -- they're merged in a
+		// fixed order below, after every goroutine finishes, so output stays
+		// deterministic regardless of which source happens to finish first.
+		var edgarEntities, npEntities, acncEntities, ukEntities []risk.Entity
+		var edgarExtra, npExtra, ukExtra []risk.Indicator
+		var edgarNotes, npNotes, acncNotes, ukNotes []string
+		var wg sync.WaitGroup
 
-	if edgarClient != nil {
+		if edgarClient != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, *limit, cache, cacheTTL, progress)
+			}()
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, *limit, cache, cacheTTL, progress)
+			npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, *limit, cache, cacheTTL, progress)
 		}()
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, *limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		acncEntities, acncNotes = gatherACNCEntities(queries, *limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, *limit, cache, cacheTTL, progress)
-	}()
-	wg.Wait()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			acncEntities, acncNotes = gatherACNCEntities(queries, *limit, cache, cacheTTL, progress)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, *limit, cache, cacheTTL, progress)
+		}()
+		wg.Wait()
 
-	entities = append(entities, edgarEntities...)
-	entities = append(entities, npEntities...)
-	entities = append(entities, acncEntities...)
-	entities = append(entities, ukEntities...)
-	extra = append(extra, edgarExtra...)
-	extra = append(extra, npExtra...)
-	extra = append(extra, ukExtra...)
-	notes = append(notes, edgarNotes...)
-	notes = append(notes, npNotes...)
-	notes = append(notes, acncNotes...)
-	notes = append(notes, ukNotes...)
+		entities = append(entities, edgarEntities...)
+		entities = append(entities, npEntities...)
+		entities = append(entities, acncEntities...)
+		entities = append(entities, ukEntities...)
+		extra = append(extra, edgarExtra...)
+		extra = append(extra, npExtra...)
+		extra = append(extra, ukExtra...)
+		notes = append(notes, edgarNotes...)
+		notes = append(notes, npNotes...)
+		notes = append(notes, acncNotes...)
+		notes = append(notes, ukNotes...)
 
-	// Phase 2: every check below only reads the now-final entities pool
-	// (built above) -- it doesn't add to it -- so, like phase 1, these
-	// five are independent of each other and safe to run concurrently.
-	// US sanctions, UK sanctions, ICIJ Offshore Leaks, and the
-	// disqualified-directors check each screen every query term plus
-	// every distinct person name found; EDGAR full-text mentions
-	// screens query terms only (see its own comment below for why).
-	// Merged in the same fixed order as before so output stays
-	// deterministic.
-	var usExtra, ukSanctionsExtra, dqExtra, ftExtra, icijExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, dqNotes, ftNotes, icijNotes []string
-	var wg2 sync.WaitGroup
+		// Phase 2: every check below only reads the now-final entities pool
+		// (built above) -- it doesn't add to it -- so, like phase 1, these
+		// six are independent of each other and safe to run concurrently.
+		// US sanctions, UK sanctions, UN sanctions, ICIJ Offshore Leaks,
+		// and the disqualified-directors check each screen every query
+		// term plus every distinct person name found; EDGAR full-text
+		// mentions screens query terms only (see its own comment below for
+		// why). Merged in the same fixed order as before so output stays
+		// deterministic.
+		var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra []risk.Indicator
+		var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes []string
+		var wg2 sync.WaitGroup
 
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		usExtra, usNotes = screenUSSanctions(queries, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, *limit, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
-	}()
-	wg2.Wait()
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			usExtra, usNotes = screenUSSanctions(queries, entities, progress)
+		}()
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities, progress)
+		}()
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			unExtra, unNotes = screenUNSanctions(queries, entities, progress)
+		}()
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities, progress)
+		}()
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, *limit, progress)
+		}()
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
+		}()
+		wg2.Wait()
 
-	extra = append(extra, usExtra...)
-	extra = append(extra, ukSanctionsExtra...)
-	extra = append(extra, dqExtra...)
-	extra = append(extra, ftExtra...)
-	extra = append(extra, icijExtra...)
-	notes = append(notes, usNotes...)
-	notes = append(notes, ukSanctionsNotes...)
-	notes = append(notes, dqNotes...)
-	notes = append(notes, ftNotes...)
-	notes = append(notes, icijNotes...)
+		extra = append(extra, usExtra...)
+		extra = append(extra, ukSanctionsExtra...)
+		extra = append(extra, unExtra...)
+		extra = append(extra, dqExtra...)
+		extra = append(extra, ftExtra...)
+		extra = append(extra, icijExtra...)
+		notes = append(notes, usNotes...)
+		notes = append(notes, ukSanctionsNotes...)
+		notes = append(notes, unNotes...)
+		notes = append(notes, dqNotes...)
+		notes = append(notes, ftNotes...)
+		notes = append(notes, icijNotes...)
 
-	// Cross-referencing runs once over the combined pool from every
-	// query term -- this is the whole point of taking multiple terms:
-	// an officer/trustee or address shared between, say, a "Narconon
-	// UK" result and a "Criminon UK" result only surfaces if both are
-	// in the same Assess() call.
-	cache.Save() // no-op if --cache-ttl wasn't set
+		// Cross-referencing runs once over the combined pool from every
+		// query term -- this is the whole point of taking multiple terms:
+		// an officer/trustee or address shared between, say, a "Narconon
+		// UK" result and a "Criminon UK" result only surfaces if both are
+		// in the same Assess() call.
+		cache.Save() // no-op if --cache-ttl wasn't set
 
-	score := risk.Assess(entities, extra)
+		score := risk.Assess(entities, extra)
 
-	// --exclude/--exclude-file apply before everything else below,
-	// including --diff: unlike --top/--min-weight/--indicator, which
-	// only limit what's *shown*, an excluded indicator is treated as
-	// not a real finding at all -- so it should never resurface as
-	// "new" in a diff either, and Total/Confidence are recomputed to
-	// no longer reflect it.
-	score, excludedCount := excludeIndicators(score, excludeTerms)
+		// --exclude/--exclude-file apply before everything else below,
+		// including --diff: unlike --top/--min-weight/--indicator, which
+		// only limit what's *shown*, an excluded indicator is treated as
+		// not a real finding at all -- so it should never resurface as
+		// "new" in a diff either, and Total/Confidence are recomputed to
+		// no longer reflect it.
+		score, excludedCount := excludeIndicators(score, excludeTerms)
 
-	// --diff always compares the (post-exclude) full indicator set,
-	// before any --top truncation below -- otherwise an indicator that
-	// just fell outside --top's cutoff in an earlier run could
-	// misleadingly look "new".
-	var diff *riskReportDiff
-	if previousReport != nil {
-		d := diffRiskReports(*previousReport, entities, score)
-		diff = &d
-	}
+		// --diff always compares the (post-exclude) full indicator set,
+		// before any --top truncation below -- otherwise an indicator that
+		// just fell outside --top's cutoff in an earlier run could
+		// misleadingly look "new".
+		var diff *riskReportDiff
+		if previousReport != nil {
+			d := diffRiskReports(*previousReport, entities, score)
+			diff = &d
+		}
 
-	// --min-weight, --indicator, and --top all only limit which
-	// indicators are *shown*, after diffing -- Total (and the confidence
-	// band, already computed) still reflect every indicator found.
-	// --min-weight/--indicator apply first (relevance), --top second
-	// (count), so e.g. --indicator sanctions_match --top 3 means "the 3
-	// highest-weight sanctions matches", not "of the top 3 overall,
-	// whichever happen to be sanctions matches".
-	score, hiddenByFilter := filterIndicators(score, *minWeight, parseIndicatorCodes(*indicatorFilter))
-	score, hiddenByTop := truncateIndicators(score, *top)
-	hiddenIndicators := hiddenByFilter + hiddenByTop
-	score, hiddenCorroborations := filterCorroborations(score, *minCorroboration)
+		// --min-weight, --indicator, and --top all only limit which
+		// indicators are *shown*, after diffing -- Total (and the confidence
+		// band, already computed) still reflect every indicator found.
+		// --min-weight/--indicator apply first (relevance), --top second
+		// (count), so e.g. --indicator sanctions_match --top 3 means "the 3
+		// highest-weight sanctions matches", not "of the top 3 overall,
+		// whichever happen to be sanctions matches".
+		score, hiddenByFilter := filterIndicators(score, *minWeight, parseIndicatorCodes(*indicatorFilter))
+		score, hiddenByTop := truncateIndicators(score, *top)
+		hiddenIndicators := hiddenByFilter + hiddenByTop
+		score, hiddenCorroborations := filterCorroborations(score, *minCorroboration)
 
-	report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, HiddenCorroborations: hiddenCorroborations}
+		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, HiddenCorroborations: hiddenCorroborations}
 
-	var w io.Writer = os.Stdout
-	if *output != "" {
-		f, err := os.Create(*output)
-		exitOnErr(err)
-		defer f.Close()
-		w = f
-	}
+		var w io.Writer = os.Stdout
+		if *output != "" {
+			f, err := os.Create(*output)
+			exitOnErr(err)
+			defer f.Close()
+			w = f
+		}
 
-	if *summary {
-		writeSummary(w, report, diff, *asJSON, colorEnabled(w, *noColor))
-	} else if *asJSON {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if diff != nil {
-			enc.Encode(struct {
-				riskReportJSON
-				Diff *riskReportDiff `json:"diff"`
-			}{report, diff})
+		if *summary {
+			writeSummary(w, report, diff, *asJSON, colorEnabled(w, *noColor))
+		} else if *asJSON {
+			enc := json.NewEncoder(w)
+			enc.SetIndent("", "  ")
+			if diff != nil {
+				enc.Encode(struct {
+					riskReportJSON
+					Diff *riskReportDiff `json:"diff"`
+				}{report, diff})
+			} else {
+				enc.Encode(report)
+			}
 		} else {
-			enc.Encode(report)
-		}
-	} else {
-		quoted := make([]string, len(queries))
-		for i, q := range queries {
-			quoted[i] = fmt.Sprintf("%q", q)
-		}
-		fmt.Fprintf(w, "Risk assessment for %s\n\n", strings.Join(quoted, ", "))
-		fmt.Fprintf(w, "%d entit(ies) found:\n", len(entities))
-		for _, e := range entities {
-			fmt.Fprintf(w, "  %s\n", e.Label())
-		}
-		if len(notes) > 0 {
-			fmt.Fprintln(w, "\nNotes:")
-			for _, n := range notes {
-				fmt.Fprintf(w, "  - %s\n", n)
+			quoted := make([]string, len(queries))
+			for i, q := range queries {
+				quoted[i] = fmt.Sprintf("%q", q)
 			}
-		}
-
-		if excludedCount > 0 {
-			fmt.Fprintf(w, "\n%d indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.\n", excludedCount)
-		}
-		colorOn := colorEnabled(w, *noColor)
-		coloredConfidence := colorize(score.Confidence, confidenceColor(score.Confidence), colorOn)
-		fmt.Fprintf(w, "\nRisk score: %d (confidence: %s -- %s)\n\n", score.Total, coloredConfidence, score.ConfidenceReason)
-		if len(score.Indicators) == 0 {
-			fmt.Fprintln(w, "No structural indicators found among the entities located.")
-		}
-		for _, ind := range score.Indicators {
-			weightStr := colorize(fmt.Sprintf("+%d", ind.Weight), weightColor(ind.Weight), colorOn)
-			fmt.Fprintf(w, "%s  %s\n", weightStr, ind.Description)
-			fmt.Fprintf(w, "     Entities: %s\n", strings.Join(ind.Entities, "; "))
-			fmt.Fprintf(w, "     Evidence: %s\n\n", ind.Evidence)
-		}
-		if hiddenIndicators > 0 {
-			var reasons []string
-			if hiddenByFilter > 0 {
-				if *minWeight > 0 {
-					reasons = append(reasons, fmt.Sprintf("--min-weight %d", *minWeight))
-				}
-				if *indicatorFilter != "" {
-					reasons = append(reasons, fmt.Sprintf("--indicator %q", *indicatorFilter))
+			fmt.Fprintf(w, "Risk assessment for %s\n\n", strings.Join(quoted, ", "))
+			fmt.Fprintf(w, "%d entit(ies) found:\n", len(entities))
+			for _, e := range entities {
+				fmt.Fprintf(w, "  %s\n", e.Label())
+			}
+			if len(notes) > 0 {
+				fmt.Fprintln(w, "\nNotes:")
+				for _, n := range notes {
+					fmt.Fprintf(w, "  - %s\n", n)
 				}
 			}
-			if hiddenByTop > 0 {
-				reasons = append(reasons, fmt.Sprintf("--top %d", *top))
+
+			if excludedCount > 0 {
+				fmt.Fprintf(w, "\n%d indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.\n", excludedCount)
 			}
-			fmt.Fprintf(w, "... and %d more indicator(s) not shown (%s) -- the score above still reflects all of them.\n\n", hiddenIndicators, strings.Join(reasons, ", "))
-		}
-		if len(score.Corroborations) > 0 {
-			fmt.Fprintln(w, "Corroborated pairs (matched on 2+ independent kinds of evidence -- stronger than any single indicator above):")
-			for _, c := range score.Corroborations {
-				fmt.Fprintf(w, "  %s\n", strings.Join(c.Entities, "  <->  "))
-				fmt.Fprintf(w, "    matched on: %s\n\n", strings.Join(c.Codes, ", "))
+			colorOn := colorEnabled(w, *noColor)
+			coloredConfidence := colorize(score.Confidence, confidenceColor(score.Confidence), colorOn)
+			fmt.Fprintf(w, "\nRisk score: %d (confidence: %s -- %s)\n\n", score.Total, coloredConfidence, score.ConfidenceReason)
+			if len(score.Indicators) == 0 {
+				fmt.Fprintln(w, "No structural indicators found among the entities located.")
+			}
+			for _, ind := range score.Indicators {
+				weightStr := colorize(fmt.Sprintf("+%d", ind.Weight), weightColor(ind.Weight), colorOn)
+				fmt.Fprintf(w, "%s  %s\n", weightStr, ind.Description)
+				fmt.Fprintf(w, "     Entities: %s\n", strings.Join(ind.Entities, "; "))
+				fmt.Fprintf(w, "     Evidence: %s\n\n", ind.Evidence)
+			}
+			if hiddenIndicators > 0 {
+				var reasons []string
+				if hiddenByFilter > 0 {
+					if *minWeight > 0 {
+						reasons = append(reasons, fmt.Sprintf("--min-weight %d", *minWeight))
+					}
+					if *indicatorFilter != "" {
+						reasons = append(reasons, fmt.Sprintf("--indicator %q", *indicatorFilter))
+					}
+				}
+				if hiddenByTop > 0 {
+					reasons = append(reasons, fmt.Sprintf("--top %d", *top))
+				}
+				fmt.Fprintf(w, "... and %d more indicator(s) not shown (%s) -- the score above still reflects all of them.\n\n", hiddenIndicators, strings.Join(reasons, ", "))
+			}
+			if len(score.Corroborations) > 0 {
+				fmt.Fprintln(w, "Corroborated pairs (matched on 2+ independent kinds of evidence -- stronger than any single indicator above):")
+				for _, c := range score.Corroborations {
+					fmt.Fprintf(w, "  %s\n", strings.Join(c.Entities, "  <->  "))
+					fmt.Fprintf(w, "    matched on: %s\n\n", strings.Join(c.Codes, ", "))
+				}
+			}
+			if hiddenCorroborations > 0 {
+				fmt.Fprintf(w, "... and %d more corroborated pair(s) not shown (--min-corroboration %d).\n\n", hiddenCorroborations, *minCorroboration)
+			}
+			fmt.Fprintln(w, "This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
+
+			if diff != nil {
+				diffSource := *diffPath
+				if diffSource == "" {
+					diffSource = "previous --watch run"
+				}
+				fmt.Fprintf(w, "\nDiff against %s:\n", diffSource)
+				fmt.Fprintf(w, "  Score: %d -> %d (%+d)\n", diff.ScoreBefore, diff.ScoreAfter, diff.ScoreAfter-diff.ScoreBefore)
+				fmt.Fprintf(w, "  %d new entit(ies):\n", len(diff.NewEntities))
+				for _, e := range diff.NewEntities {
+					fmt.Fprintf(w, "    %s\n", e.Label())
+				}
+				fmt.Fprintf(w, "  %d new indicator(s):\n", len(diff.NewIndicators))
+				for _, ind := range diff.NewIndicators {
+					fmt.Fprintf(w, "    +%d  %s\n", ind.Weight, ind.Description)
+					fmt.Fprintf(w, "         Entities: %s\n", strings.Join(ind.Entities, "; "))
+					fmt.Fprintf(w, "         Evidence: %s\n", ind.Evidence)
+				}
 			}
 		}
-		if hiddenCorroborations > 0 {
-			fmt.Fprintf(w, "... and %d more corroborated pair(s) not shown (--min-corroboration %d).\n\n", hiddenCorroborations, *minCorroboration)
-		}
-		fmt.Fprintln(w, "This is a lead-generation report, not a finding -- verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.")
 
-		if diff != nil {
-			fmt.Fprintf(w, "\nDiff against %s:\n", *diffPath)
-			fmt.Fprintf(w, "  Score: %d -> %d (%+d)\n", diff.ScoreBefore, diff.ScoreAfter, diff.ScoreAfter-diff.ScoreBefore)
-			fmt.Fprintf(w, "  %d new entit(ies):\n", len(diff.NewEntities))
-			for _, e := range diff.NewEntities {
-				fmt.Fprintf(w, "    %s\n", e.Label())
+		if *output != "" {
+			fmt.Printf("Wrote risk assessment (%d entities, score %d) to %s\n", len(entities), score.Total, *output)
+		}
+
+		if *entitiesCSVPath != "" {
+			exitOnErr(risk.WriteEntitiesCSV(entities, *entitiesCSVPath))
+			fmt.Printf("Wrote entity list CSV (%d entities) to %s\n", len(entities), *entitiesCSVPath)
+		}
+
+		if *graphPath != "" || *htmlPath != "" || *csvPath != "" || *graphMLPath != "" {
+			g := graph.BuildFromRisk(entities, score)
+			if *graphPath != "" {
+				exitOnErr(graph.WriteJSON(g, *graphPath))
+				fmt.Printf("Wrote graph (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphPath)
 			}
-			fmt.Fprintf(w, "  %d new indicator(s):\n", len(diff.NewIndicators))
-			for _, ind := range diff.NewIndicators {
-				fmt.Fprintf(w, "    +%d  %s\n", ind.Weight, ind.Description)
-				fmt.Fprintf(w, "         Entities: %s\n", strings.Join(ind.Entities, "; "))
-				fmt.Fprintf(w, "         Evidence: %s\n", ind.Evidence)
+			if *htmlPath != "" {
+				exitOnErr(graph.WriteHTML(g, *htmlPath))
+				fmt.Printf("Wrote HTML graph viewer (%d nodes, %d edges) to %s -- open it directly in a browser\n", len(g.Nodes), len(g.Edges), *htmlPath)
+			}
+			if *csvPath != "" {
+				exitOnErr(graph.WriteCSV(g, *csvPath))
+				fmt.Printf("Wrote graph edge-list CSV (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *csvPath)
+			}
+			if *graphMLPath != "" {
+				exitOnErr(graph.WriteGraphML(g, *graphMLPath))
+				fmt.Printf("Wrote GraphML (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphMLPath)
 			}
 		}
-	}
 
-	if *output != "" {
-		fmt.Printf("Wrote risk assessment (%d entities, score %d) to %s\n", len(entities), score.Total, *output)
-	}
+		// Checked last, after every output/graph file has already been
+		// written -- --fail-on signals failure via exit status, it doesn't
+		// suppress the report itself, so a CI system that captures the
+		// output artifact on failure still gets one. Always false under
+		// --watch (validated mutually exclusive with --fail-on above), so
+		// this is a no-op there.
+		if shouldFailOn(score.Confidence, *failOn) {
+			if *webhookURL != "" {
+				if err := sendWebhookAlert(*webhookURL, summaryFromReport(report)); err != nil {
+					// Deliberately non-fatal: --fail-on's exit code below
+					// already communicates the failure state to whatever's
+					// watching this process's exit status; a webhook
+					// delivery problem shouldn't additionally obscure that
+					// with a different failure mode.
+					fmt.Fprintf(os.Stderr, "Warning: --webhook alert failed to send: %v\n", err)
+				}
+			}
+			os.Exit(1)
+		}
 
-	if *entitiesCSVPath != "" {
-		exitOnErr(risk.WriteEntitiesCSV(entities, *entitiesCSVPath))
-		fmt.Printf("Wrote entity list CSV (%d entities) to %s\n", len(entities), *entitiesCSVPath)
-	}
+		if *watch == 0 {
+			break
+		}
 
-	if *graphPath != "" || *htmlPath != "" || *csvPath != "" || *graphMLPath != "" {
-		g := graph.BuildFromRisk(entities, score)
-		if *graphPath != "" {
-			exitOnErr(graph.WriteJSON(g, *graphPath))
-			fmt.Printf("Wrote graph (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphPath)
-		}
-		if *htmlPath != "" {
-			exitOnErr(graph.WriteHTML(g, *htmlPath))
-			fmt.Printf("Wrote HTML graph viewer (%d nodes, %d edges) to %s -- open it directly in a browser\n", len(g.Nodes), len(g.Edges), *htmlPath)
-		}
-		if *csvPath != "" {
-			exitOnErr(graph.WriteCSV(g, *csvPath))
-			fmt.Printf("Wrote graph edge-list CSV (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *csvPath)
-		}
-		if *graphMLPath != "" {
-			exitOnErr(graph.WriteGraphML(g, *graphMLPath))
-			fmt.Printf("Wrote GraphML (%d nodes, %d edges) to %s\n", len(g.Nodes), len(g.Edges), *graphMLPath)
-		}
-	}
-
-	// Checked last, after every output/graph file has already been
-	// written -- --fail-on signals failure via exit status, it doesn't
-	// suppress the report itself, so a CI system that captures the
-	// output artifact on failure still gets one.
-	if shouldFailOn(score.Confidence, *failOn) {
-		if *webhookURL != "" {
+		// --watch's own alert trigger, distinct from --fail-on's above
+		// (mutually exclusive with it): fire only when this run's diff
+		// against the previous one actually found something new, not on
+		// every tick -- a continuous monitor that pages someone every
+		// interval regardless of change would just get ignored.
+		if *webhookURL != "" && diff != nil && (len(diff.NewEntities) > 0 || len(diff.NewIndicators) > 0) {
 			if err := sendWebhookAlert(*webhookURL, summaryFromReport(report)); err != nil {
-				// Deliberately non-fatal: --fail-on's exit code below
-				// already communicates the failure state to whatever's
-				// watching this process's exit status; a webhook
-				// delivery problem shouldn't additionally obscure that
-				// with a different failure mode.
 				fmt.Fprintf(os.Stderr, "Warning: --webhook alert failed to send: %v\n", err)
 			}
 		}
-		os.Exit(1)
+
+		previousReport = &report
+		if !*quiet {
+			fmt.Fprintf(os.Stderr, "[watch] sleeping %s until the next check...\n", watch.String())
+		}
+		time.Sleep(*watch)
 	}
 }
 

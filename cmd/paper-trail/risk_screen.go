@@ -10,6 +10,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/ofsi"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
+	"github.com/bennett-17/paper-trail/internal/unsc"
 )
 
 // screenUSSanctions screens every query term itself, plus every
@@ -200,6 +201,88 @@ func screenICIJOffshoreLeaks(queries []string, entities []risk.Entity, progress 
 				Weight:      3,
 				Entities:    []string{screenedFor},
 				Evidence:    fmt.Sprintf("%s -- %s (%s)", m.Name, m.Description, m.Type),
+			})
+		}
+	}
+
+	for _, query := range queries {
+		screen(query, fmt.Sprintf("search query: %q", query))
+	}
+	for _, e := range entities {
+		for _, p := range e.People {
+			screen(p, e.Label())
+		}
+	}
+	return extra, notes
+}
+
+// screenUNSanctions screens the same scope as screenUSSanctions
+// (every query term, plus every distinct person name found) against
+// the UN Security Council Consolidated Sanctions List. Unlike the US,
+// UK, and ICIJ sources, the UN publishes no live per-query search API
+// at all -- just a single bulk list (confirmed live: ~1,000
+// individuals and entities combined) -- so matching happens entirely
+// client-side here, via a fuzzy-name index built once per call rather
+// than a linear scan per name checked. Uses the same full-token-set
+// normalization as SharedPeopleFuzzy and the UK sanctions screen; a
+// a name with fewer than two tokens (that normalization's own
+// reliability threshold) is skipped for this screen entirely, rather
+// than matched some looser way -- with no server-side query to narrow
+// the field first the way the US/UK screens have, a single-word match
+// against ~1,000 entries unfiltered would be too noisy to trust.
+func screenUNSanctions(queries []string, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "UN sanctions screen: "+fmt.Sprintf(format, a...))
+	}
+	unClient := unsc.NewClient()
+	designations, err := unClient.List()
+	if err != nil {
+		note("skipped (%v)", err)
+		return nil, notes
+	}
+
+	index := make(map[string][]unsc.Designation, len(designations))
+	addToIndex := func(key string, d unsc.Designation) {
+		if key == "" {
+			return
+		}
+		index[key] = append(index[key], d)
+	}
+	for _, d := range designations {
+		addToIndex(risk.NormalizeNameFuzzy(d.Name), d)
+		for _, alias := range d.Aliases {
+			addToIndex(risk.NormalizeNameFuzzy(alias), d)
+		}
+	}
+
+	screened := map[string]bool{}
+	screen := func(name, screenedFor string) {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || screened[key] {
+			return
+		}
+		screened[key] = true
+		wantName := risk.NormalizeNameFuzzy(name)
+		if wantName == "" {
+			return
+		}
+		progress.report("UN sanctions screen", "checking %q (%d so far)", name, len(screened))
+		seenRef := map[string]bool{}
+		for _, d := range index[wantName] {
+			if seenRef[d.ReferenceNumber] {
+				continue // the same designation matched via both its own name and an alias
+			}
+			seenRef[d.ReferenceNumber] = true
+			kind := "individual"
+			if d.IsEntity {
+				kind = "entity"
+			}
+			extra = append(extra, risk.Indicator{
+				Code:        "un_sanctions_match",
+				Description: "Name matched the UN Security Council Consolidated Sanctions List",
+				Weight:      5,
+				Entities:    []string{screenedFor},
+				Evidence:    fmt.Sprintf("%s -- %s sanctions committee (%s, ref %s)", d.Name, d.ListType, kind, d.ReferenceNumber),
 			})
 		}
 	}

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<CONSOLIDATED_LIST xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://www.un.org/sc/resources/sc-sanctions.xsd" dateGenerated="2026-07-22T23:00:04.536Z">
+  <INDIVIDUALS>
+    <INDIVIDUAL>
+      <DATAID>6907993</DATAID>
+      <FIRST_NAME>ERIC</FIRST_NAME>
+      <SECOND_NAME>BADEGE</SECOND_NAME>
+      <UN_LIST_TYPE>DRC</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>CDi.001</REFERENCE_NUMBER>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>a.k.a.</QUALITY>
+        <ALIAS_NAME>Eric Badeje</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY/>
+        <ALIAS_NAME/>
+      </INDIVIDUAL_ALIAS>
+    </INDIVIDUAL>
+    <INDIVIDUAL>
+      <DATAID>6908661</DATAID>
+      <FIRST_NAME>MUHINDO</FIRST_NAME>
+      <SECOND_NAME>AKILI</SECOND_NAME>
+      <THIRD_NAME>MUNDOS</THIRD_NAME>
+      <UN_LIST_TYPE>DRC</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>CDi.032</REFERENCE_NUMBER>
+    </INDIVIDUAL>
+  </INDIVIDUALS>
+  <ENTITIES>
+    <ENTITY>
+      <DATAID>6908402</DATAID>
+      <FIRST_NAME>ADF</FIRST_NAME>
+      <UN_LIST_TYPE>DRC</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>CDe.001</REFERENCE_NUMBER>
+      <ENTITY_ALIAS>
+        <QUALITY>a.k.a.</QUALITY>
+        <ALIAS_NAME>Allied Democratic Forces</ALIAS_NAME>
+      </ENTITY_ALIAS>
+      <ENTITY_ALIAS>
+        <QUALITY>f.k.a.</QUALITY>
+        <ALIAS_NAME>ADF/NALU</ALIAS_NAME>
+      </ENTITY_ALIAS>
+    </ENTITY>
+  </ENTITIES>
+</CONSOLIDATED_LIST>
