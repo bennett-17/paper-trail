@@ -122,6 +122,40 @@ func TestSharedEmailsIsCaseInsensitiveButKeepsDots(t *testing.T) {
 	}
 }
 
+func TestSharedEmailDomainFlagsSameCustomDomainDifferentMailboxes(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Emails: []string{"contact@some-registered-agent.com"}},
+		{Source: "companieshouse", ID: "2", Name: "Unrelated Ltd", Emails: []string{"info@some-registered-agent.com"}},
+	}
+	got := SharedEmailDomain(entities)
+	if len(got) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(got), got)
+	}
+	if got[0].Code != "shared_email_domain" {
+		t.Errorf("Code = %q", got[0].Code)
+	}
+}
+
+func TestSharedEmailDomainIgnoresCommonPublicProviders(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Emails: []string{"contact@gmail.com"}},
+		{Source: "aucharity", ID: "999", Name: "Unrelated Org", Emails: []string{"info@gmail.com"}},
+	}
+	if got := SharedEmailDomain(entities); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0 (gmail.com is a common public provider, meaningless to flag)", len(got))
+	}
+}
+
+func TestSharedEmailDomainIgnoresDifferentDomains(t *testing.T) {
+	entities := []Entity{
+		{Source: "ukcharity", ID: "1", Name: "Example Trust", Emails: []string{"contact@example.org"}},
+		{Source: "aucharity", ID: "999", Name: "Unrelated Org", Emails: []string{"contact@different.org"}},
+	}
+	if got := SharedEmailDomain(entities); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0", len(got))
+	}
+}
+
 func TestSharedWebsitesNormalizesSchemeAndWWW(t *testing.T) {
 	entities := []Entity{
 		{Source: "ukcharity", ID: "1", Name: "Example Trust", Websites: []string{"https://www.example.org/"}},

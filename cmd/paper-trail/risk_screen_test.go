@@ -29,3 +29,18 @@ func TestAverageToneEmptyIsNotOK(t *testing.T) {
 		t.Errorf("ok = true for empty points (avg = %v), want false -- nothing to average", avg)
 	}
 }
+
+func TestWebsiteHostStripsSchemeAndWWW(t *testing.T) {
+	cases := map[string]string{
+		"https://www.example.org/": "example.org",
+		"http://example.org":       "example.org",
+		"example.org":              "example.org",
+		"WWW.Example.ORG":          "example.org",
+		"":                         "",
+	}
+	for input, want := range cases {
+		if got := websiteHost(input); got != want {
+			t.Errorf("websiteHost(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

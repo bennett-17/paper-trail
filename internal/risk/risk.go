@@ -227,6 +227,56 @@ func normalizeEmail(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
+// commonEmailProviders is a hand-maintained set of large public email
+// providers -- deliberately not an exhaustive registry lookup, the
+// same practical-not-perfect approach foldDiacritics's hand-maintained
+// character table takes. Two entities merely sharing @gmail.com says
+// nothing at all about any relationship between them (millions of
+// unrelated people use it), unlike two entities sharing a smaller,
+// custom domain -- see normalizeEmailDomain.
+var commonEmailProviders = map[string]bool{
+	"gmail.com":       true,
+	"googlemail.com":  true,
+	"yahoo.com":       true,
+	"yahoo.co.uk":     true,
+	"hotmail.com":     true,
+	"hotmail.co.uk":   true,
+	"outlook.com":     true,
+	"live.com":        true,
+	"msn.com":         true,
+	"aol.com":         true,
+	"icloud.com":      true,
+	"me.com":          true,
+	"mac.com":         true,
+	"protonmail.com":  true,
+	"proton.me":       true,
+	"mail.com":        true,
+	"gmx.com":         true,
+	"btinternet.com":  true,
+	"virginmedia.com": true,
+	"sky.com":         true,
+	"zoho.com":        true,
+}
+
+// normalizeEmailDomain returns the lowercased domain portion of an
+// email address, or "" if it has no "@" or its domain is one of the
+// large public providers in commonEmailProviders -- a match there is
+// meaningless, unlike a match on a smaller, custom domain. Used only by
+// SharedEmailDomain, distinct from normalizeEmail (which keeps the
+// whole address, for an exact-mailbox match instead).
+func normalizeEmailDomain(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	i := strings.LastIndex(s, "@")
+	if i == -1 || i == len(s)-1 {
+		return ""
+	}
+	domain := s[i+1:]
+	if commonEmailProviders[domain] {
+		return ""
+	}
+	return domain
+}
+
 // normalizeWebsite reduces a URL to its bare host, so
 // "https://www.example.org/", "http://example.org", and
 // "example.org" all compare equal.
@@ -370,6 +420,29 @@ func SharedEmails(entities []Entity) []Indicator {
 	)
 }
 
+// SharedEmailDomain flags groups of two or more distinct entities
+// whose contact emails share the same *custom* domain, even when the
+// mailboxes themselves differ -- a broader, weaker-but-complementary
+// signal to SharedEmails (an identical full address): two entities on
+// different mailboxes at the same private domain (e.g. two companies
+// both using @some-registered-agent.com) can point to a shared mail
+// server or registered-agent relationship an exact-address match alone
+// would miss. Large public providers (gmail.com, yahoo.com, etc.) are
+// excluded via normalizeEmailDomain, since a shared public domain says
+// nothing about any relationship at all. Weighted lowest, alongside
+// formation_cluster and registry_linked_group: a shared custom domain
+// can also just mean a shared corporate-group IT department, entirely
+// innocuous on its own.
+func SharedEmailDomain(entities []Entity) []Indicator {
+	return sharedValueIndicators(entities,
+		func(e Entity) []string { return e.Emails },
+		normalizeEmailDomain,
+		"shared_email_domain",
+		"Multiple entities' contact emails share the same custom domain, even though the specific addresses differ -- a shared public email provider would be meaningless, but a shared private domain can point to a common mail server or registered-agent relationship, though a shared corporate-group IT department can also produce this entirely innocuously",
+		1,
+	)
+}
+
 // SharedWebsites flags groups of two or more distinct entities that
 // list the same website.
 func SharedWebsites(entities []Entity) []Indicator {
@@ -488,12 +561,14 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SharedPeopleFuzzy(entities)...)
 	indicators = append(indicators, SharedPhones(entities)...)
 	indicators = append(indicators, SharedEmails(entities)...)
+	indicators = append(indicators, SharedEmailDomain(entities)...)
 	indicators = append(indicators, SharedWebsites(entities)...)
 	indicators = append(indicators, SharedLinkedGroup(entities)...)
 	indicators = append(indicators, SharedChargees(entities)...)
 	indicators = append(indicators, SharedBeneficialOwners(entities)...)
 	indicators = append(indicators, SharedUltimateParent(entities)...)
 	indicators = append(indicators, SequentialRegistrationNumbers(entities)...)
+	indicators = append(indicators, NearDuplicateNames(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
 	indicators = append(indicators, ConvergentRisk(indicators)...)

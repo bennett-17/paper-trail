@@ -119,6 +119,10 @@ And separately, for sanctions screening:
   screen, standard AML/KYC guidance this tool didn't have before. Free
   and keyless, since it's Wikidata's own public API, not a dedicated
   PEP-screening service.
+- Looks up each entity's website domain registration date via RDAP --
+  the free, keyless, IETF-standardized successor to WHOIS -- and flags
+  one registered suspiciously recently, a classic signal for a shell
+  company or scam operation dressed up with a fresh-looking website.
 
 And on top of all of the above, structural risk heuristics:
 
@@ -205,7 +209,22 @@ And on top of all of the above, structural risk heuristics:
   formation_cluster's same-day/week grouping alone, closer to "filed
   back-to-back in one session" than just "the same busy week", though
   a busy formation agent's ordinary queue can still produce this by
-  chance. Each UK charity's own registered postcode is
+  chance. Every entity in a scan, regardless of source, is also
+  compared against every other by name similarity: a near_duplicate_name
+  indicator fires when two entities' normalized names sit within a
+  small edit distance of each other (2 characters or fewer) but aren't
+  identical -- a classic impersonation/typosquatting pattern (a
+  fraudulent "Acme Holdngs Ltd" standing in for the real "Acme Holdings
+  Ltd") that no exact-match check anywhere else in this tool would ever
+  catch. A fixed, small absolute distance rather than a percentage of
+  name length, since a typosquat is characterized by one swapped,
+  inserted, or deleted character, not a proportional change; short
+  names (under 6 characters normalized) are skipped entirely to avoid
+  flooding this with meaningless acronym collisions ("IBM" vs "IBN").
+  Also common, and entirely innocuous, for legitimately numbered
+  subsidiaries within one corporate group ("Acme Group 1 Ltd" /
+  "Acme Group 2 Ltd" differ by a single digit), so this is a lead to
+  investigate, not proof of impersonation on its own. Each UK charity's own registered postcode is
   also checked against Companies House's advanced search for how many
   companies register-wide share it -- a mail_drop_address indicator
   fires when that count is unusually high, consistent with a
@@ -278,7 +297,19 @@ And on top of all of the above, structural risk heuristics:
   this project runs itself against a separately queried list), this is
   the regulator's own screening result reported directly on the
   beneficial-ownership record, an already-adjudicated fact rather than
-  a correlation this project inferred.
+  a correlation this project inferred. Every active PSC (ROE beneficial
+  owner or ordinary domestic PSC alike) also gets its own
+  nature-of-control data checked for trust involvement -- a
+  trust_controlled_psc indicator fires when control is exercised
+  through a trust rather than directly, Companies House's own data, not
+  an inference (confirmed against its full published PSC
+  nature-of-control codelist: every trust-mediated code carries an
+  "-as-trust" segment, live-verified on the real Mulberry Investments
+  beneficial owners above, all three held "as trust"). Trusts are a
+  known technique for obscuring who ultimately benefits from an entity
+  (the disclosed name is a trustee, not necessarily the person actually
+  benefiting), though also routine for entirely lawful estate planning,
+  so this is a lead to investigate, not proof of anything improper.
   Flagged patterns: a registered/mailing address, phone number, email, or website
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an
@@ -295,7 +326,17 @@ And on top of all of the above, structural risk heuristics:
   "José García" vs. "Jose Garcia", "Müller" vs. "Muller") -- a
   hand-maintained common-character table, not full Unicode
   normalization, since that needs a dependency this stdlib-only
-  project doesn't take -- plus any
+  project doesn't take. Contact emails get a second, broader comparison
+  too: a shared_email_domain indicator fires when two entities' emails
+  differ but share the same *custom* domain (e.g. one entity on
+  info@some-registered-agent.com and another on
+  contact@some-registered-agent.com) -- weighted lowest, since a shared
+  private domain can also just mean a shared corporate-group IT
+  department, but still worth surfacing since an exact-address match
+  alone would miss it entirely. Large public providers (gmail.com,
+  yahoo.com, and similar, a hand-maintained list, not an exhaustive
+  registry lookup) are excluded, since a shared public domain says
+  nothing about any relationship at all -- plus any
   hit against either the US sanctions screen or the UK Sanctions List
   (the two overlap heavily but not completely, so both are checked) on
   any name or person found, plus a third, independent designee list --
@@ -364,6 +405,25 @@ And on top of all of the above, structural risk heuristics:
   politician -- and even a genuine match isn't wrongdoing on its own:
   PEP status means extra scrutiny is conventionally warranted, not that
   anything improper happened.
+  Every entity's own website (whichever source exposed one) also gets
+  its domain registration date looked up via RDAP -- the free,
+  keyless, IETF-standardized successor to WHOIS -- and a young_domain
+  indicator fires when it was registered within the last 30 days, a
+  widely used security-industry convention for a "newly registered
+  domain", not a threshold this project calibrated itself. Confirmed
+  live against two real domains on two different registries
+  (google.com via Verisign's own RDAP server, bbc.co.uk via Nominet's)
+  that every RDAP record exposes its registration date the same way;
+  also confirmed live that RDAP 404s for an arbitrary subdomain rather
+  than the actual registered domain (querying "www.google.com" fails
+  where "google.com" succeeds), so since this project has no
+  public-suffix-list dependency to determine the exact registrable
+  domain for every TLD's structure, one leading label at a time is
+  stripped and retried until a lookup succeeds. A freshly registered
+  domain dressed up as an established business is a classic shell-
+  company/scam signal, but it's also just how any genuinely new,
+  legitimate business's website starts out, so a lead to investigate,
+  not proof on its own.
   Each active corporate PSC (a beneficial owner that's itself a
   company, not a person) also gets its own PSC chain followed up to
   three hops further via Companies House's registration-number

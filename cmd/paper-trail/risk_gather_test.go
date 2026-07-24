@@ -540,6 +540,50 @@ func TestFrequentRenamingSkipsUnparseableDates(t *testing.T) {
 	}
 }
 
+// TestTrustControlledNaturesFlagsOrdinaryDomesticCode is modeled on
+// Companies House's real, published PSC nature-of-control codelist for
+// an ordinary UK-incorporated company's PSC.
+func TestTrustControlledNaturesFlagsOrdinaryDomesticCode(t *testing.T) {
+	natures := []string{"ownership-of-shares-25-to-50-percent-as-trust"}
+	matched := trustControlledNatures(natures)
+	if len(matched) != 1 || matched[0] != natures[0] {
+		t.Errorf("got %v, want %v flagged", matched, natures)
+	}
+}
+
+// TestTrustControlledNaturesFlagsOverseasEntityCode is modeled on the
+// real, live-verified Mulberry Investments Limited (OE007240)
+// beneficial-owner record, whose nature-of-control codes carry the
+// Register of Overseas Entities' own "-registered-overseas-entity"
+// suffix in addition to "-as-trust".
+func TestTrustControlledNaturesFlagsOverseasEntityCode(t *testing.T) {
+	natures := []string{"ownership-of-shares-more-than-25-percent-as-trust-registered-overseas-entity"}
+	if matched := trustControlledNatures(natures); len(matched) != 1 {
+		t.Errorf("got %v, want the ROE trust code flagged", matched)
+	}
+}
+
+// TestTrustControlledNaturesIgnoresDirectOwnership guards the common
+// case -- a PSC controlling a company directly (no trust involved at
+// all) must not be flagged.
+func TestTrustControlledNaturesIgnoresDirectOwnership(t *testing.T) {
+	natures := []string{"ownership-of-shares-75-to-100-percent", "voting-rights-75-to-100-percent"}
+	if matched := trustControlledNatures(natures); len(matched) != 0 {
+		t.Errorf("got %v, want none flagged (no trust involvement)", matched)
+	}
+}
+
+// TestTrustControlledNaturesIgnoresNegativeTrustStatement guards
+// against a plain "trust" substring check false-positiving on
+// Companies House's separate annual-statement field, which explicitly
+// says trust was NOT involved.
+func TestTrustControlledNaturesIgnoresNegativeTrustStatement(t *testing.T) {
+	natures := []string{"no-trust-involved-relevant-period"}
+	if matched := trustControlledNatures(natures); len(matched) != 0 {
+		t.Errorf("got %v, want none flagged (this is a negative statement, not a nature-of-control code)", matched)
+	}
+}
+
 // TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner is
 // modeled on the real, live-verified shape of a Register of Overseas
 // Entities hit (Mulberry Investments Limited, OE007240, Jersey) --

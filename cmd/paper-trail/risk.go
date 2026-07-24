@@ -790,7 +790,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these
-	// nine are independent of each other and safe to run concurrently.
+	// ten are independent of each other and safe to run concurrently.
 	// US sanctions, UK sanctions, UN sanctions, ICIJ Offshore Leaks,
 	// SAM.gov Exclusions, and the disqualified-directors check each
 	// screen every query term plus every distinct person name found;
@@ -798,10 +798,11 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// query terms only (see their own comments below for why); the
 	// Wikidata PEP screen checks every distinct person name only, not
 	// query terms, since PEP status is a property of a person, not an
-	// organization. Merged in the same fixed order as before so output
-	// stays deterministic.
-	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes []string
+	// organization; the RDAP domain-age screen checks every entity's
+	// own website, not a name at all. Merged in the same fixed order as
+	// before so output stays deterministic.
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes []string
 	var wg2 sync.WaitGroup
 
 	wg2.Add(1)
@@ -849,6 +850,11 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer wg2.Done()
 		pepExtra, pepNotes = screenPoliticallyExposedPersons(entities, progress)
 	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		domainExtra, domainNotes = screenDomainAge(entities, progress)
+	}()
 	wg2.Wait()
 
 	extra = append(extra, usExtra...)
@@ -860,6 +866,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	extra = append(extra, gdeltExtra...)
 	extra = append(extra, samExtra...)
 	extra = append(extra, pepExtra...)
+	extra = append(extra, domainExtra...)
 	notes = append(notes, usNotes...)
 	notes = append(notes, ukSanctionsNotes...)
 	notes = append(notes, unNotes...)
@@ -869,6 +876,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, gdeltNotes...)
 	notes = append(notes, samNotes...)
 	notes = append(notes, pepNotes...)
+	notes = append(notes, domainNotes...)
 
 	// Cross-referencing runs once over the combined pool from every
 	// query term -- this is the whole point of taking multiple terms:

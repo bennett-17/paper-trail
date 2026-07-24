@@ -473,6 +473,15 @@ func gatherOverseasEntities(chClient *companieshouse.Client, queries []string, l
 							Evidence:    fmt.Sprintf("%s: flagged sanctioned by Companies House", p.Name),
 						})
 					}
+					if natures := trustControlledNatures(p.NaturesOfControl); len(natures) > 0 {
+						r.extra = append(r.extra, risk.Indicator{
+							Code:        "trust_controlled_psc",
+							Description: "This beneficial owner's control is exercised through a trust rather than directly -- Companies House's own data, not an inference. Trusts are a known technique for obscuring who ultimately benefits from an entity (the disclosed name here is a trustee, not necessarily the person actually benefiting), though trusts are also routine for entirely lawful estate planning, so this is a lead to investigate rather than proof of anything improper",
+							Weight:      2,
+							Entities:    []string{entityLabel},
+							Evidence:    fmt.Sprintf("%s -- %s", p.Name, strings.Join(natures, ", ")),
+						})
+					}
 				}
 			}
 
@@ -859,6 +868,23 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 						Weight:      weight - 1,
 						Entities:    []string{e.Label()},
 						Evidence:    fmt.Sprintf("%s -- %s (%s)", name, country, listName),
+					})
+				}
+			}
+
+			// Trust-controlled PSC: unlike the ownership-chain/
+			// jurisdiction checks above, this applies to every active
+			// PSC (individual or corporate), not just corporate ones --
+			// a trust can hold the controlling stake regardless of
+			// whether the disclosed PSC is a person or a company.
+			for _, p := range activePSCs {
+				if natures := trustControlledNatures(p.NaturesOfControl); len(natures) > 0 {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "trust_controlled_psc",
+						Description: "This beneficial owner's control is exercised through a trust rather than directly -- Companies House's own data, not an inference. Trusts are a known technique for obscuring who ultimately benefits from an entity (the disclosed name here is a trustee, not necessarily the person actually benefiting), though trusts are also routine for entirely lawful estate planning, so this is a lead to investigate rather than proof of anything improper",
+						Weight:      2,
+						Entities:    []string{e.Label()},
+						Evidence:    fmt.Sprintf("%s -- %s", p.Name, strings.Join(natures, ", ")),
 					})
 				}
 			}
@@ -1250,4 +1276,26 @@ func resignationBurst(appointments []companieshouse.Appointment) string {
 		dates = append(dates, datedCompany{when: t, number: a.CompanyNumber, name: a.CompanyName})
 	}
 	return burstDescription(dates, "resigned from")
+}
+
+// trustControlledNatures returns every nature-of-control value (out of
+// a PSC's NaturesOfControl) that indicates control is exercised
+// through a trust rather than directly -- confirmed against Companies
+// House's full published PSC nature-of-control codelist: every such
+// code carries an "-as-trust" segment (e.g.
+// "ownership-of-shares-25-to-50-percent-as-trust" for an ordinary
+// domestic PSC, or "...-as-trust-registered-overseas-entity" for a
+// Register of Overseas Entities beneficial owner). Deliberately does
+// not also match the separate "trust-involved-relevant-period" annual-
+// statement flag -- a different, lower-signal field whose negative
+// counterpart ("no-trust-involved-relevant-period") would otherwise
+// false-positive on a plain substring check.
+func trustControlledNatures(natures []string) []string {
+	var matched []string
+	for _, n := range natures {
+		if strings.Contains(n, "-as-trust") {
+			matched = append(matched, n)
+		}
+	}
+	return matched
 }

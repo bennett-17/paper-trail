@@ -2,13 +2,16 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/gdelt"
 	"github.com/bennett-17/paper-trail/internal/icij"
 	"github.com/bennett-17/paper-trail/internal/ofsi"
+	"github.com/bennett-17/paper-trail/internal/rdap"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/samgov"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
@@ -490,6 +493,82 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 					Evidence:    fmt.Sprintf("%s -- %s (Wikidata %s)", c.Label, c.Description, c.QID),
 				})
 			}
+		}
+	}
+	return extra, notes
+}
+
+// domainAgeThreshold is the "newly registered domain" cutoff
+// screenDomainAge uses -- 30 days is a widely used security-industry
+// convention for flagging a domain as newly registered (many
+// anti-phishing/email-security vendors use the same window), not a
+// threshold this project calibrated itself the way
+// gdeltNegativeToneThreshold was.
+const domainAgeThreshold = 30 * 24 * time.Hour
+
+// websiteHost extracts the bare host from a website value -- mirrors
+// internal/risk's own (unexported) normalizeWebsite exactly: strips
+// scheme, trailing slash, and a "www." prefix, so "https://www.example.org/"
+// and "example.org" both resolve to the same host to look up.
+func websiteHost(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	toParse := s
+	if !strings.Contains(toParse, "://") {
+		toParse = "//" + toParse
+	}
+	host := s
+	if u, err := url.Parse(toParse); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "/"))
+	return strings.TrimPrefix(host, "www.")
+}
+
+// screenDomainAge checks each entity's website domain registration
+// date via RDAP (rdap above -- the free, keyless, IETF-standardized
+// successor to WHOIS) and flags one registered suspiciously recently
+// -- a classic signal for a shell company or scam operation dressed up
+// with a fresh-looking website, though it's also just how any
+// genuinely new, legitimate business's website starts out. Scoped to
+// entities that actually have a website (most sources this tool covers
+// don't expose one at all) -- one RDAP lookup per distinct domain,
+// deduplicated the same way every other per-value screen in this file
+// is, since the same domain can appear on multiple entities.
+func screenDomainAge(entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "RDAP: "+fmt.Sprintf(format, a...))
+	}
+	rdapClient := rdap.NewClient()
+
+	checked := map[string]bool{}
+	for _, e := range entities {
+		for _, w := range e.Websites {
+			host := websiteHost(w)
+			if host == "" || checked[host] {
+				continue
+			}
+			checked[host] = true
+			progress.report("RDAP domain age", "checking %q (%d so far)", host, len(checked))
+
+			registered, err := rdapClient.RegistrationDate(host)
+			if err != nil {
+				note("%q: %v", host, err)
+				continue
+			}
+			age := time.Since(registered)
+			if age >= domainAgeThreshold {
+				continue
+			}
+			extra = append(extra, risk.Indicator{
+				Code:        "young_domain",
+				Description: "This entity's website domain was registered very recently -- a classic signal for a shell company or scam operation dressed up with a fresh-looking website, though it's also just how any genuinely new, legitimate business's website starts out. 30 days is a widely used security-industry convention for a \"newly registered domain\", not a threshold this project calibrated itself",
+				Weight:      2,
+				Entities:    []string{e.Label()},
+				Evidence:    fmt.Sprintf("%s registered %s (%d days ago)", host, registered.Format("2006-01-02"), int(age.Hours()/24)),
+			})
 		}
 	}
 	return extra, notes
