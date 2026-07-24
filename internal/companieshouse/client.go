@@ -296,6 +296,15 @@ type Company struct {
 	// calling that endpoint for every company (confirmed live: it
 	// 404s for a company with no insolvency involvement at all).
 	HasInsolvencyHistory bool `json:"hasInsolvencyHistory,omitempty"`
+	// ForeignRegistryName and ForeignRegistryCountry are confirmed live
+	// on a real Register of Overseas Entities record (Type
+	// "registered-overseas-entity") -- e.g. "Jersey Financial Services
+	// Commission,Jersey" / "JERSEY" -- the entity's actual "home"
+	// company registry abroad, distinct from its UK registered office
+	// address. Not confirmed present for an ordinary UK-incorporated
+	// company.
+	ForeignRegistryName    string `json:"foreignRegistryName,omitempty"`
+	ForeignRegistryCountry string `json:"foreignRegistryCountry,omitempty"`
 }
 
 type companyResponse struct {
@@ -320,7 +329,13 @@ type companyResponse struct {
 	ConfirmationStatement struct {
 		Overdue bool `json:"overdue"`
 	} `json:"confirmation_statement"`
-	HasInsolvencyHistory bool `json:"has_insolvency_history"`
+	HasInsolvencyHistory  bool `json:"has_insolvency_history"`
+	ForeignCompanyDetails struct {
+		OriginatingRegistry struct {
+			Name    string `json:"name"`
+			Country string `json:"country"`
+		} `json:"originating_registry"`
+	} `json:"foreign_company_details"`
 }
 
 // zeroPadCompanyNumber left-pads a company number to Companies House's
@@ -374,6 +389,8 @@ func (c *Client) GetCompany(number string) (Company, error) {
 		LastAccountsType:             resp.Accounts.LastAccounts.Type,
 		ConfirmationStatementOverdue: resp.ConfirmationStatement.Overdue,
 		HasInsolvencyHistory:         resp.HasInsolvencyHistory,
+		ForeignRegistryName:          resp.ForeignCompanyDetails.OriginatingRegistry.Name,
+		ForeignRegistryCountry:       resp.ForeignCompanyDetails.OriginatingRegistry.Country,
 	}, nil
 }
 
@@ -558,6 +575,14 @@ type PSC struct {
 	// hop further: fetch this registration number's own PSCs in turn.
 	CorporateRegistrationNumber string `json:"corporateRegistrationNumber,omitempty"`
 	CorporateCountryRegistered  string `json:"corporateCountryRegistered,omitempty"`
+	// IsSanctioned is confirmed live on a real Register of Overseas
+	// Entities beneficial-owner record (Kind
+	// "individual-beneficial-owner"/"corporate-entity-beneficial-owner")
+	// -- Companies House itself screens ROE beneficial owners against
+	// sanctions lists and exposes the result directly, so this is a
+	// first-party regulatory fact, not an inference this project makes
+	// itself. Not confirmed present on an ordinary (non-ROE) PSC record.
+	IsSanctioned bool `json:"isSanctioned,omitempty"`
 }
 
 type pscResponse struct {
@@ -569,6 +594,7 @@ type pscResponse struct {
 		CeasedOn           string   `json:"ceased_on"`
 		Nationality        string   `json:"nationality"`
 		CountryOfResidence string   `json:"country_of_residence"`
+		IsSanctioned       bool     `json:"is_sanctioned"`
 		Identification     struct {
 			RegistrationNumber string `json:"registration_number"`
 			CountryRegistered  string `json:"country_registered"`
@@ -611,6 +637,7 @@ func (c *Client) GetPersonsWithSignificantControl(number string, limit int) ([]P
 			CeasedOn:                    item.CeasedOn,
 			Nationality:                 item.Nationality,
 			CountryOfResidence:          item.CountryOfResidence,
+			IsSanctioned:                item.IsSanctioned,
 			CorporateRegistrationNumber: item.Identification.RegistrationNumber,
 			CorporateCountryRegistered:  item.Identification.CountryRegistered,
 		})

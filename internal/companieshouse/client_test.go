@@ -154,6 +154,42 @@ func TestGetCompanyParsesProfile(t *testing.T) {
 	}
 }
 
+// TestGetCompanyParsesForeignRegistryDetails is modeled on the real,
+// live-verified profile of a Register of Overseas Entities company
+// (Mulberry Investments Limited, OE007240, Jersey) -- its "home"
+// company registry abroad, distinct from its UK registered office
+// address.
+func TestGetCompanyParsesForeignRegistryDetails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/OE007240", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"company_name": "MULBERRY INVESTMENTS LIMITED",
+			"company_number": "OE007240",
+			"company_status": "registered",
+			"type": "registered-overseas-entity",
+			"date_of_creation": "2022-12-09",
+			"foreign_company_details": {"originating_registry": {"name": "Jersey Financial Services Commission,Jersey", "country": "JERSEY"}}
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	company, err := c.GetCompany("OE007240")
+	if err != nil {
+		t.Fatalf("GetCompany: %v", err)
+	}
+	if company.Type != "registered-overseas-entity" {
+		t.Errorf("Type = %q", company.Type)
+	}
+	if company.ForeignRegistryName != "Jersey Financial Services Commission,Jersey" {
+		t.Errorf("ForeignRegistryName = %q", company.ForeignRegistryName)
+	}
+	if company.ForeignRegistryCountry != "JERSEY" {
+		t.Errorf("ForeignRegistryCountry = %q", company.ForeignRegistryCountry)
+	}
+}
+
 func TestGetCompanyParsesPreviousNames(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/company/04325234", func(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +490,41 @@ func TestGetPersonsWithSignificantControlParsesCurrentAndFormer(t *testing.T) {
 	}
 	if corp.CorporateCountryRegistered != "England" {
 		t.Errorf("CorporateCountryRegistered = %q, want England", corp.CorporateCountryRegistered)
+	}
+}
+
+// TestGetPersonsWithSignificantControlParsesIsSanctioned is modeled on
+// a real, live-verified Register of Overseas Entities beneficial-owner
+// record (Mulberry Investments Limited, OE007240) -- Companies House
+// itself screens these against sanctions lists and reports the result
+// directly on the record.
+func TestGetPersonsWithSignificantControlParsesIsSanctioned(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/OE007240/persons-with-significant-control", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"items": [
+				{"name": "Sanctioned Owner", "kind": "individual-beneficial-owner", "notified_on": "2023-04-26", "is_sanctioned": true},
+				{"name": "Clean Owner", "kind": "individual-beneficial-owner", "notified_on": "2023-04-26", "is_sanctioned": false}
+			],
+			"total_results": 2
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	pscs, err := c.GetPersonsWithSignificantControl("OE007240", 0)
+	if err != nil {
+		t.Fatalf("GetPersonsWithSignificantControl: %v", err)
+	}
+	if len(pscs) != 2 {
+		t.Fatalf("got %d PSCs, want 2", len(pscs))
+	}
+	if !pscs[0].IsSanctioned {
+		t.Errorf("pscs[0].IsSanctioned = false, want true")
+	}
+	if pscs[1].IsSanctioned {
+		t.Errorf("pscs[1].IsSanctioned = true, want false")
 	}
 }
 

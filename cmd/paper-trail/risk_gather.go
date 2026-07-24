@@ -399,6 +399,109 @@ func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, ca
 	return flattenQueryResults(results)
 }
 
+// gatherOverseasEntities searches every query term against Companies
+// House's own company search directly, rather than only reaching
+// Companies House indirectly via a UK charity's linked
+// CompaniesHouseNumber the way gatherUKCharityEntities does -- filtered
+// specifically to hits of type registered-overseas-entity, the UK's
+// Register of Overseas Entities (ROE). Confirmed live: ROE entities
+// (company numbers prefixed "OE") are ordinary hits in the same company
+// search endpoint this project already calls elsewhere, no separate API
+// needed, just a type filter over the same results. The ROE was created
+// by the Economic Crime (Transparency and Enforcement) Act 2022
+// specifically to close a well-known property-based money-laundering
+// loophole: a foreign company could own or control UK land/property
+// while disclosing nothing about who actually controls it. Every ROE
+// hit's beneficial owners are pulled from the same
+// persons-with-significant-control endpoint gatherUKCharityEntities
+// already uses for ordinary PSCs -- confirmed live that Companies House
+// itself screens these against sanctions lists and reports the result
+// directly (IsSanctioned), an already-adjudicated regulatory fact this
+// project doesn't have to infer itself. chClient may be nil (Companies
+// House client creation failed), matching every other use of it in this
+// file.
+func gatherOverseasEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+	if chClient == nil {
+		return nil, nil, nil
+	}
+	results := runConcurrentQueries(queries, func(qi int, query string) queryResult {
+		progress.report("Register of Overseas Entities", "term %d/%d: %q", qi+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) {
+			r.notes = append(r.notes, "Register of Overseas Entities: "+fmt.Sprintf(format, a...))
+		}
+
+		cacheKey := riskcache.Key("roe", query, limit)
+		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = cached
+			return r
+		}
+
+		result, err := chClient.SearchCompanies(query, limit)
+		if err != nil {
+			note("%v", err)
+			return r
+		}
+
+		var termEntities []risk.Entity
+		for _, hit := range result.Companies {
+			if hit.Type != "registered-overseas-entity" {
+				continue
+			}
+
+			var addrs []string
+			if addr := hit.Address.AsSingleLine(); addr != "" {
+				addrs = append(addrs, addr)
+			}
+			entityLabel := fmt.Sprintf("companieshouse: %s (%s)", hit.Name, hit.CompanyNumber)
+
+			var people []string
+			if pscs, err := chClient.GetPersonsWithSignificantControl(hit.CompanyNumber, limit); err != nil {
+				note("%s (%s) beneficial owners: %v", hit.Name, hit.CompanyNumber, err)
+			} else {
+				for _, p := range pscs {
+					if p.CeasedOn != "" {
+						continue // active beneficial owners only
+					}
+					people = append(people, p.Name)
+					if p.IsSanctioned {
+						r.extra = append(r.extra, risk.Indicator{
+							Code:        "roe_beneficial_owner_sanctioned",
+							Description: "Companies House itself flags one of this overseas entity's disclosed beneficial owners as sanctioned -- unlike every other sanctions check in this tool (a name-only match this project runs itself against a separately queried list), this is the regulator's own screening result reported directly on the beneficial-ownership record, an already-adjudicated fact rather than a correlation this project inferred",
+							Weight:      5,
+							Entities:    []string{entityLabel},
+							Evidence:    fmt.Sprintf("%s: flagged sanctioned by Companies House", p.Name),
+						})
+					}
+				}
+			}
+
+			evidence := "registered as an overseas entity (owns or controls UK land/property while incorporated abroad)"
+			if company, err := chClient.GetCompany(hit.CompanyNumber); err != nil {
+				note("%s (%s) profile: %v", hit.Name, hit.CompanyNumber, err)
+			} else if company.ForeignRegistryCountry != "" {
+				evidence = fmt.Sprintf("registered as an overseas entity, home registry: %s (%s)", company.ForeignRegistryName, company.ForeignRegistryCountry)
+			}
+			r.extra = append(r.extra, risk.Indicator{
+				Code:        "overseas_entity",
+				Description: "This entity is on the UK's Register of Overseas Entities (ROE) -- a company incorporated abroad that owns or controls land or property in the UK, required to disclose its beneficial owners since the Economic Crime (Transparency and Enforcement) Act 2022 closed a well-known property-based money-laundering loophole. Most ROE-registered entities are unremarkable offshore holding structures for perfectly legitimate property investment, so this is a fact worth surfacing, not a finding of anything improper on its own",
+				Weight:      2,
+				Entities:    []string{entityLabel},
+				Evidence:    evidence,
+			})
+
+			termEntities = append(termEntities, risk.NewEntity("companieshouse", hit.CompanyNumber, hit.Name, addrs, people))
+		}
+		if len(termEntities) == 0 {
+			note("no registered-overseas-entity match for %q", query)
+		}
+		r.entities = termEntities
+		cache.Set(cacheKey, termEntities)
+		return r
+	})
+	return flattenQueryResults(results)
+}
+
 // gatherUKCharityEntities resolves every query term against the UK
 // Charity Commission register and, for each charity that's also a
 // registered company (has a CompaniesHouseNumber), pulls in its

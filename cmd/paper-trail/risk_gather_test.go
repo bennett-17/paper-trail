@@ -2,13 +2,17 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
+	"github.com/bennett-17/paper-trail/internal/risk"
+	"github.com/bennett-17/paper-trail/internal/riskcache"
 )
 
 // pscChainFixture serves a fixed one-item PSC response for a given
@@ -533,5 +537,86 @@ func TestFrequentRenamingSkipsUnparseableDates(t *testing.T) {
 	// return no flag rather than a false one built from zero times.
 	if desc := frequentRenaming(names); desc != "" {
 		t.Errorf("got %q, want no flag when no entry has both dates parseable", desc)
+	}
+}
+
+// TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner is
+// modeled on the real, live-verified shape of a Register of Overseas
+// Entities hit (Mulberry Investments Limited, OE007240, Jersey) --
+// company search returning a mix of ordinary and ROE-type hits, and a
+// beneficial owner Companies House itself flags as sanctioned.
+func TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/companies", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"items": [
+				{"company_number": "12345678", "title": "ORDINARY LTD", "company_status": "active", "company_type": "ltd", "date_of_creation": "2020-01-01", "address": {"address_line_1": "1 High St", "locality": "London"}},
+				{"company_number": "OE007240", "title": "OVERSEAS HOLDCO LIMITED", "company_status": "registered", "company_type": "registered-overseas-entity", "date_of_creation": "2022-12-09", "address": {"address_line_1": "Standard Bank House", "locality": "St. Helier", "country": "Jersey"}}
+			],
+			"total_results": 2
+		}`)
+	})
+	mux.HandleFunc("/company/OE007240/persons-with-significant-control", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"items": [
+				{"name": "Sanctioned Person", "kind": "individual-beneficial-owner", "notified_on": "2023-01-01", "is_sanctioned": true},
+				{"name": "Clean Person", "kind": "individual-beneficial-owner", "notified_on": "2023-01-01", "is_sanctioned": false}
+			],
+			"total_results": 2
+		}`)
+	})
+	mux.HandleFunc("/company/OE007240", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"company_name": "OVERSEAS HOLDCO LIMITED",
+			"company_number": "OE007240",
+			"company_status": "registered",
+			"type": "registered-overseas-entity",
+			"date_of_creation": "2022-12-09",
+			"foreign_company_details": {"originating_registry": {"name": "Jersey Financial Services Commission,Jersey", "country": "JERSEY"}}
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	chClient := newChainTestClient(t, srv)
+
+	entities, extra, _ := gatherOverseasEntities(chClient, []string{"Overseas Holdco"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+
+	if len(entities) != 1 {
+		t.Fatalf("got %d entities, want 1 (the ordinary ltd hit should be filtered out): %+v", len(entities), entities)
+	}
+	if entities[0].ID != "OE007240" || entities[0].Source != "companieshouse" {
+		t.Errorf("entity = %+v, want source companieshouse, ID OE007240", entities[0])
+	}
+	if len(entities[0].People) != 2 {
+		t.Errorf("People = %v, want both beneficial owners", entities[0].People)
+	}
+
+	var overseas, sanctioned []risk.Indicator
+	for _, ind := range extra {
+		switch ind.Code {
+		case "overseas_entity":
+			overseas = append(overseas, ind)
+		case "roe_beneficial_owner_sanctioned":
+			sanctioned = append(sanctioned, ind)
+		}
+	}
+	if len(overseas) != 1 {
+		t.Fatalf("got %d overseas_entity indicators, want 1: %+v", len(overseas), extra)
+	}
+	if !strings.Contains(overseas[0].Evidence, "Jersey") {
+		t.Errorf("Evidence = %q, want it to cite the Jersey originating registry", overseas[0].Evidence)
+	}
+	if len(sanctioned) != 1 {
+		t.Fatalf("got %d roe_beneficial_owner_sanctioned indicators, want 1 (only the sanctioned owner, not the clean one): %+v", len(sanctioned), extra)
+	}
+	if !strings.Contains(sanctioned[0].Evidence, "Sanctioned Person") {
+		t.Errorf("Evidence = %q, want it to name Sanctioned Person", sanctioned[0].Evidence)
+	}
+}
+
+func TestGatherOverseasEntitiesNilClientReturnsNothing(t *testing.T) {
+	entities, extra, notes := gatherOverseasEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+	if entities != nil || extra != nil || notes != nil {
+		t.Errorf("got (%v, %v, %v), want all nil when chClient is nil", entities, extra, notes)
 	}
 }

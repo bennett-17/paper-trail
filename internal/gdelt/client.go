@@ -189,3 +189,63 @@ func (c *Client) SearchArticles(query string, limit int) ([]Article, error) {
 	}
 	return articles, nil
 }
+
+// TonePoint is one day's average sentiment tone across every article
+// GDELT matched for a query that day, on GDELT's own Average Tone
+// scale (confirmed live: real-world values mostly fall roughly between
+// -10 and +10, negative meaning more negative than positive language;
+// 0 is neutral, not "no coverage").
+type TonePoint struct {
+	Date  string
+	Value float64
+}
+
+type timelineToneResponse struct {
+	Timeline []struct {
+		Series string `json:"series"`
+		Data   []struct {
+			Date  string  `json:"date"`
+			Value float64 `json:"value"`
+		} `json:"data"`
+	} `json:"timeline"`
+}
+
+// TimelineTone fetches GDELT's day-by-day average sentiment tone for a
+// query (mode=timelinetone), covering the same default lookback window
+// SearchArticles's default does. Confirmed live: a query with no
+// matching coverage at all returns a valid empty timeline, not an
+// error. Unlike SearchArticles, timelinetone has no maxrecords/limit
+// parameter -- it's already a fixed daily aggregate, not a list of
+// individual results.
+func (c *Client) TimelineTone(query string) ([]TonePoint, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+
+	params := url.Values{}
+	params.Set("query", `"`+query+`"`)
+	params.Set("mode", "timelinetone")
+	params.Set("format", "json")
+
+	status, body, err := c.get(c.BaseURL + "?" + params.Encode())
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("GDELT API returned HTTP %d fetching tone timeline for %q: %s", status, query, strings.TrimSpace(string(body)))
+	}
+
+	var resp timelineToneResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing GDELT tone timeline: %v", err)
+	}
+	if len(resp.Timeline) == 0 {
+		return nil, nil
+	}
+	points := make([]TonePoint, 0, len(resp.Timeline[0].Data))
+	for _, d := range resp.Timeline[0].Data {
+		points = append(points, TonePoint{Date: d.Date, Value: d.Value})
+	}
+	return points, nil
+}

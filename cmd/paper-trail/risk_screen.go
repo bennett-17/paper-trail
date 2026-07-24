@@ -13,6 +13,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/samgov"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
 	"github.com/bennett-17/paper-trail/internal/unsc"
+	"github.com/bennett-17/paper-trail/internal/wikidata"
 )
 
 // screenUSSanctions screens every query term itself, plus every
@@ -410,6 +411,90 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 	return extra, notes
 }
 
+// screenPoliticallyExposedPersons checks every distinct person name
+// gathered from entities (officers, trustees, beneficial owners --
+// whichever a source exposes) against Wikidata's own "politician"
+// (wikidata.PoliticianOccupationQID) occupation tag -- a Politically
+// Exposed Person (PEP) screen, standard AML/KYC guidance this tool
+// didn't have before. Confirmed live that Wikidata's search alone can
+// return several same-named candidates that are NOT the real person
+// (biography books, unrelated homonyms) alongside the genuine one
+// (searching "Angela Merkel" returns her real chancellor record
+// alongside an unrelated society board member and three biography
+// titles, all sharing the exact same label) -- candidates are filtered
+// to a fuzzy full-name match first (same comparison shared_person_fuzzy
+// and disqualified_director use), and only a surviving candidate's
+// occupation is actually checked, so an irrelevant homonym never
+// reaches the (batched, one-call-per-person) occupation lookup at all.
+// A match is a lead to verify, not a confirmed identity -- a common
+// name can still collide with an unrelated real politician -- and even
+// a genuine match isn't wrongdoing on its own: PEP status means extra
+// scrutiny is conventionally warranted (FATF/FinCEN guidance), not
+// that anything improper happened.
+func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "Wikidata: "+fmt.Sprintf(format, a...))
+	}
+	wdClient := wikidata.NewClient()
+
+	checked := map[string]bool{}
+	for _, e := range entities {
+		for _, p := range e.People {
+			key := strings.ToLower(strings.TrimSpace(p))
+			if key == "" || checked[key] {
+				continue
+			}
+			checked[key] = true
+			progress.report("Wikidata PEP screen", "checking %q (%d so far)", p, len(checked))
+
+			candidates, err := wdClient.SearchPeople(p, 5)
+			if err != nil {
+				note("%q: %v", p, err)
+				continue
+			}
+			wantName := risk.NormalizeNameFuzzy(p)
+			var matched []wikidata.PersonCandidate
+			var qids []string
+			for _, c := range candidates {
+				if wantName == "" || risk.NormalizeNameFuzzy(c.Label) != wantName {
+					continue
+				}
+				matched = append(matched, c)
+				qids = append(qids, c.QID)
+			}
+			if len(matched) == 0 {
+				continue
+			}
+
+			occupations, err := wdClient.Occupations(qids)
+			if err != nil {
+				note("%q occupations: %v", p, err)
+				continue
+			}
+			for _, c := range matched {
+				isPolitician := false
+				for _, occ := range occupations[c.QID] {
+					if occ == wikidata.PoliticianOccupationQID {
+						isPolitician = true
+						break
+					}
+				}
+				if !isPolitician {
+					continue
+				}
+				extra = append(extra, risk.Indicator{
+					Code:        "pep_match",
+					Description: "Name matches a real person Wikidata tags with the occupation \"politician\" -- a standard AML/KYC Politically Exposed Person screen. A common name can still collide with an unrelated real politician (this is Wikidata's own name-matching, not a confirmed identity check), and even a genuine match isn't wrongdoing on its own -- PEP status means extra scrutiny is conventionally warranted, not that anything improper happened",
+					Weight:      2,
+					Entities:    []string{e.Label()},
+					Evidence:    fmt.Sprintf("%s -- %s (Wikidata %s)", c.Label, c.Description, c.QID),
+				})
+			}
+		}
+	}
+	return extra, notes
+}
+
 // screenEDGARFullTextMentions catches a name showing up in *someone
 // else's* filing (e.g. a related-party footnote, a litigation
 // reference) even when no formal officer or address relationship was
@@ -483,6 +568,30 @@ func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, en
 	return extra, notes
 }
 
+// gdeltNegativeToneThreshold is how negative a query's average tone
+// (across every day GDELT's timelinetone mode reports, GDELT's own
+// Average Tone scale) needs to be before gdelt_negative_tone fires --
+// see screenGDELTMentions. Calibrated against two real, live-verified
+// examples over the same ~81-day window: "Swedbank" (routine bank
+// coverage, including a real Panama Papers fine story) averages +0.01,
+// nowhere close; "Wirecard" (the real, proven accounting-fraud
+// collapse) averages -0.61, clearly crossing it. -0.5 sits between the
+// two, closer to the proven-fraud example than the routine one.
+const gdeltNegativeToneThreshold = -0.5
+
+// averageTone returns the plain mean of every day's tone value.
+// ok is false for an empty/nil points (no coverage at all to average).
+func averageTone(points []gdelt.TonePoint) (avg float64, ok bool) {
+	if len(points) == 0 {
+		return 0, false
+	}
+	var sum float64
+	for _, p := range points {
+		sum += p.Value
+	}
+	return sum / float64(len(points)), true
+}
+
 // screenGDELTMentions checks every query term (not every discovered
 // person -- same "query terms only" scoping as
 // screenEDGARFullTextMentions above, for the same noise-avoidance
@@ -498,6 +607,16 @@ func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, en
 // uses), so this screen alone can dominate a large multi-term scan's
 // wall-clock time -- an accepted, documented tradeoff of using it, not
 // something worth engineering around.
+//
+// A query with at least one mention also gets a second GDELT call
+// (mode=timelinetone) for its day-by-day average sentiment: a plain
+// mention only says a name showed up somewhere, with no signal at all
+// about whether the coverage was good, bad, or neutral -- averaging
+// tone across the whole window gives a sharper, distinct signal
+// (gdelt_negative_tone) when coverage skews clearly negative rather
+// than just present. Skipped entirely when there were zero mentions,
+// since there's nothing to average and no reason to double GDELT's
+// already-dominant rate-limit cost for a query with no coverage at all.
 func screenGDELTMentions(queries []string, limit int, progress *progressReporter) (extra []risk.Indicator, notes []string) {
 	note := func(format string, a ...any) {
 		notes = append(notes, "GDELT: "+fmt.Sprintf(format, a...))
@@ -524,6 +643,25 @@ func screenGDELTMentions(queries []string, limit int, progress *progressReporter
 				Weight:      1,
 				Entities:    []string{fmt.Sprintf("search query: %q", query)},
 				Evidence:    fmt.Sprintf("%s -- %s (%s, %s)", a.Title, a.Domain, a.SourceCountry, a.SeenDate),
+			})
+		}
+		if len(articles) == 0 {
+			continue
+		}
+
+		progress.report("GDELT", "checking %q tone timeline", query)
+		points, err := gdeltClient.TimelineTone(query)
+		if err != nil {
+			note("%q tone timeline: %v", query, err)
+			continue
+		}
+		if avg, ok := averageTone(points); ok && avg <= gdeltNegativeToneThreshold {
+			extra = append(extra, risk.Indicator{
+				Code:        "gdelt_negative_tone",
+				Description: "This name's indexed news coverage skews clearly negative on average, not just present -- a sharper, more specific signal than a bare gdelt_news_mention (which says nothing about whether the coverage was good, bad, or neutral). Sustained negative sentiment can reflect real trouble (a scandal, fraud allegation, or regulatory action), but can also just mean routine coverage of a genuinely bad but lawful event (a product recall, a strike, a natural disaster affecting the business) -- a lead to read the actual coverage over, not proof of anything on its own",
+				Weight:      2,
+				Entities:    []string{fmt.Sprintf("search query: %q", query)},
+				Evidence:    fmt.Sprintf("average tone %.2f across %d days of indexed coverage (GDELT's Average Tone scale, more negative = more negative language)", avg, len(points)),
 			})
 		}
 	}

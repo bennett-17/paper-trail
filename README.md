@@ -87,6 +87,13 @@ Separately, for organizations that don't file with the SEC at all:
   and secured-lending data for UK charities that are also registered
   companies, since the Charity Commission API itself only exposes
   trustees (requires your own free API key -- see Setup)
+- Searches the UK's Register of Overseas Entities (ROE) by name --
+  companies incorporated abroad that own or control land/property in
+  the UK, required to disclose their beneficial owners since the
+  Economic Crime (Transparency and Enforcement) Act 2022. ROE entities
+  are ordinary hits in the same Companies House search above (an
+  "OE"-prefixed company number), so this uses the same API and key,
+  just filtered to that one company type.
 - Searches the Global LEI Foundation's (GLEIF) Legal Entity Identifier
   database by name -- unlike every other source above, GLEIF isn't
   scoped to one jurisdiction (an LEI is required for financial-market
@@ -107,6 +114,11 @@ And separately, for sanctions screening:
   designations under UK (post-Brexit) sanctions regulations, which
   overlap heavily with the US lists above but not completely. Unlike
   every other UK source in this project, this needs no API key at all.
+- Screens officer/trustee/beneficial-owner names against Wikidata's own
+  "politician" occupation tag -- a Politically Exposed Person (PEP)
+  screen, standard AML/KYC guidance this tool didn't have before. Free
+  and keyless, since it's Wikidata's own public API, not a dedicated
+  PEP-screening service.
 
 And on top of all of the above, structural risk heuristics:
 
@@ -244,6 +256,29 @@ And on top of all of the above, structural risk heuristics:
   data already states, so it's scored low: the linkage is routine and
   expected on its own, and mainly useful as context for interpreting
   other indicators between the same entities.
+  Every query term is also searched directly against Companies House
+  itself (not just reached indirectly via a UK charity's own linked
+  company), filtered specifically to hits of type
+  registered-overseas-entity: an overseas_entity indicator fires for
+  every one found, since being on the Register of Overseas Entities
+  (ROE) at all is a fact worth surfacing -- a company incorporated
+  abroad that owns or controls UK land/property, required to disclose
+  its beneficial owners since the Economic Crime (Transparency and
+  Enforcement) Act 2022 closed a well-known property-based money-
+  laundering loophole. Confirmed live against a real example (Mulberry
+  Investments Limited, company number OE007240, home registry the
+  Jersey Financial Services Commission): most ROE entities are
+  unremarkable offshore holding structures for perfectly legitimate
+  property investment, so this is a lead worth noting, not a finding of
+  anything improper on its own. Each one's disclosed beneficial owners
+  are pulled in via the same persons-with-significant-control endpoint
+  used for ordinary PSCs above, and get a roe_beneficial_owner_sanctioned
+  indicator if Companies House itself reports one as sanctioned --
+  unlike every other sanctions check in this tool (a name-only match
+  this project runs itself against a separately queried list), this is
+  the regulator's own screening result reported directly on the
+  beneficial-ownership record, an already-adjudicated fact rather than
+  a correlation this project inferred.
   Flagged patterns: a registered/mailing address, phone number, email, or website
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an
@@ -306,6 +341,29 @@ And on top of all of the above, structural risk heuristics:
   producing a person_jurisdiction_risk indicator on their own --
   weaker than the sanctions-linked check above, but a signal this tool
   would otherwise never surface at all.
+  Every distinct officer/trustee/beneficial-owner name found is also
+  screened against Wikidata's own "politician" occupation tag
+  (pep_match) -- a standard AML/KYC Politically Exposed Person check
+  this tool didn't have before, free and keyless since it's Wikidata's
+  own public search and entity API, not a dedicated PEP-screening
+  service. Confirmed live that name matching alone isn't reliable
+  enough here: searching "Angela Merkel" returns her real Wikidata
+  record alongside an unrelated society board member and three
+  biography-book entries, all sharing the exact same label -- so
+  candidates are first filtered to a fuzzy full-name match (the same
+  comparison shared_person_fuzzy and disqualified_director use), and
+  only a surviving candidate's occupation data is actually checked
+  (batched into a single request per person, regardless of how many
+  candidates matched). Also confirmed live along the way: raw SPARQL
+  label matching (an obvious first approach) silently misses Merkel's
+  own canonical record entirely, since her label is stored under
+  Wikidata's language-independent "mul" tag rather than "en" -- a
+  genuine, current data-modeling detail that's why this uses Wikidata's
+  own search API instead. A match is a lead to verify, not a confirmed
+  identity -- a common name can still collide with an unrelated real
+  politician -- and even a genuine match isn't wrongdoing on its own:
+  PEP status means extra scrutiny is conventionally warranted, not that
+  anything improper happened.
   Each active corporate PSC (a beneficial owner that's itself a
   company, not a person) also gets its own PSC chain followed up to
   three hops further via Companies House's registration-number
@@ -392,7 +450,24 @@ And on top of all of the above, structural risk heuristics:
   rate limit of one request every 5 seconds, far stricter than any
   other source this tool uses, so this check alone can dominate a
   large multi-term scan's wall-clock time -- an accepted tradeoff of
-  using it, not a bug. Each primary resolved EDGAR company is also checked
+  using it, not a bug. A query term with at least one mention also gets
+  a second GDELT call for its day-by-day average sentiment (GDELT's own
+  Average Tone metric) -- a bare mention says nothing about whether the
+  coverage was good, bad, or neutral, so a gdelt_negative_tone indicator
+  fires separately when the average across the whole window skews
+  clearly negative, a sharper and more specific signal than presence
+  alone. Calibrated against two real, live-verified examples over the
+  same ~81-day window: "Swedbank" (routine bank coverage) averages
+  +0.01, nowhere near the threshold; "Wirecard" (the real, proven
+  accounting-fraud collapse) averages -0.61, clearly crossing it --
+  -0.5 sits between the two. Skipped entirely for a query with zero
+  mentions, both because there's nothing to average and to avoid
+  doubling GDELT's already-dominant rate-limit cost for a term with no
+  coverage at all. Sustained negative sentiment can reflect real
+  trouble, but can just as easily mean routine coverage of a genuinely
+  bad but lawful event (a recall, a strike, a natural disaster) --
+  still a lead to read the actual coverage over, not proof on its own.
+  Each primary resolved EDGAR company is also checked
   against SEC's XBRL data for its most recently reported total assets
   -- a shell_company_assets indicator flags anything under $150,000
   despite being an active filer, SEC's own working definition of a

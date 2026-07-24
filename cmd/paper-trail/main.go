@@ -333,7 +333,27 @@ own data already states, so it's scored low: the linkage itself is
 routine and expected, not unusual, and mainly useful as context for
 interpreting other indicators between the same entities (e.g. linked
 charities also sharing an address isn't a coincidence worth separate
-suspicion). Flagged patterns: entities that share a registered/mailing address, phone
+suspicion). Every <query> term is
+also searched directly against Companies House itself, not just
+reached indirectly via a UK charity's own linked company, filtered to
+hits of type registered-overseas-entity -- the UK's Register of
+Overseas Entities (ROE), companies incorporated abroad that own or
+control UK land/property, required to disclose their beneficial owners
+since the Economic Crime (Transparency and Enforcement) Act 2022
+closed a well-known property-based money-laundering loophole. An
+overseas_entity indicator fires for every one found (confirmed live
+against a real example, Mulberry Investments Limited, OE007240, home
+registry the Jersey Financial Services Commission) -- most are
+unremarkable offshore holding structures for legitimate property
+investment, so this is a lead worth noting, not proof on its own. Each
+one's disclosed beneficial owners are pulled in the same way as
+ordinary PSCs above, and get a roe_beneficial_owner_sanctioned
+indicator if Companies House itself reports one as sanctioned -- unlike
+every other sanctions check in this tool (a name-only match run against
+a separately queried list), this is the regulator's own screening
+result on the beneficial-ownership record directly, an already-
+adjudicated fact rather than a correlation this project inferred.
+Flagged patterns: entities that share a registered/mailing address, phone
 number, email, or website, and the same individual appearing as an
 officer, director, or trustee of more than one of them -- including a
 weaker, lower-scored version of that check for names that only match
@@ -398,7 +418,26 @@ officer/PSC records) are checked against FATF's lists, producing a
 person_jurisdiction_risk indicator on their own -- a weaker signal
 than jurisdiction_risk (which needs a sanctions match too), but not
 nothing, and one this tool would otherwise never surface since it has
-no other reason to look at nationality at all. Each active corporate
+no other reason to look at nationality at all. Every distinct
+officer/trustee/beneficial-owner name found is also screened against
+Wikidata's own "politician" occupation tag (pep_match) -- a standard
+AML/KYC Politically Exposed Person check, free and keyless since it's
+Wikidata's own public API, not a dedicated PEP-screening service.
+Confirmed live that name matching alone isn't reliable enough:
+searching "Angela Merkel" returns her real record alongside an
+unrelated society board member and three biography-book entries, all
+sharing the exact same label -- so candidates are filtered to a fuzzy
+full-name match first (same comparison as shared_person_fuzzy and
+disqualified_director), and only a surviving candidate's occupation is
+checked, batched into one request per person regardless of how many
+candidates matched. Also confirmed live: raw SPARQL label matching (an
+obvious first approach) silently misses Merkel's own canonical record,
+since her label is stored under Wikidata's language-independent "mul"
+tag rather than "en" -- why this uses Wikidata's own search API
+instead. A match is a lead to verify, not a confirmed identity, and
+even a genuine one isn't wrongdoing on its own -- PEP status means
+extra scrutiny is conventionally warranted, not that anything improper
+happened. Each active corporate
 PSC (a beneficial owner that's itself a company) also has its own PSC
 chain followed up to three hops further via Companies House's
 registration-number linkage, collecting every distinct country the
@@ -484,7 +523,19 @@ the same low weight, same "lead to verify" framing. GDELT enforces a
 strict rate limit of one request every 5 seconds (confirmed live, far
 stricter than any other source this tool uses), so this check alone
 can dominate a large multi-term scan's wall-clock time -- an accepted
-tradeoff of using it, not a bug. Each primary resolved EDGAR company is also checked
+tradeoff of using it, not a bug. A term with at least one mention also
+gets a second GDELT call for its day-by-day average sentiment
+(gdelt_negative_tone) -- a bare mention says nothing about whether the
+coverage was good, bad, or neutral, so this fires separately when the
+average skews clearly negative, calibrated against two real examples
+over the same ~81-day window: "Swedbank" (routine coverage) averages
++0.01, "Wirecard" (the real, proven accounting-fraud collapse)
+averages -0.61, with the threshold at -0.5 between them. Skipped for a
+zero-mention term, both because there's nothing to average and to
+avoid doubling GDELT's already-dominant rate-limit cost for nothing.
+Still a lead, not proof -- sustained negative sentiment can reflect
+real trouble, but can just as easily be routine coverage of a bad but
+lawful event. Each primary resolved EDGAR company is also checked
 against SEC's XBRL "company concept" API for its most recently
 reported total assets -- a shell_company_assets indicator flags
 anything under $150,000 despite being an active filer, SEC's own

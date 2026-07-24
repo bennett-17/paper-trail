@@ -731,9 +731,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// mutex -- they're merged in a fixed order below, after every
 	// goroutine finishes, so output stays deterministic regardless of
 	// which source happens to finish first.
-	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities []risk.Entity
-	var edgarExtra, npExtra, gleifExtra, ukExtra []risk.Indicator
-	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes []string
+	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, roeEntities []risk.Entity
+	var edgarExtra, npExtra, gleifExtra, ukExtra, roeExtra []risk.Indicator
+	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, roeNotes []string
 	var wg sync.WaitGroup
 
 	if edgarClient != nil {
@@ -763,6 +763,11 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer wg.Done()
 		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress)
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		roeEntities, roeExtra, roeNotes = gatherOverseasEntities(chClient, queries, limit, cache, cacheTTL, progress)
+	}()
 	wg.Wait()
 
 	entities = append(entities, edgarEntities...)
@@ -770,27 +775,33 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	entities = append(entities, acncEntities...)
 	entities = append(entities, gleifEntities...)
 	entities = append(entities, ukEntities...)
+	entities = append(entities, roeEntities...)
 	extra = append(extra, edgarExtra...)
 	extra = append(extra, npExtra...)
 	extra = append(extra, gleifExtra...)
 	extra = append(extra, ukExtra...)
+	extra = append(extra, roeExtra...)
 	notes = append(notes, edgarNotes...)
 	notes = append(notes, npNotes...)
 	notes = append(notes, acncNotes...)
 	notes = append(notes, gleifNotes...)
 	notes = append(notes, ukNotes...)
+	notes = append(notes, roeNotes...)
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these
-	// eight are independent of each other and safe to run concurrently.
+	// nine are independent of each other and safe to run concurrently.
 	// US sanctions, UK sanctions, UN sanctions, ICIJ Offshore Leaks,
 	// SAM.gov Exclusions, and the disqualified-directors check each
 	// screen every query term plus every distinct person name found;
 	// EDGAR full-text mentions and GDELT news mentions both screen
-	// query terms only (see their own comments below for why). Merged
-	// in the same fixed order as before so output stays deterministic.
-	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes []string
+	// query terms only (see their own comments below for why); the
+	// Wikidata PEP screen checks every distinct person name only, not
+	// query terms, since PEP status is a property of a person, not an
+	// organization. Merged in the same fixed order as before so output
+	// stays deterministic.
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes []string
 	var wg2 sync.WaitGroup
 
 	wg2.Add(1)
@@ -833,6 +844,11 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer wg2.Done()
 		samExtra, samNotes = screenSAMExclusions(queries, entities, progress)
 	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		pepExtra, pepNotes = screenPoliticallyExposedPersons(entities, progress)
+	}()
 	wg2.Wait()
 
 	extra = append(extra, usExtra...)
@@ -843,6 +859,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	extra = append(extra, icijExtra...)
 	extra = append(extra, gdeltExtra...)
 	extra = append(extra, samExtra...)
+	extra = append(extra, pepExtra...)
 	notes = append(notes, usNotes...)
 	notes = append(notes, ukSanctionsNotes...)
 	notes = append(notes, unNotes...)
@@ -851,6 +868,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, icijNotes...)
 	notes = append(notes, gdeltNotes...)
 	notes = append(notes, samNotes...)
+	notes = append(notes, pepNotes...)
 
 	// Cross-referencing runs once over the combined pool from every
 	// query term -- this is the whole point of taking multiple terms:

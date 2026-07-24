@@ -102,6 +102,66 @@ func TestSearchArticlesEmptyResultIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestTimelineToneParsesDailyAverages is modeled directly on the real,
+// live response for a query of "Swedbank" -- 81 days of GDELT's own
+// Average Tone metric.
+func TestTimelineToneParsesDailyAverages(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"query_details": {"title": "\"Swedbank\"", "date_resolution": "day"}, "timeline": [ { "series": "Average Tone", "data": [ { "date": "20260501T000000Z", "value": 2.3946 },{ "date": "20260502T000000Z", "value": -4.0816 } ] } ] }`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	points, err := c.TimelineTone("Swedbank")
+	if err != nil {
+		t.Fatalf("TimelineTone: %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("got %d points, want 2", len(points))
+	}
+	if points[0].Date != "20260501T000000Z" || points[0].Value != 2.3946 {
+		t.Errorf("points[0] = %+v", points[0])
+	}
+	if points[1].Value != -4.0816 {
+		t.Errorf("points[1].Value = %v, want -4.0816", points[1].Value)
+	}
+}
+
+// TestTimelineToneEmptyResultIsNotAnError mirrors
+// TestSearchArticlesEmptyResultIsNotAnError -- a query with no matching
+// coverage at all is a normal, valid outcome, not an error.
+func TestTimelineToneEmptyResultIsNotAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	points, err := c.TimelineTone("zxqvwplkjhqwerty998877")
+	if err != nil {
+		t.Fatalf("TimelineTone: %v, want nil error for a genuine zero-match query", err)
+	}
+	if len(points) != 0 {
+		t.Errorf("got %d points, want 0", len(points))
+	}
+}
+
+func TestTimelineToneSkipsBlankQuery(t *testing.T) {
+	c := NewClient()
+	c.BaseURL = "http://127.0.0.1:0" // would fail to connect if actually called
+	points, err := c.TimelineTone("   ")
+	if err != nil {
+		t.Fatalf("TimelineTone: %v, want no error for a blank query", err)
+	}
+	if points != nil {
+		t.Errorf("points = %v, want nil (no request made)", points)
+	}
+}
+
 func TestSearchArticlesSkipsBlankQuery(t *testing.T) {
 	c := NewClient()
 	c.BaseURL = "http://127.0.0.1:0" // would fail to connect if actually called
