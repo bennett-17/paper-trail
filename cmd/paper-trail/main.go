@@ -327,7 +327,31 @@ otherwise), so no wasted call for the common case. Each of these four
 is common and often innocuous on its own (a wind-down or
 restructuring is often routine and entirely lawful), but worth a
 second look for an otherwise-active organization, especially alongside
-other indicators. Each UK charity's own trustee count (already fetched
+other indicators. Every outstanding charge found also triggers a check
+of the company's own PSC statements -- a separate endpoint from
+ordinary PSCs, only fetched when there's a charge to cross-reference
+against. A psc_opacity_with_active_charges indicator fires when an
+active "no individual or entity with significant control has been
+identified" statement (Companies House's own wording) coincides with
+at least one live charge -- officially nobody controls the company,
+yet it's still borrowing against real assets. Confirmed live against a
+real example (Northern Ireland Association of Citizens Advice Bureaux
+Limited, NI017574: this exact statement alongside 4 outstanding
+mortgage charges) that this combination is entirely routine and
+innocuous for a guarantee company with no shares or shareholders at
+all -- common for charities and membership organizations -- so a lead
+worth investigating, not proof on its own. The same outstanding-charge
+count also feeds a second, unrelated contradiction check:
+dormant_sic_with_charges fires when the company's own declared SIC
+code is one of Companies House's two reserved codes for "dormant"
+(99999) or "non-trading" (74990) -- not an ordinary industry
+classification -- while it's still carrying live secured debt, since a
+genuinely dormant or non-trading company shouldn't have any. Confirmed
+live against a real example (ALCALI LTD, SC312375: SIC code 74990,
+active status, one outstanding "Standard security" charge from 2008
+against a property in Oban) -- could reflect a stale SIC code never
+updated after the company resumed activity, or a legacy charge simply
+never released, so a lead to investigate, not proof on its own. Each UK charity's own trustee count (already fetched
 for the shared_person check, no extra API call needed) is also checked
 for governance concentration: two or fewer trustees gets a
 few_trustees indicator (confirmed live against a real charity with
@@ -401,8 +425,19 @@ domain can also just mean a shared corporate-group IT department, but
 still worth surfacing since an exact-address match would miss it. Large
 public providers (gmail.com, yahoo.com, etc., a hand-maintained list,
 not an exhaustive registry lookup) are excluded, since a shared public
-domain means nothing on its own -- plus any hit against either the US
-sanctions screen (sanctions_match) or the UK Sanctions List
+domain means nothing on its own. Every phone number this project has
+anywhere comes from this one UK Charity Commission field (confirmed by
+inspection -- no other source sets it), so it's always a UK charity's
+own number by construction; foreign_phone_country fires when it's
+nonetheless written in international format with a non-UK calling code
+(e.g. "+1 212 555 0100" on an England & Wales charity's own contact
+record), using a small hand-maintained calling-code table -- an
+unrecognized code, or a number with no international prefix at all
+(the common case, e.g. a plain national-format "020 7946 0991"), is
+deliberately not flagged rather than guessed at. Could reflect a
+genuine overseas office or a diaspora/international charity's real
+foreign contact line, so a lead to note, not proof on its own -- plus
+any hit against either the US sanctions screen or the UK Sanctions List
 (uk_sanctions_match, via uksanctions above -- the two lists overlap
 heavily but not completely, so both are checked), plus the UN
 Security Council Consolidated Sanctions List (un_sanctions_match) --

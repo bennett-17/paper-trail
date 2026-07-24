@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -612,14 +613,39 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				// officers or PSCs -- outstanding charges only,
 				// since a satisfied (paid-off) one no longer
 				// reflects a live relationship.
+				var outstandingCharges int
 				if charges, err := chClient.GetCharges(detail.CompaniesHouseNumber, limit); err != nil {
 					chNote("%s (company %s) charges: %v", detail.Name, detail.CompaniesHouseNumber, err)
 				} else {
 					for _, ch := range charges {
 						if ch.SatisfiedOn == "" {
+							outstandingCharges++
 							chargees = append(chargees, ch.PersonsEntitled...)
 						}
 					}
+				}
+				// PSC statements are a company-level assertion
+				// ("no individual or entity with significant
+				// control has been identified"), not an actual
+				// person or company -- normal and expected for
+				// many guarantee companies (common charity
+				// structures with no shares/shareholders at all;
+				// confirmed live against a real example, Northern
+				// Ireland Association of Citizens Advice Bureaux
+				// Limited, NI017574, which carries this exact
+				// statement alongside 4 outstanding mortgage
+				// charges). Only fetched when there's at least one
+				// outstanding charge already found above, since
+				// that's the only circumstance pscOpacityIndicators
+				// can fire in -- avoids a wasted call for the
+				// common case of a company with neither.
+				if outstandingCharges > 0 {
+					statements, err := chClient.GetPersonsWithSignificantControlStatements(detail.CompaniesHouseNumber, limit)
+					if err != nil {
+						chNote("%s (company %s) PSC statements: %v", detail.Name, detail.CompaniesHouseNumber, err)
+					}
+					entityLabel := fmt.Sprintf("companieshouse: %s (%s)", detail.Name, detail.CompaniesHouseNumber)
+					r.extra = append(r.extra, pscOpacityIndicators(statements, outstandingCharges, entityLabel)...)
 				}
 				// One profile fetch covers two separate checks below --
 				// frequent renaming and dormant/overdue accounts -- so
@@ -719,6 +745,9 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 							})
 						}
 					}
+					if ind := dormantSICWithChargesIndicator(company.SICCodes, outstandingCharges, companyLabel); ind != nil {
+						r.extra = append(r.extra, *ind)
+					}
 				}
 			}
 			// ID includes the suffix -- confirmed a real bug fetching
@@ -732,6 +761,24 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			e := risk.NewEntity("ukcharity", regRef, detail.Name, addrs, people)
 			if detail.Phone != "" {
 				e.Phones = []string{detail.Phone}
+				// Every phone number this project has anywhere
+				// comes from this one UK Charity Commission field
+				// (confirmed by inspection -- no other source sets
+				// Entity.Phones at all), so it's always a UK charity's
+				// own number by construction -- a foreign_phone_country
+				// indicator fires when it's nonetheless written in
+				// international format with a non-UK calling code,
+				// e.g. "+1 212 555 0100" on an England & Wales
+				// charity's own contact record.
+				if country, ok := foreignCallingCode(detail.Phone); ok {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "foreign_phone_country",
+						Description: "This UK charity's own listed phone number carries a non-UK international calling code -- could be an overseas office, a diaspora/international charity with a genuine foreign contact line, or simply a data-entry artifact, so a lead to note, not proof of anything improper",
+						Weight:      1,
+						Entities:    []string{e.Label()},
+						Evidence:    fmt.Sprintf("%s (implied country: %s)", detail.Phone, country),
+					})
+				}
 			}
 			if detail.Email != "" {
 				e.Emails = []string{detail.Email}
@@ -1290,6 +1337,101 @@ func resignationBurst(appointments []companieshouse.Appointment) string {
 // statement flag -- a different, lower-signal field whose negative
 // counterpart ("no-trust-involved-relevant-period") would otherwise
 // false-positive on a plain substring check.
+// internationalCallingCodes is a hand-maintained, deliberately not
+// exhaustive map from E.164 international calling code to a
+// human-readable country/region name -- the same practical-not-perfect
+// approach as internal/risk's commonEmailProviders and diacritic
+// table. Covers commonly-seen codes only; an unrecognized code is
+// simply not flagged by foreignCallingCode rather than guessed at.
+var internationalCallingCodes = map[string]string{
+	"1":   "US/Canada",
+	"7":   "Russia/Kazakhstan",
+	"20":  "Egypt",
+	"27":  "South Africa",
+	"30":  "Greece",
+	"31":  "Netherlands",
+	"32":  "Belgium",
+	"33":  "France",
+	"34":  "Spain",
+	"36":  "Hungary",
+	"39":  "Italy",
+	"41":  "Switzerland",
+	"43":  "Austria",
+	"45":  "Denmark",
+	"46":  "Sweden",
+	"47":  "Norway",
+	"48":  "Poland",
+	"49":  "Germany",
+	"51":  "Peru",
+	"52":  "Mexico",
+	"55":  "Brazil",
+	"60":  "Malaysia",
+	"61":  "Australia",
+	"63":  "Philippines",
+	"64":  "New Zealand",
+	"65":  "Singapore",
+	"66":  "Thailand",
+	"81":  "Japan",
+	"82":  "South Korea",
+	"86":  "China",
+	"90":  "Turkey",
+	"91":  "India",
+	"92":  "Pakistan",
+	"94":  "Sri Lanka",
+	"212": "Morocco",
+	"233": "Ghana",
+	"234": "Nigeria",
+	"254": "Kenya",
+	"263": "Zimbabwe",
+	"353": "Ireland",
+	"852": "Hong Kong",
+	"855": "Cambodia",
+	"880": "Bangladesh",
+	"960": "Maldives",
+	"962": "Jordan",
+	"966": "Saudi Arabia",
+	"971": "UAE",
+	"974": "Qatar",
+}
+
+// foreignCallingCode returns the implied country for a phone number's
+// leading international calling code, and true, when the number is
+// written in international format (a leading "+" or "00") *and* that
+// code is recognized in internationalCallingCodes and isn't the UK's
+// own (44). A number with no international prefix at all (the
+// overwhelming common case for a UK charity's own listed number, e.g.
+// a plain national-format "020 7946 0991") returns ("", false), since
+// that's ambiguous, not evidence of anything foreign -- as does a
+// recognized-format number whose code simply isn't in the
+// hand-maintained table, deliberately not guessed at.
+func foreignCallingCode(phone string) (country string, ok bool) {
+	s := strings.TrimSpace(phone)
+	switch {
+	case strings.HasPrefix(s, "+"):
+		s = s[1:]
+	case strings.HasPrefix(s, "00"):
+		s = s[2:]
+	default:
+		return "", false
+	}
+	digits := nonDigitPhoneRE.ReplaceAllString(s, "")
+	for _, n := range []int{3, 2, 1} {
+		if len(digits) < n {
+			continue
+		}
+		code := digits[:n]
+		if code == "44" {
+			return "", false
+		}
+		if name, found := internationalCallingCodes[code]; found {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+var nonDigitPhoneRE = regexp.MustCompile(`\D+`)
+
 func trustControlledNatures(natures []string) []string {
 	var matched []string
 	for _, n := range natures {
@@ -1298,4 +1440,73 @@ func trustControlledNatures(natures []string) []string {
 		}
 	}
 	return matched
+}
+
+// pscOpacityIndicators returns a psc_opacity_with_active_charges
+// indicator for every currently active (CeasedOn empty)
+// "no individual or entity with significant control" PSC statement,
+// but only when outstandingCharges is greater than zero -- a company
+// that formally says nobody controls it, yet is still carrying live
+// secured debt, is a real opacity pattern worth surfacing, even though
+// the same combination is also entirely routine for a guarantee
+// company (no shares or shareholders at all) borrowing against real
+// property. Returns nil when there are no outstanding charges at all,
+// regardless of any statement found -- see the call site in
+// gatherUKCharityEntities for why that also avoids the API call
+// entirely in that case.
+func pscOpacityIndicators(statements []companieshouse.PSCStatement, outstandingCharges int, entityLabel string) []risk.Indicator {
+	if outstandingCharges == 0 {
+		return nil
+	}
+	var out []risk.Indicator
+	for _, st := range statements {
+		if st.CeasedOn != "" || st.Statement != companieshouse.NoSignificantControlStatement {
+			continue
+		}
+		out = append(out, risk.Indicator{
+			Code:        "psc_opacity_with_active_charges",
+			Description: "This company has formally stated that no individual or entity with significant control has been identified, yet it's carrying outstanding charges (mortgages/debentures) -- officially nobody controls it, but it's still borrowing against real assets. Common and entirely innocuous for a guarantee company with no shares or shareholders (many charities and membership organizations are structured this way), but a lead worth investigating, not proof of anything improper",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    fmt.Sprintf("statement filed %s, %d outstanding charge(s)", st.NotifiedOn, outstandingCharges),
+		})
+	}
+	return out
+}
+
+// dormantSICCode and nonTradingSICCode are Companies House's own
+// reserved SIC 2007 codes a company uses to declare itself dormant or
+// non-trading, rather than an ordinary industry classification --
+// confirmed against Companies House's own published SIC code list.
+const (
+	dormantSICCode    = "99999"
+	nonTradingSICCode = "74990"
+)
+
+// dormantSICWithChargesIndicator flags a contradiction: a company's
+// own declared SIC code says it's dormant or non-trading, yet it's
+// carrying at least one outstanding charge (mortgage/debenture) -- a
+// genuinely dormant or non-trading company shouldn't have live secured
+// borrowing. Confirmed live against a real example (ALCALI LTD,
+// SC312375: SIC code 74990/non-trading, active status, one outstanding
+// "Standard security" charge from 2008 secured against a property in
+// Oban). Returns nil when there are no outstanding charges at all, or
+// when neither declared SIC code matches.
+func dormantSICWithChargesIndicator(sicCodes []string, outstandingCharges int, entityLabel string) *risk.Indicator {
+	if outstandingCharges == 0 {
+		return nil
+	}
+	for _, code := range sicCodes {
+		if code != dormantSICCode && code != nonTradingSICCode {
+			continue
+		}
+		return &risk.Indicator{
+			Code:        "dormant_sic_with_charges",
+			Description: "This company's own declared SIC code says it's dormant or non-trading, yet it's carrying outstanding charges (mortgages/debentures) -- a genuinely dormant or non-trading company shouldn't have live secured borrowing. Could reflect a stale SIC code that was never updated after the company resumed activity, or a legacy charge from before it went dormant that was simply never released, so this is a lead to investigate, not proof of anything improper",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    fmt.Sprintf("SIC code %s, %d outstanding charge(s)", code, outstandingCharges),
+		}
+	}
+	return nil
 }

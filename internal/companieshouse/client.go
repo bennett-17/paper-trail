@@ -645,6 +645,83 @@ func (c *Client) GetPersonsWithSignificantControl(number string, limit int) ([]P
 	return pscs, nil
 }
 
+// NoSignificantControlStatement is the exact statement value Companies
+// House's own codelist uses for "the company knows or has reasonable
+// cause to believe there is no registrable person or registrable
+// relevant legal entity in relation to the company" -- confirmed live
+// (a real example: Northern Ireland Association of Citizens Advice
+// Bureaux Limited, NI017574). Deliberately kept as Companies House's
+// own spelling ("signficant", missing an "i") rather than "corrected"
+// -- this is compared against the API's own raw value, not prose.
+const NoSignificantControlStatement = "no-individual-or-entity-with-signficant-control"
+
+// PSCStatement is a single entry from a company's PSC statements list
+// -- confirmed live to be a genuinely separate endpoint from
+// GetPersonsWithSignificantControl (Tesco Plc, exempt from PSC
+// reporting as an already-regulated public company, returns zero items
+// from *both* endpoints -- a statement isn't emitted for every company
+// with no real PSC, only when the company itself has filed one).
+type PSCStatement struct {
+	Statement  string // e.g. NoSignificantControlStatement
+	NotifiedOn string
+	CeasedOn   string // empty if still active/current
+}
+
+type pscStatementsResponse struct {
+	Items []struct {
+		Statement  string `json:"statement"`
+		NotifiedOn string `json:"notified_on"`
+		CeasedOn   string `json:"ceased_on"`
+	} `json:"items"`
+}
+
+// GetPersonsWithSignificantControlStatements fetches a company's PSC
+// statements (current and former) by its exact company number -- a
+// company-level assertion like "no individual or entity with
+// significant control has been identified", not an actual person or
+// company the way GetPersonsWithSignificantControl's results are.
+// limit caps how many come back (0 uses the API's own default page
+// size). Confirmed live that this 404s for the common case of a
+// company with no statement filed at all (e.g. Tesco Plc, exempt from
+// PSC reporting) -- unlike every other 404 in this client, that's
+// treated as "no statements" here rather than an error, since most
+// companies scanned won't have one and there's no cheap pre-check flag
+// (the way Company.HasInsolvencyHistory lets GetInsolvency's caller
+// skip a wasted call) to avoid the request first.
+func (c *Client) GetPersonsWithSignificantControlStatements(number string, limit int) ([]PSCStatement, error) {
+	number = zeroPadCompanyNumber(number)
+	u := c.BaseURL + "/company/" + url.PathEscape(number) + "/persons-with-significant-control-statements"
+	if limit > 0 {
+		params := url.Values{}
+		params.Set("items_per_page", strconv.Itoa(limit))
+		u += "?" + params.Encode()
+	}
+	status, body, err := c.doGetWithRetry(u)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("Companies House API returned HTTP %d for %s", status, u)
+	}
+
+	var resp pscStatementsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing persons with significant control statements: %v", err)
+	}
+	statements := make([]PSCStatement, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		statements = append(statements, PSCStatement{
+			Statement:  item.Statement,
+			NotifiedOn: item.NotifiedOn,
+			CeasedOn:   item.CeasedOn,
+		})
+	}
+	return statements, nil
+}
+
 // DisqualifiedOfficer is a single disqualified-officer search hit.
 // Confirmed live: the search endpoint has no date-of-birth or address
 // filter, only a name query, so a hit here is a name-only match --

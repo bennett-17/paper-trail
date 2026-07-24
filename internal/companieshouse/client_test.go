@@ -316,6 +316,59 @@ func TestGetInsolvencyReturns404ForACompanyWithNoInsolvencyHistory(t *testing.T)
 	}
 }
 
+// TestGetPersonsWithSignificantControlStatementsParsesRealShape is
+// modeled directly on the real, live-verified statement for Northern
+// Ireland Association of Citizens Advice Bureaux Limited (NI017574).
+func TestGetPersonsWithSignificantControlStatementsParsesRealShape(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/NI017574/persons-with-significant-control-statements", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"kind":"persons-with-significant-control-statement","notified_on":"2017-01-14","statement":"no-individual-or-entity-with-signficant-control"}],"items_per_page":25,"start_index":0,"total_results":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	statements, err := c.GetPersonsWithSignificantControlStatements("NI017574", 0)
+	if err != nil {
+		t.Fatalf("GetPersonsWithSignificantControlStatements: %v", err)
+	}
+	if len(statements) != 1 {
+		t.Fatalf("got %d statements, want 1", len(statements))
+	}
+	if statements[0].Statement != NoSignificantControlStatement {
+		t.Errorf("Statement = %q, want %q", statements[0].Statement, NoSignificantControlStatement)
+	}
+	if statements[0].NotifiedOn != "2017-01-14" || statements[0].CeasedOn != "" {
+		t.Errorf("statements[0] = %+v", statements[0])
+	}
+}
+
+// TestGetPersonsWithSignificantControlStatementsReturns404AsEmpty
+// guards a real, live-confirmed find: a company with no PSC statement
+// filed at all (e.g. Tesco Plc, exempt from PSC reporting) gets a
+// plain 404 -- unlike GetInsolvency's 404 (a real error, since a
+// company with no insolvency history should never have been asked),
+// this is the common case for most companies, so it's treated as "no
+// statements" here, not an error.
+func TestGetPersonsWithSignificantControlStatementsReturns404AsEmpty(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/company/00445790/persons-with-significant-control-statements", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"status":404,"error":"Not Found"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	statements, err := c.GetPersonsWithSignificantControlStatements("00445790", 0)
+	if err != nil {
+		t.Fatalf("GetPersonsWithSignificantControlStatements: %v, want nil error for the common no-statement case", err)
+	}
+	if len(statements) != 0 {
+		t.Errorf("got %d statements, want 0", len(statements))
+	}
+}
+
 // TestGetCompanyZeroPadsNumber guards against a real bug found live:
 // the UK Charity Commission's CompaniesHouseNumber field returns
 // company numbers without leading zeros (e.g. "4325234"), but this API

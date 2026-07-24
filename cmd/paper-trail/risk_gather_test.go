@@ -543,6 +543,44 @@ func TestFrequentRenamingSkipsUnparseableDates(t *testing.T) {
 // TestTrustControlledNaturesFlagsOrdinaryDomesticCode is modeled on
 // Companies House's real, published PSC nature-of-control codelist for
 // an ordinary UK-incorporated company's PSC.
+func TestForeignCallingCodeFlagsRecognizedNonUKCode(t *testing.T) {
+	country, ok := foreignCallingCode("+1 212 555 0100")
+	if !ok || country != "US/Canada" {
+		t.Errorf("got (%q, %v), want (US/Canada, true)", country, ok)
+	}
+}
+
+func TestForeignCallingCodeAccepts00Prefix(t *testing.T) {
+	country, ok := foreignCallingCode("00353 1 234 5678")
+	if !ok || country != "Ireland" {
+		t.Errorf("got (%q, %v), want (Ireland, true)", country, ok)
+	}
+}
+
+func TestForeignCallingCodeIgnoresUKNumber(t *testing.T) {
+	if _, ok := foreignCallingCode("+44 20 7946 0991"); ok {
+		t.Error("got ok=true for a UK number, want false")
+	}
+}
+
+func TestForeignCallingCodeIgnoresNationalFormat(t *testing.T) {
+	// The overwhelming common case: a UK charity's own number listed
+	// in plain national format with no international prefix at all --
+	// ambiguous, not evidence of anything foreign.
+	if _, ok := foreignCallingCode("020 7946 0991"); ok {
+		t.Error("got ok=true for a plain national-format number, want false")
+	}
+}
+
+func TestForeignCallingCodeIgnoresUnrecognizedCode(t *testing.T) {
+	// A well-formed international number whose calling code just
+	// isn't in the hand-maintained table -- deliberately not guessed
+	// at.
+	if _, ok := foreignCallingCode("+999 1 234 5678"); ok {
+		t.Error("got ok=true for an unrecognized calling code, want false")
+	}
+}
+
 func TestTrustControlledNaturesFlagsOrdinaryDomesticCode(t *testing.T) {
 	natures := []string{"ownership-of-shares-25-to-50-percent-as-trust"}
 	matched := trustControlledNatures(natures)
@@ -581,6 +619,89 @@ func TestTrustControlledNaturesIgnoresNegativeTrustStatement(t *testing.T) {
 	natures := []string{"no-trust-involved-relevant-period"}
 	if matched := trustControlledNatures(natures); len(matched) != 0 {
 		t.Errorf("got %v, want none flagged (this is a negative statement, not a nature-of-control code)", matched)
+	}
+}
+
+// TestPSCOpacityIndicatorsFlagsActiveStatementWithCharges is modeled
+// on a real, live-verified example: Northern Ireland Association of
+// Citizens Advice Bureaux Limited (NI017574) carries exactly this
+// statement alongside outstanding mortgage charges.
+func TestPSCOpacityIndicatorsFlagsActiveStatementWithCharges(t *testing.T) {
+	statements := []companieshouse.PSCStatement{
+		{Statement: companieshouse.NoSignificantControlStatement, NotifiedOn: "2017-01-14"},
+	}
+	got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (NI017574)")
+	if len(got) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(got), got)
+	}
+	if got[0].Code != "psc_opacity_with_active_charges" {
+		t.Errorf("Code = %q", got[0].Code)
+	}
+	if !strings.Contains(got[0].Evidence, "4 outstanding charge") {
+		t.Errorf("Evidence = %q, want it to cite the charge count", got[0].Evidence)
+	}
+}
+
+func TestPSCOpacityIndicatorsRequiresOutstandingCharges(t *testing.T) {
+	statements := []companieshouse.PSCStatement{
+		{Statement: companieshouse.NoSignificantControlStatement, NotifiedOn: "2017-01-14"},
+	}
+	if got := pscOpacityIndicators(statements, 0, "companieshouse: Example Ltd (1)"); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0 (no outstanding charges at all)", len(got))
+	}
+}
+
+func TestPSCOpacityIndicatorsIgnoresCeasedStatement(t *testing.T) {
+	statements := []companieshouse.PSCStatement{
+		{Statement: companieshouse.NoSignificantControlStatement, NotifiedOn: "2017-01-14", CeasedOn: "2020-01-01"},
+	}
+	if got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (1)"); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0 (statement is no longer active)", len(got))
+	}
+}
+
+func TestPSCOpacityIndicatorsIgnoresOtherStatementTypes(t *testing.T) {
+	statements := []companieshouse.PSCStatement{
+		{Statement: "psc-exists-but-not-identified", NotifiedOn: "2017-01-14"},
+	}
+	if got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (1)"); len(got) != 0 {
+		t.Errorf("got %d indicators, want 0 (a different statement type, not \"no PSC at all\")", len(got))
+	}
+}
+
+// TestDormantSICWithChargesIndicatorFlagsNonTradingCode is modeled on
+// a real, live-verified example: ALCALI LTD (SC312375) declares SIC
+// code 74990 (non-trading), is active, and carries one outstanding
+// "Standard security" charge from 2008.
+func TestDormantSICWithChargesIndicatorFlagsNonTradingCode(t *testing.T) {
+	ind := dormantSICWithChargesIndicator([]string{"74990"}, 1, "companieshouse: Alcali Ltd (SC312375)")
+	if ind == nil {
+		t.Fatal("expected an indicator, got nil")
+	}
+	if ind.Code != "dormant_sic_with_charges" {
+		t.Errorf("Code = %q", ind.Code)
+	}
+	if !strings.Contains(ind.Evidence, "74990") {
+		t.Errorf("Evidence = %q, want it to cite the SIC code", ind.Evidence)
+	}
+}
+
+func TestDormantSICWithChargesIndicatorFlagsDormantCode(t *testing.T) {
+	ind := dormantSICWithChargesIndicator([]string{"99999"}, 2, "companieshouse: Example Ltd (1)")
+	if ind == nil {
+		t.Fatal("expected an indicator, got nil")
+	}
+}
+
+func TestDormantSICWithChargesIndicatorRequiresOutstandingCharges(t *testing.T) {
+	if ind := dormantSICWithChargesIndicator([]string{"99999"}, 0, "companieshouse: Example Ltd (1)"); ind != nil {
+		t.Errorf("got %+v, want nil (no outstanding charges at all)", ind)
+	}
+}
+
+func TestDormantSICWithChargesIndicatorIgnoresOrdinaryIndustryCode(t *testing.T) {
+	if ind := dormantSICWithChargesIndicator([]string{"62012"}, 2, "companieshouse: Example Ltd (1)"); ind != nil {
+		t.Errorf("got %+v, want nil (an ordinary industry code, not dormant/non-trading)", ind)
 	}
 }
 
