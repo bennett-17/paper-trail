@@ -295,7 +295,25 @@ And on top of all of the above, structural risk heuristics:
   itself recommends against, though it's common and often innocuous
   for a small or newly formed charity -- skipped when a charity has
   zero trustees on record, since that's more likely missing data than
-  a real governance gap. UK charities
+  a real governance gap. The same detail record (no extra API call
+  needed) also carries the charity's own insolvency status directly
+  from the Charity Commission -- a charity_insolvent indicator fires
+  when it's insolvent or in administration, distinct from a linked
+  company's own Companies House insolvency history checked separately
+  below: not every charity structure (a trust, or a CIO) has a
+  Companies House link at all, so this is the only insolvency signal
+  available for those. Separately, a charity_interim_manager indicator
+  fires when the Charity Commission has appointed an interim manager to
+  run the charity -- a formal regulatory intervention under s.76 of
+  the Charities Act 2011, imposed almost always in the course of a
+  statutory inquiry into serious mismanagement or misconduct, so unlike
+  every other charity indicator here this is an already-adjudicated
+  regulatory action, not a correlation this project infers -- the same
+  category of signal as Companies House's own disqualified-directors
+  register, and weighted the same (this tool's highest weight).
+  Confirmed live that both fields are real and present on a real
+  charity's own detail record (Oxfam, registered number 202918, both
+  false, as expected for a charity in good standing). UK charities
   sharing a Charity Commission registered number under different
   suffixes (a main charity and its own linked/subsidiary charities) get
   a registry_linked_group indicator -- unlike every other one here,
@@ -463,7 +481,33 @@ And on top of all of the above, structural risk heuristics:
   domain dressed up as an established business is a classic shell-
   company/scam signal, but it's also just how any genuinely new,
   legitimate business's website starts out, so a lead to investigate,
-  not proof on its own.
+  not proof on its own. A domain that isn't young by registration date
+  also gets a second, complementary check against the free Internet
+  Archive Wayback Machine CDX API: its earliest archived snapshot --
+  when the domain first had real, crawlable content, a different
+  question than when someone merely claimed it. A
+  dormant_domain_reactivated indicator fires when that gap is large
+  (5+ years) -- a domain registered long ago but only recently having
+  real content archived, consistent with a previously-dormant or
+  parked domain suddenly put to active use to make a new operation
+  look more established than it is via an old registration record.
+  Unlike the calibrated thresholds elsewhere in this project, 5 years
+  is a reasoned default rather than one benchmarked against a specific
+  real case -- finding one would mean probing an actual live fraud
+  domain, which this project won't do -- chosen deliberately
+  conservative to stay clear of the common, entirely innocuous reason
+  for a multi-year gap: a domain bought defensively long before a
+  genuinely new business or charity got around to building its site.
+  Confirmed live that this specific free service is flaky enough to
+  need its own retry-with-backoff, on both a real HTTP 503 and even a
+  bare network-level timeout -- broader than every other client in
+  this project, whose retries are scoped to a specific status code
+  only, since a network-level failure was the more common one observed
+  for this particular source. Also confirmed live, a genuine quirk:
+  when a domain has no archived snapshots at all, the API returns an
+  HTML "503 Service Unavailable" page wrapped in an HTTP 200 status,
+  not a clean empty result -- treated here as "nothing found", not an
+  error.
   Each active corporate PSC (a beneficial owner that's itself a
   company, not a person) also gets its own PSC chain followed up to
   three hops further via Companies House's registration-number
@@ -567,6 +611,24 @@ And on top of all of the above, structural risk heuristics:
   trouble, but can just as easily mean routine coverage of a genuinely
   bad but lawful event (a recall, a strike, a natural disaster) --
   still a lead to read the actual coverage over, not proof on its own.
+  The same "at least one mention" gate also covers a third GDELT check:
+  a gdelt_illicit_theme indicator fires when coverage includes an
+  article GDELT's own Global Knowledge Graph classifies under a
+  corruption, organized-crime, or money-laundering theme (a narrow,
+  deliberately curated slice of GDELT's own ~59,000-entry theme
+  taxonomy) -- sharper and more specific than a bare mention or the
+  tone average, since GDELT's own classification does the filtering
+  here, not a keyword or a score this project computes itself.
+  Confirmed live combining all three theme codes with OR inside one
+  query (rather than one request per theme, a real consideration given
+  GDELT's rate limit) against the real Wirecard example: returns
+  genuinely theme-relevant coverage (e.g. a real "Germany cracks down
+  on money laundering, tax fraud" story) distinct from that same
+  query's unfiltered mention results. Coverage under one of these
+  themes doesn't mean the name itself is implicated -- it could be a
+  passing mention, a cited source, or unrelated context in the same
+  article -- so a lead to read the actual coverage over, not proof on
+  its own.
   Each primary resolved EDGAR company is also checked
   against SEC's XBRL data for its most recently reported total assets
   -- a shell_company_assets indicator flags anything under $150,000

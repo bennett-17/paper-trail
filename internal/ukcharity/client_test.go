@@ -195,6 +195,67 @@ func TestGetCharityDetailParsesAddressAndTrustees(t *testing.T) {
 	}
 }
 
+// TestGetCharityDetailParsesRegulatoryFields is modeled on the real,
+// live-verified shape of a charity's own detail record (Oxfam,
+// registered number 202918, confirmed live with insolvent/
+// in_administration/interim_manager_ind all false) -- this fixture
+// flips them true to confirm parsing, since Oxfam's own record doesn't
+// exercise that path.
+func TestGetCharityDetailParsesRegulatoryFields(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/allcharitydetailsV2/999999/0", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"organisation_number": 999999,
+			"reg_charity_number": 999999,
+			"group_subsid_suffix": 0,
+			"charity_name": "Example Regulatory Case",
+			"reg_status": "R",
+			"insolvent": true,
+			"in_administration": true,
+			"interim_manager_ind": true,
+			"date_of_interim_manager_appt": "2024-03-15T00:00:00"
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	detail, err := c.GetCharityDetail(999999, 0)
+	if err != nil {
+		t.Fatalf("GetCharityDetail: %v", err)
+	}
+	if !detail.Insolvent || !detail.InAdministration {
+		t.Errorf("Insolvent = %v, InAdministration = %v, want both true", detail.Insolvent, detail.InAdministration)
+	}
+	if !detail.InterimManagerAppointed {
+		t.Error("InterimManagerAppointed = false, want true")
+	}
+	if detail.DateOfInterimManagerAppointment != "2024-03-15T00:00:00" {
+		t.Errorf("DateOfInterimManagerAppointment = %q", detail.DateOfInterimManagerAppointment)
+	}
+}
+
+// TestGetCharityDetailRegulatoryFieldsDefaultFalse guards the common
+// case (confirmed live against the real Oxfam record) -- an ordinary
+// charity in good standing must not be flagged.
+func TestGetCharityDetailRegulatoryFieldsDefaultFalse(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/allcharitydetailsV2/283127/0", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, mustReadFixture(t, "ukcharity_detail.json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	detail, err := c.GetCharityDetail(283127, 0)
+	if err != nil {
+		t.Fatalf("GetCharityDetail: %v", err)
+	}
+	if detail.Insolvent || detail.InAdministration || detail.InterimManagerAppointed {
+		t.Errorf("got Insolvent=%v InAdministration=%v InterimManagerAppointed=%v, want all false", detail.Insolvent, detail.InAdministration, detail.InterimManagerAppointed)
+	}
+}
+
 func TestGet401ReturnsActionableError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

@@ -814,6 +814,54 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				})
 			}
 
+			// The charity's own insolvency status, as the Charity
+			// Commission itself reports it -- distinct from a linked
+			// company's Companies House insolvency history (checked
+			// separately below): not every charity structure (a
+			// trust, or a CIO) has a Companies House link at all, so
+			// this is the only insolvency signal available for those.
+			// No extra API call -- already on the same detail record
+			// fetched above.
+			if detail.Insolvent || detail.InAdministration {
+				var status []string
+				if detail.Insolvent {
+					status = append(status, "insolvent")
+				}
+				if detail.InAdministration {
+					status = append(status, "in administration")
+				}
+				r.extra = append(r.extra, risk.Indicator{
+					Code:        "charity_insolvent",
+					Description: "The Charity Commission's own record for this charity shows it as insolvent or in administration -- often a routine, lawful wind-down or restructuring, but worth a second look for an otherwise-active organization, especially alongside other indicators",
+					Weight:      1,
+					Entities:    []string{e.Label()},
+					Evidence:    strings.Join(status, ", "),
+				})
+			}
+			// An interim manager is a Charity Commission regulatory
+			// intervention under s.76 of the Charities Act 2011,
+			// appointed almost always in the course of a statutory
+			// inquiry into serious mismanagement or misconduct --
+			// unlike every other indicator in this function, this is
+			// an already-adjudicated regulatory action, not a
+			// correlation this project infers, the same category of
+			// signal as Companies House's own disqualified-directors
+			// register (see screenDisqualifiedDirectors), so it's
+			// weighted the same.
+			if detail.InterimManagerAppointed {
+				evidence := "interim manager appointed"
+				if detail.DateOfInterimManagerAppointment != "" {
+					evidence = fmt.Sprintf("interim manager appointed %s", detail.DateOfInterimManagerAppointment)
+				}
+				r.extra = append(r.extra, risk.Indicator{
+					Code:        "charity_interim_manager",
+					Description: "The Charity Commission has appointed an interim manager to run this charity -- a formal regulatory intervention under s.76 of the Charities Act 2011, imposed almost always in the course of a statutory inquiry into serious mismanagement or misconduct. An already-adjudicated regulatory action, not a correlation this project infers",
+					Weight:      6,
+					Entities:    []string{e.Label()},
+					Evidence:    evidence,
+				})
+			}
+
 			// Mail-drop address density check -- confirmed live: a
 			// known company-formation-agent mail-drop address
 			// (71-75 Shelton Street, WC2H 9JQ) has ~190,000

@@ -16,6 +16,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/samgov"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
 	"github.com/bennett-17/paper-trail/internal/unsc"
+	"github.com/bennett-17/paper-trail/internal/wayback"
 	"github.com/bennett-17/paper-trail/internal/wikidata"
 )
 
@@ -506,6 +507,20 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 // gdeltNegativeToneThreshold was.
 const domainAgeThreshold = 30 * 24 * time.Hour
 
+// dormantDomainGapThreshold is how long the gap between a domain's
+// RDAP registration date and its earliest Wayback Machine snapshot
+// needs to be before dormant_domain_reactivated fires -- see
+// screenDomainAge. Unlike domainAgeThreshold (a cited security-
+// industry convention) or gdeltNegativeToneThreshold (calibrated
+// against real paired examples), this one is a reasoned default, not
+// empirically calibrated against a specific real case: finding one
+// would mean probing a domain actually being used for fraud, which
+// this project won't do. Set conservatively high (5 years) specifically
+// to stay well clear of the common, entirely innocuous reason for a
+// multi-year gap -- a domain registered defensively long before a
+// genuinely new business or charity got around to building its site.
+const dormantDomainGapThreshold = 5 * 365 * 24 * time.Hour
+
 // websiteHost extracts the bare host from a website value -- mirrors
 // internal/risk's own (unexported) normalizeWebsite exactly: strips
 // scheme, trailing slash, and a "www." prefix, so "https://www.example.org/"
@@ -537,11 +552,27 @@ func websiteHost(s string) string {
 // don't expose one at all) -- one RDAP lookup per distinct domain,
 // deduplicated the same way every other per-value screen in this file
 // is, since the same domain can appear on multiple entities.
+//
+// A domain that isn't young by registration date also gets a second,
+// complementary check: its earliest Wayback Machine snapshot (wayback
+// above -- a different signal than registration, since it says when
+// the domain first had real, crawlable content, not just when someone
+// claimed it) compared against that registration date. A
+// dormant_domain_reactivated indicator fires when the gap is large --
+// a domain registered years ago that only recently had its first real
+// content archived, consistent with a previously-dormant or parked
+// domain suddenly being put to active use (a technique for making a
+// new operation look more established than it is via an old WHOIS
+// record), though also just how a domain bought defensively long
+// before a genuinely new business or charity built its site would
+// look. Skipped for a domain already flagged young, since its earliest
+// possible snapshot can't meaningfully lag registration either way.
 func screenDomainAge(entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
 	note := func(format string, a ...any) {
 		notes = append(notes, "RDAP: "+fmt.Sprintf(format, a...))
 	}
 	rdapClient := rdap.NewClient()
+	waybackClient := wayback.NewClient()
 
 	checked := map[string]bool{}
 	for _, e := range entities {
@@ -559,15 +590,36 @@ func screenDomainAge(entities []risk.Entity, progress *progressReporter) (extra 
 				continue
 			}
 			age := time.Since(registered)
-			if age >= domainAgeThreshold {
+			if age < domainAgeThreshold {
+				extra = append(extra, risk.Indicator{
+					Code:        "young_domain",
+					Description: "This entity's website domain was registered very recently -- a classic signal for a shell company or scam operation dressed up with a fresh-looking website, though it's also just how any genuinely new, legitimate business's website starts out. 30 days is a widely used security-industry convention for a \"newly registered domain\", not a threshold this project calibrated itself",
+					Weight:      2,
+					Entities:    []string{e.Label()},
+					Evidence:    fmt.Sprintf("%s registered %s (%d days ago)", host, registered.Format("2006-01-02"), int(age.Hours()/24)),
+				})
+				continue
+			}
+
+			progress.report("Wayback earliest snapshot", "checking %q (%d so far)", host, len(checked))
+			snapshot, found, err := waybackClient.EarliestSnapshot(host)
+			if err != nil {
+				note("%q wayback: %v", host, err)
+				continue
+			}
+			if !found {
+				continue
+			}
+			gap := snapshot.Sub(registered)
+			if gap < dormantDomainGapThreshold {
 				continue
 			}
 			extra = append(extra, risk.Indicator{
-				Code:        "young_domain",
-				Description: "This entity's website domain was registered very recently -- a classic signal for a shell company or scam operation dressed up with a fresh-looking website, though it's also just how any genuinely new, legitimate business's website starts out. 30 days is a widely used security-industry convention for a \"newly registered domain\", not a threshold this project calibrated itself",
-				Weight:      2,
+				Code:        "dormant_domain_reactivated",
+				Description: "This entity's website domain was registered years before its earliest archived content -- consistent with a previously-dormant or parked domain suddenly put to active use, a technique for making a new operation look more established than it is via an old registration record. Also just how a domain bought defensively long before a genuinely new business or charity built its site would look, so a lead to investigate, not proof of anything improper",
+				Weight:      1,
 				Entities:    []string{e.Label()},
-				Evidence:    fmt.Sprintf("%s registered %s (%d days ago)", host, registered.Format("2006-01-02"), int(age.Hours()/24)),
+				Evidence:    fmt.Sprintf("%s registered %s, earliest archived content %s (%.1f years later)", host, registered.Format("2006-01-02"), snapshot.Format("2006-01-02"), gap.Hours()/24/365),
 			})
 		}
 	}
@@ -658,6 +710,17 @@ func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, en
 // two, closer to the proven-fraud example than the routine one.
 const gdeltNegativeToneThreshold = -0.5
 
+// gdeltIllicitThemes are GDELT's own Global Knowledge Graph theme
+// codes checked by the illicit-theme screen below -- a narrow,
+// deliberately curated slice of GDELT's own ~59,000-entry theme
+// taxonomy (confirmed live via the taxonomy's own published list at
+// data.gdeltproject.org), not exhaustive. Confirmed live combining all
+// three with OR inside one query against a real example ("Wirecard"):
+// returns genuinely theme-relevant coverage (e.g. a real "Germany
+// cracks down on money laundering, tax fraud" story) distinct from the
+// plain-mention results the same query returns unfiltered.
+var gdeltIllicitThemes = []string{"CORRUPTION", "ORGANIZED_CRIME", "ECON_MONEYLAUNDERING"}
+
 // averageTone returns the plain mean of every day's tone value.
 // ok is false for an empty/nil points (no coverage at all to average).
 func averageTone(points []gdelt.TonePoint) (avg float64, ok bool) {
@@ -741,6 +804,22 @@ func screenGDELTMentions(queries []string, limit int, progress *progressReporter
 				Weight:      2,
 				Entities:    []string{fmt.Sprintf("search query: %q", query)},
 				Evidence:    fmt.Sprintf("average tone %.2f across %d days of indexed coverage (GDELT's Average Tone scale, more negative = more negative language)", avg, len(points)),
+			})
+		}
+
+		progress.report("GDELT", "checking %q illicit-activity themes", query)
+		themedArticles, err := gdeltClient.SearchArticlesByTheme(query, gdeltIllicitThemes, limit)
+		if err != nil {
+			note("%q theme check: %v", query, err)
+			continue
+		}
+		for _, a := range themedArticles {
+			extra = append(extra, risk.Indicator{
+				Code:        "gdelt_illicit_theme",
+				Description: "This name's news coverage includes an article GDELT's own Global Knowledge Graph classifies under a corruption, organized-crime, or money-laundering theme -- sharper and more specific than a bare gdelt_news_mention, since GDELT's own classification is doing the filtering here, not a keyword or tone average this project computes itself. Coverage under one of these themes doesn't mean the name itself is implicated (it could be a passing mention, a source, or unrelated context in the same article), so a lead to read the actual coverage over, not proof of anything on its own",
+				Weight:      3,
+				Entities:    []string{fmt.Sprintf("search query: %q", query)},
+				Evidence:    fmt.Sprintf("%s -- %s (%s, %s)", a.Title, a.Domain, a.SourceCountry, a.SeenDate),
 			})
 		}
 	}

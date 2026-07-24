@@ -287,6 +287,25 @@ type CharityDetail struct {
 	Website              string   `json:"website,omitempty"`
 	CompaniesHouseNumber string   `json:"companiesHouseNumber,omitempty"` // set if also registered as a company
 	Trustees             []string `json:"trustees,omitempty"`
+	// Insolvent and InAdministration are confirmed live on a real
+	// charity's own detail record (Oxfam, registered number 202918,
+	// both false) -- the charity's own insolvency status as the
+	// Charity Commission itself reports it, distinct from a linked
+	// company's Companies House insolvency history: not every charity
+	// structure (a trust, or a CIO) has a Companies House link at all,
+	// so this is the only insolvency signal available for those.
+	Insolvent        bool `json:"insolvent,omitempty"`
+	InAdministration bool `json:"inAdministration,omitempty"`
+	// InterimManagerAppointed and DateOfInterimManagerAppointment are
+	// confirmed live on the same real record -- an interim manager is
+	// a Charity Commission regulatory intervention under s.76 of the
+	// Charities Act 2011, appointed almost always in the course of a
+	// statutory inquiry into serious mismanagement or misconduct, so
+	// this is an already-adjudicated regulatory action, not a
+	// correlation this project infers -- the same category of signal
+	// as Companies House's own disqualified-directors register.
+	InterimManagerAppointed         bool   `json:"interimManagerAppointed,omitempty"`
+	DateOfInterimManagerAppointment string `json:"dateOfInterimManagerAppointment,omitempty"`
 }
 
 type detailResponse struct {
@@ -314,6 +333,10 @@ type detailResponse struct {
 	Email              string   `json:"email"`
 	Web                string   `json:"web"`
 	CharityCoRegNumber string   `json:"charity_co_reg_number"`
+	Insolvent          bool     `json:"insolvent"`
+	InAdministration   bool     `json:"in_administration"`
+	InterimManagerInd  bool     `json:"interim_manager_ind"`
+	DateOfInterimMgr   string   `json:"date_of_interim_manager_appt"`
 	TrusteeNames       []struct {
 		TrusteeName string `json:"trustee_name"`
 	} `json:"trustee_names"`
@@ -362,22 +385,26 @@ func (c *Client) GetCharityDetail(registeredNumber, suffix int) (CharityDetail, 
 	}
 
 	return CharityDetail{
-		OrganisationNumber:   d.OrganisationNumber,
-		RegisteredNumber:     d.RegCharityNumber,
-		Suffix:               d.GroupSubsidSuffix,
-		Name:                 d.CharityName,
-		CharityType:          d.CharityType,
-		Status:               d.RegStatus,
-		RegistrationDate:     d.DateOfRegistration,
-		RemovalDate:          d.DateOfRemoval,
-		LatestIncome:         roundToInt64(d.LatestIncome),
-		LatestExpenditure:    roundToInt64(d.LatestExpenditure),
-		Address:              strings.Join(nonEmpty, ", "),
-		Postcode:             d.AddressPostCode,
-		Phone:                d.Phone,
-		Email:                d.Email,
-		Website:              d.Web,
-		CompaniesHouseNumber: d.CharityCoRegNumber,
-		Trustees:             trustees,
+		OrganisationNumber:              d.OrganisationNumber,
+		RegisteredNumber:                d.RegCharityNumber,
+		Suffix:                          d.GroupSubsidSuffix,
+		Name:                            d.CharityName,
+		CharityType:                     d.CharityType,
+		Status:                          d.RegStatus,
+		RegistrationDate:                d.DateOfRegistration,
+		RemovalDate:                     d.DateOfRemoval,
+		LatestIncome:                    roundToInt64(d.LatestIncome),
+		LatestExpenditure:               roundToInt64(d.LatestExpenditure),
+		Address:                         strings.Join(nonEmpty, ", "),
+		Postcode:                        d.AddressPostCode,
+		Phone:                           d.Phone,
+		Email:                           d.Email,
+		Website:                         d.Web,
+		CompaniesHouseNumber:            d.CharityCoRegNumber,
+		Trustees:                        trustees,
+		Insolvent:                       d.Insolvent,
+		InAdministration:                d.InAdministration,
+		InterimManagerAppointed:         d.InterimManagerInd,
+		DateOfInterimManagerAppointment: d.DateOfInterimMgr,
 	}, nil
 }

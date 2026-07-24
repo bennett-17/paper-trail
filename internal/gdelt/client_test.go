@@ -220,6 +220,50 @@ func TestSearchArticlesSetsExpectedParams(t *testing.T) {
 	}
 }
 
+// TestSearchArticlesByThemeCombinesThemesWithOR is modeled on the
+// real, live-verified query shape confirmed against "Wirecard" --
+// multiple theme codes combined with OR inside one query, not one
+// request per theme, since GDELT's own rate limit makes that a real
+// consideration.
+func TestSearchArticlesByThemeCombinesThemesWithOR(t *testing.T) {
+	var got url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		fmt.Fprint(w, `{"articles":[{"url":"https://example.com/a","title":"A story"}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	articles, err := c.SearchArticlesByTheme("Wirecard", []string{"CORRUPTION", "ECON_MONEYLAUNDERING"}, 5)
+	if err != nil {
+		t.Fatalf("SearchArticlesByTheme: %v", err)
+	}
+	if len(articles) != 1 {
+		t.Fatalf("got %d articles, want 1", len(articles))
+	}
+	q := got.Get("query")
+	if !strings.Contains(q, `"Wirecard"`) {
+		t.Errorf("query = %q, want the name phrase-quoted", q)
+	}
+	if !strings.Contains(q, "theme:CORRUPTION") || !strings.Contains(q, "theme:ECON_MONEYLAUNDERING") || !strings.Contains(q, " OR ") {
+		t.Errorf("query = %q, want both themes combined with OR", q)
+	}
+}
+
+func TestSearchArticlesByThemeSkipsEmptyThemes(t *testing.T) {
+	c := NewClient()
+	c.BaseURL = "http://127.0.0.1:0" // would fail to connect if actually called
+	articles, err := c.SearchArticlesByTheme("Wirecard", nil, 5)
+	if err != nil {
+		t.Fatalf("SearchArticlesByTheme: %v, want no error for an empty themes list", err)
+	}
+	if articles != nil {
+		t.Errorf("articles = %v, want nil (no request made)", articles)
+	}
+}
+
 // TestRetriesOn429ThenSucceeds mirrors every other client package's
 // retry behavior in this project.
 func TestRetriesOn429ThenSucceeds(t *testing.T) {

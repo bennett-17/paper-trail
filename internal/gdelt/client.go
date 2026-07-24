@@ -151,9 +151,45 @@ func (c *Client) SearchArticles(query string, limit int) ([]Article, error) {
 	if query == "" {
 		return nil, nil
 	}
+	return c.searchRawQuery(`"`+query+`"`, query, limit)
+}
 
+// SearchArticlesByTheme is like SearchArticles, but additionally
+// restricts results to articles GDELT's own Global Knowledge Graph
+// tags with at least one of the given theme codes (its own curated
+// taxonomy, e.g. "CORRUPTION" or "ECON_MONEYLAUNDERING") -- a sharper,
+// more specific signal than a bare name mention, since it's GDELT's
+// own classification doing the filtering, not a keyword or tone
+// average this project computes itself. Confirmed live: combining
+// multiple theme codes with OR inside one query (rather than one
+// request per theme) works, keeping this to a single additional
+// request regardless of how many themes are checked -- a real
+// consideration given GDELT's own strict rate limit. Returns
+// (nil, nil) for an empty query or an empty themes list, same as
+// SearchArticles does for an empty query.
+func (c *Client) SearchArticlesByTheme(query string, themes []string, limit int) ([]Article, error) {
+	query = strings.TrimSpace(query)
+	if query == "" || len(themes) == 0 {
+		return nil, nil
+	}
+	themeFilters := make([]string, 0, len(themes))
+	for _, t := range themes {
+		themeFilters = append(themeFilters, "theme:"+t)
+	}
+	raw := fmt.Sprintf(`"%s" (%s)`, query, strings.Join(themeFilters, " OR "))
+	return c.searchRawQuery(raw, query, limit)
+}
+
+// searchRawQuery issues an artlist-mode search with an already-built
+// query string (queryParam) -- SearchArticles phrase-quotes the whole
+// thing itself, while SearchArticlesByTheme needs to combine a
+// phrase-quoted name with an unquoted theme filter, so the quoting is
+// each caller's own responsibility here. displayQuery is only used for
+// error messages, so a theme-filtered search's error still names the
+// plain search term, not the full compound query syntax.
+func (c *Client) searchRawQuery(queryParam, displayQuery string, limit int) ([]Article, error) {
 	params := url.Values{}
-	params.Set("query", `"`+query+`"`)
+	params.Set("query", queryParam)
 	params.Set("mode", "artlist")
 	params.Set("format", "json")
 	if limit > 0 {
@@ -169,7 +205,7 @@ func (c *Client) SearchArticles(query string, limit int) ([]Article, error) {
 		// are plain text, not JSON -- included verbatim here since
 		// it's the actual actionable message ("please limit requests
 		// to one every 5 seconds...").
-		return nil, newClientError("GDELT API returned HTTP %d searching for %q: %s", status, query, strings.TrimSpace(string(body)))
+		return nil, newClientError("GDELT API returned HTTP %d searching for %q: %s", status, displayQuery, strings.TrimSpace(string(body)))
 	}
 
 	var resp searchResponse
