@@ -388,13 +388,24 @@ interpreting other indicators between the same entities (e.g. linked
 charities also sharing an address isn't a coincidence worth separate
 suspicion). Every <query> term is
 also searched directly against Companies House itself, not just
-reached indirectly via a UK charity's own linked company, filtered to
-hits of type registered-overseas-entity -- the UK's Register of
-Overseas Entities (ROE), companies incorporated abroad that own or
-control UK land/property, required to disclose their beneficial owners
-since the Economic Crime (Transparency and Enforcement) Act 2022
-closed a well-known property-based money-laundering loophole. An
-overseas_entity indicator fires for every one found (confirmed live
+reached indirectly via a UK charity's own linked company, and every
+hit is processed regardless of company type -- this used to be
+filtered down to hits of type registered-overseas-entity alone, which
+meant an ordinary UK company found by a plain name search was
+invisible to this tool's officer fan-out entirely, reachable only by
+manually chaining the standalone companieshouse command by hand.
+Confirmed live: a single risk query for one organization's name now
+auto-discovers its whole real UK corporate network in one pass --
+shared directors and related companies that previously took several
+rounds of manual follow-up to find. Each hit still gets the same
+officer/PSC/charges/company-profile pulls and the same officer
+fan-out described above, whatever its company type. An
+overseas_entity indicator fires specifically for hits of type
+registered-overseas-entity -- the UK's Register of Overseas Entities
+(ROE), companies incorporated abroad that own or control UK
+land/property, required to disclose their beneficial owners since the
+Economic Crime (Transparency and Enforcement) Act 2022 closed a
+well-known property-based money-laundering loophole (confirmed live
 against a real example, Mulberry Investments Limited, OE007240, home
 registry the Jersey Financial Services Commission) -- most are
 unremarkable offshore holding structures for legitimate property

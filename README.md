@@ -92,8 +92,10 @@ Separately, for organizations that don't file with the SEC at all:
   the UK, required to disclose their beneficial owners since the
   Economic Crime (Transparency and Enforcement) Act 2022. ROE entities
   are ordinary hits in the same Companies House search above (an
-  "OE"-prefixed company number), so this uses the same API and key,
-  just filtered to that one company type.
+  "OE"-prefixed company number), so this uses the same API and key --
+  `risk` no longer filters that search down to ROE hits alone (see
+  below), so an ROE entity now surfaces alongside every other company
+  type a name search happens to find, not as a separate pass.
 - Searches the Global LEI Foundation's (GLEIF) Legal Entity Identifier
   database by name -- unlike every other source above, GLEIF isn't
   scoped to one jurisdiction (an LEI is required for financial-market
@@ -323,10 +325,22 @@ And on top of all of the above, structural risk heuristics:
   other indicators between the same entities.
   Every query term is also searched directly against Companies House
   itself (not just reached indirectly via a UK charity's own linked
-  company), filtered specifically to hits of type
-  registered-overseas-entity: an overseas_entity indicator fires for
-  every one found, since being on the Register of Overseas Entities
-  (ROE) at all is a fact worth surfacing -- a company incorporated
+  company), and every hit is processed regardless of company type --
+  this used to be filtered down to hits of type
+  registered-overseas-entity alone, which meant an ordinary UK company
+  or charity-unlinked organization found by a plain name search was
+  invisible to this tool's officer fan-out entirely; the only way to
+  reach it was by manually chaining the standalone `companieshouse`
+  command by hand. Confirmed live: a single `risk` query for one
+  Scientology-affiliated organization's name now auto-discovers its
+  entire real UK corporate network in one pass -- a shared director,
+  a real-estate holding company, and a related trust -- all of which
+  previously required several rounds of manual follow-up to find. Each
+  hit still gets the same officer/PSC/charges/company-profile pulls and
+  the same officer fan-out described above, whatever its company type.
+  An overseas_entity indicator fires specifically for hits of type
+  registered-overseas-entity, since being on the Register of Overseas
+  Entities (ROE) at all is a fact worth surfacing -- a company incorporated
   abroad that owns or controls UK land/property, required to disclose
   its beneficial owners since the Economic Crime (Transparency and
   Enforcement) Act 2022 closed a well-known property-based money-

@@ -66,6 +66,79 @@ func newChainTestClient(t *testing.T, srv *httptest.Server) *companieshouse.Clie
 	return c
 }
 
+// TestOfficerFanOutDiscoversHop1AndHop2Companies models the exact
+// real-world pattern this function exists to catch: a root company's
+// officer (Jane Smith) also directs a second company (hop 1), which in
+// turn has its own officer (John Doe) directing a third, otherwise
+// entirely unconnected company (hop 2) -- the same two-hop chain that
+// found the real Narconon Trust / UK Buildings and Land Ltd / Church
+// of Scientology (England and Wales) network via a single shared
+// director.
+func TestOfficerFanOutDiscoversHop1AndHop2Companies(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/off1/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2020-01-01","appointed_to":{"company_name":"HOP ONE LTD","company_number":"00000020"}}],"total_results":1}`)
+	})
+	mux.HandleFunc("/company/00000020/officers", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"name":"John Doe","officer_role":"director","appointed_on":"2019-01-01","links":{"officer":{"appointments":"/officers/off2/appointments"}}}],"total_results":1}`)
+	})
+	mux.HandleFunc("/officers/off2/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2018-01-01","appointed_to":{"company_name":"HOP TWO LTD","company_number":"00000030"}}],"total_results":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newChainTestClient(t, srv)
+
+	root := []companieshouse.Officer{{Name: "Jane Smith", OfficerID: "off1"}}
+	fanned, extra := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", func(string, ...any) {})
+
+	if len(fanned) != 2 {
+		t.Fatalf("got %d fanned-out entities, want 2 (hop 1 and hop 2): %+v", len(fanned), fanned)
+	}
+	var gotNumbers []string
+	for _, e := range fanned {
+		gotNumbers = append(gotNumbers, e.ID)
+	}
+	if gotNumbers[0] != "00000020" || gotNumbers[1] != "00000030" {
+		t.Errorf("fanned-out company numbers = %v, want [00000020, 00000030]", gotNumbers)
+	}
+	if extra != nil {
+		t.Errorf("extra = %v, want nil (no appointment/resignation burst pattern in this fixture)", extra)
+	}
+}
+
+func TestOfficerFanOutExcludesRootCompanyItself(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/off1/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2020-01-01","appointed_to":{"company_name":"ROOT LTD","company_number":"00000010"}}],"total_results":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newChainTestClient(t, srv)
+
+	root := []companieshouse.Officer{{Name: "Jane Smith", OfficerID: "off1"}}
+	fanned, _ := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", func(string, ...any) {})
+	if len(fanned) != 0 {
+		t.Errorf("got %d fanned-out entities, want 0 (the only appointment is the root company itself)", len(fanned))
+	}
+}
+
+func TestOfficerFanOutIgnoresResignedAppointments(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/off1/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2010-01-01","resigned_on":"2015-01-01","appointed_to":{"company_name":"FORMER LTD","company_number":"00000099"}}],"total_results":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newChainTestClient(t, srv)
+
+	root := []companieshouse.Officer{{Name: "Jane Smith", OfficerID: "off1"}}
+	fanned, _ := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", func(string, ...any) {})
+	if len(fanned) != 0 {
+		t.Errorf("got %d fanned-out entities, want 0 (a resigned/former appointment shouldn't fan out)", len(fanned))
+	}
+}
+
 func TestFollowPSCChainSameCountryDoesNotCrossJurisdictions(t *testing.T) {
 	// Modeled on the real, live-verified Tesco corporate group: Tesco
 	// Holdings Limited (start) -> Tesco Plc (00445790, England) -> no
@@ -705,12 +778,36 @@ func TestDormantSICWithChargesIndicatorIgnoresOrdinaryIndustryCode(t *testing.T)
 	}
 }
 
-// TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner is
-// modeled on the real, live-verified shape of a Register of Overseas
-// Entities hit (Mulberry Investments Limited, OE007240, Jersey) --
-// company search returning a mix of ordinary and ROE-type hits, and a
-// beneficial owner Companies House itself flags as sanctioned.
-func TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner(t *testing.T) {
+// emptyCompaniesHouseSubResources registers 200-empty handlers for
+// every per-company endpoint gatherCompaniesHouseEntities calls
+// (officers, PSCs, charges, profile) for the given company number --
+// a test fixture helper so a test only needs to override the specific
+// endpoint(s) it cares about.
+func emptyCompaniesHouseSubResources(mux *http.ServeMux, number string) {
+	mux.HandleFunc("/company/"+number+"/officers", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[],"total_results":0}`)
+	})
+	mux.HandleFunc("/company/"+number+"/persons-with-significant-control", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[],"total_results":0}`)
+	})
+	mux.HandleFunc("/company/"+number+"/charges", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"total_count":0,"unfiltered_count":0,"satisfied_count":0,"part_satisfied_count":0,"items":[]}`)
+	})
+	mux.HandleFunc("/company/"+number, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"company_name":"PLACEHOLDER","company_number":%q,"company_status":"active","type":"ltd"}`, number)
+	})
+}
+
+// TestGatherCompaniesHouseEntitiesProcessesEveryCompanyType is modeled
+// on the real, live-verified shape of a Register of Overseas Entities
+// hit (Mulberry Investments Limited, OE007240, Jersey) alongside an
+// ordinary company -- confirmed live against a real investigation
+// (Narconon Trust's own property-holding sibling, UK Buildings and
+// Land Ltd) that an ordinary company hit must NOT be skipped the way
+// this function's predecessor (gatherOverseasEntities) used to: a
+// shared director on an otherwise-unremarkable company is exactly how
+// that real network was found.
+func TestGatherCompaniesHouseEntitiesProcessesEveryCompanyType(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/search/companies", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{
@@ -721,6 +818,7 @@ func TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner(t *testin
 			"total_results": 2
 		}`)
 	})
+	emptyCompaniesHouseSubResources(mux, "12345678")
 	mux.HandleFunc("/company/OE007240/persons-with-significant-control", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{
 			"items": [
@@ -729,6 +827,12 @@ func TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner(t *testin
 			],
 			"total_results": 2
 		}`)
+	})
+	mux.HandleFunc("/company/OE007240/officers", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[],"total_results":0}`)
+	})
+	mux.HandleFunc("/company/OE007240/charges", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"total_count":0,"unfiltered_count":0,"satisfied_count":0,"part_satisfied_count":0,"items":[]}`)
 	})
 	mux.HandleFunc("/company/OE007240", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{
@@ -744,16 +848,25 @@ func TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner(t *testin
 	defer srv.Close()
 	chClient := newChainTestClient(t, srv)
 
-	entities, extra, _ := gatherOverseasEntities(chClient, []string{"Overseas Holdco"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+	entities, extra, _ := gatherCompaniesHouseEntities(chClient, []string{"Overseas Holdco"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
 
-	if len(entities) != 1 {
-		t.Fatalf("got %d entities, want 1 (the ordinary ltd hit should be filtered out): %+v", len(entities), entities)
+	if len(entities) != 2 {
+		t.Fatalf("got %d entities, want 2 (both the ordinary and the ROE hit should be processed): %+v", len(entities), entities)
 	}
-	if entities[0].ID != "OE007240" || entities[0].Source != "companieshouse" {
-		t.Errorf("entity = %+v, want source companieshouse, ID OE007240", entities[0])
+	var ordinary, overseasEntity *risk.Entity
+	for i := range entities {
+		switch entities[i].ID {
+		case "12345678":
+			ordinary = &entities[i]
+		case "OE007240":
+			overseasEntity = &entities[i]
+		}
 	}
-	if len(entities[0].People) != 2 {
-		t.Errorf("People = %v, want both beneficial owners", entities[0].People)
+	if ordinary == nil {
+		t.Fatal("the ordinary (non-ROE) company hit is missing entirely -- it must be processed, not skipped")
+	}
+	if overseasEntity == nil || len(overseasEntity.People) != 2 {
+		t.Fatalf("overseas entity = %+v, want both beneficial owners", overseasEntity)
 	}
 
 	var overseas, sanctioned []risk.Indicator
@@ -766,7 +879,7 @@ func TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner(t *testin
 		}
 	}
 	if len(overseas) != 1 {
-		t.Fatalf("got %d overseas_entity indicators, want 1: %+v", len(overseas), extra)
+		t.Fatalf("got %d overseas_entity indicators, want 1 -- only the ROE-type hit, not the ordinary company: %+v", len(overseas), extra)
 	}
 	if !strings.Contains(overseas[0].Evidence, "Jersey") {
 		t.Errorf("Evidence = %q, want it to cite the Jersey originating registry", overseas[0].Evidence)
@@ -779,8 +892,49 @@ func TestGatherOverseasEntitiesFiltersToROETypeAndFlagsSanctionedOwner(t *testin
 	}
 }
 
-func TestGatherOverseasEntitiesNilClientReturnsNothing(t *testing.T) {
-	entities, extra, notes := gatherOverseasEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+// TestGatherCompaniesHouseEntitiesFansOutSharedDirector is modeled on
+// the real network this feature exists to catch: a directly-found
+// company's own current officer also directs a second, otherwise
+// entirely unrelated company that no query term named.
+func TestGatherCompaniesHouseEntitiesFansOutSharedDirector(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/companies", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"company_number": "00000010", "title": "FOUND LTD", "company_status": "active", "company_type": "ltd", "date_of_creation": "2015-01-01"}],"total_results":1}`)
+	})
+	mux.HandleFunc("/company/00000010/officers", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"name":"Jane Smith","officer_role":"director","appointed_on":"2015-01-01","links":{"officer":{"appointments":"/officers/off1/appointments"}}}],"total_results":1}`)
+	})
+	mux.HandleFunc("/company/00000010/persons-with-significant-control", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[],"total_results":0}`)
+	})
+	mux.HandleFunc("/company/00000010/charges", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"total_count":0,"unfiltered_count":0,"satisfied_count":0,"part_satisfied_count":0,"items":[]}`)
+	})
+	mux.HandleFunc("/company/00000010", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"company_name":"FOUND LTD","company_number":"00000010","company_status":"active","type":"ltd"}`)
+	})
+	mux.HandleFunc("/officers/off1/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2018-01-01","appointed_to":{"company_name":"UNRELATED-LOOKING LTD","company_number":"00000099"}}],"total_results":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	chClient := newChainTestClient(t, srv)
+
+	entities, _, _ := gatherCompaniesHouseEntities(chClient, []string{"Found Ltd"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+
+	var foundFannedOut bool
+	for _, e := range entities {
+		if e.ID == "00000099" {
+			foundFannedOut = true
+		}
+	}
+	if !foundFannedOut {
+		t.Fatalf("fanned-out company (00000099, reached via a shared director) missing from entities: %+v", entities)
+	}
+}
+
+func TestGatherCompaniesHouseEntitiesNilClientReturnsNothing(t *testing.T) {
+	entities, extra, notes := gatherCompaniesHouseEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
 	if entities != nil || extra != nil || notes != nil {
 		t.Errorf("got (%v, %v, %v), want all nil when chClient is nil", entities, extra, notes)
 	}

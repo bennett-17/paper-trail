@@ -731,9 +731,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// mutex -- they're merged in a fixed order below, after every
 	// goroutine finishes, so output stays deterministic regardless of
 	// which source happens to finish first.
-	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, roeEntities []risk.Entity
-	var edgarExtra, npExtra, gleifExtra, ukExtra, roeExtra []risk.Indicator
-	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, roeNotes []string
+	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, chDirectEntities []risk.Entity
+	var edgarExtra, npExtra, gleifExtra, ukExtra, chDirectExtra []risk.Indicator
+	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, chDirectNotes []string
 	var wg sync.WaitGroup
 
 	if edgarClient != nil {
@@ -766,7 +766,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		roeEntities, roeExtra, roeNotes = gatherOverseasEntities(chClient, queries, limit, cache, cacheTTL, progress)
+		chDirectEntities, chDirectExtra, chDirectNotes = gatherCompaniesHouseEntities(chClient, queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Wait()
 
@@ -775,18 +775,18 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	entities = append(entities, acncEntities...)
 	entities = append(entities, gleifEntities...)
 	entities = append(entities, ukEntities...)
-	entities = append(entities, roeEntities...)
+	entities = append(entities, chDirectEntities...)
 	extra = append(extra, edgarExtra...)
 	extra = append(extra, npExtra...)
 	extra = append(extra, gleifExtra...)
 	extra = append(extra, ukExtra...)
-	extra = append(extra, roeExtra...)
+	extra = append(extra, chDirectExtra...)
 	notes = append(notes, edgarNotes...)
 	notes = append(notes, npNotes...)
 	notes = append(notes, acncNotes...)
 	notes = append(notes, gleifNotes...)
 	notes = append(notes, ukNotes...)
-	notes = append(notes, roeNotes...)
+	notes = append(notes, chDirectNotes...)
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these

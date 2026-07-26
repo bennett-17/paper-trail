@@ -400,39 +400,57 @@ func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, ca
 	return flattenQueryResults(results)
 }
 
-// gatherOverseasEntities searches every query term against Companies
-// House's own company search directly, rather than only reaching
-// Companies House indirectly via a UK charity's linked
-// CompaniesHouseNumber the way gatherUKCharityEntities does -- filtered
-// specifically to hits of type registered-overseas-entity, the UK's
-// Register of Overseas Entities (ROE). Confirmed live: ROE entities
-// (company numbers prefixed "OE") are ordinary hits in the same company
-// search endpoint this project already calls elsewhere, no separate API
-// needed, just a type filter over the same results. The ROE was created
-// by the Economic Crime (Transparency and Enforcement) Act 2022
-// specifically to close a well-known property-based money-laundering
-// loophole: a foreign company could own or control UK land/property
-// while disclosing nothing about who actually controls it. Every ROE
-// hit's beneficial owners are pulled from the same
-// persons-with-significant-control endpoint gatherUKCharityEntities
-// already uses for ordinary PSCs -- confirmed live that Companies House
-// itself screens these against sanctions lists and reports the result
-// directly (IsSanctioned), an already-adjudicated regulatory fact this
-// project doesn't have to infer itself. chClient may be nil (Companies
-// House client creation failed), matching every other use of it in this
-// file.
-func gatherOverseasEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+// gatherCompaniesHouseEntities searches every query term against
+// Companies House's own company search directly, rather than only
+// reaching Companies House indirectly via a UK charity's linked
+// CompaniesHouseNumber the way gatherUKCharityEntities does. Unlike
+// this function's predecessor (gatherOverseasEntities), every company
+// type is processed here, not just registered-overseas-entity hits --
+// confirmed live against a real investigation that this was a genuine
+// blind spot: an ordinary UK guarantee company (Narconon Trust's own
+// property-holding sibling, UK Buildings and Land Ltd) is invisible to
+// every other gatherer in this project unless it happens to also be a
+// registered charity or an overseas entity. Every hit here gets the
+// same officers/PSCs/charges/PSC-statements/profile-compliance checks
+// and the same two-hop officer fan-out (see officerFanOut) that a
+// charity-linked company already gets -- confirmed live that this is
+// exactly the mechanism that surfaces a shared director connecting
+// otherwise-unrelated companies (the real find above: one shared
+// director connected an Australian-registered ROE entity, a UK
+// charity, and two ordinary UK companies, none of which named each
+// other in any search term).
+//
+// registered-overseas-entity hits additionally get the overseas_entity
+// fact indicator and a sanctioned-beneficial-owner check, both specific
+// to the Register of Overseas Entities (ROE) -- created by the
+// Economic Crime (Transparency and Enforcement) Act 2022 specifically
+// to close a well-known property-based money-laundering loophole: a
+// foreign company could own or control UK land/property while
+// disclosing nothing about who actually controls it. Confirmed live
+// that Companies House itself screens ROE beneficial owners against
+// sanctions lists and reports the result directly (IsSanctioned), an
+// already-adjudicated regulatory fact this project doesn't have to
+// infer itself.
+//
+// Bounded to the first limit hits per query term, the same cap every
+// other gatherer in this project uses -- searching Companies House
+// directly for every query term (rather than only charity-linked ones)
+// means meaningfully more API calls per scan than before, an accepted,
+// documented tradeoff for the real connections it surfaces. chClient
+// may be nil (Companies House client creation failed), matching every
+// other use of it in this file.
+func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
 	if chClient == nil {
 		return nil, nil, nil
 	}
 	results := runConcurrentQueries(queries, func(qi int, query string) queryResult {
-		progress.report("Register of Overseas Entities", "term %d/%d: %q", qi+1, len(queries), query)
+		progress.report("Companies House", "term %d/%d: %q", qi+1, len(queries), query)
 		var r queryResult
 		note := func(format string, a ...any) {
-			r.notes = append(r.notes, "Register of Overseas Entities: "+fmt.Sprintf(format, a...))
+			r.notes = append(r.notes, "Companies House: "+fmt.Sprintf(format, a...))
 		}
 
-		cacheKey := riskcache.Key("roe", query, limit)
+		cacheKey := riskcache.Key("companieshouse-direct", query, limit)
 		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
 			r.entities = cached
 			return r
@@ -445,10 +463,11 @@ func gatherOverseasEntities(chClient *companieshouse.Client, queries []string, l
 		}
 
 		var termEntities []risk.Entity
-		for _, hit := range result.Companies {
-			if hit.Type != "registered-overseas-entity" {
-				continue
+		for i, hit := range result.Companies {
+			if i >= limit {
+				break
 			}
+			progress.report("Companies House", "  %s (%d/%d for %q)", hit.Name, i+1, min(len(result.Companies), limit), query)
 
 			var addrs []string
 			if addr := hit.Address.AsSingleLine(); addr != "" {
@@ -457,6 +476,21 @@ func gatherOverseasEntities(chClient *companieshouse.Client, queries []string, l
 			entityLabel := fmt.Sprintf("companieshouse: %s (%s)", hit.Name, hit.CompanyNumber)
 
 			var people []string
+			var chargees []string
+			var currentOfficers []companieshouse.Officer
+			var activePSCs []companieshouse.PSC
+
+			if officers, err := chClient.GetOfficers(hit.CompanyNumber, limit); err != nil {
+				note("%s (%s) officers: %v", hit.Name, hit.CompanyNumber, err)
+			} else {
+				for _, o := range officers {
+					if o.ResignedOn == "" { // current officers only
+						people = append(people, o.Name)
+						currentOfficers = append(currentOfficers, o)
+					}
+				}
+			}
+
 			if pscs, err := chClient.GetPersonsWithSignificantControl(hit.CompanyNumber, limit); err != nil {
 				note("%s (%s) beneficial owners: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
@@ -483,27 +517,191 @@ func gatherOverseasEntities(chClient *companieshouse.Client, queries []string, l
 							Evidence:    fmt.Sprintf("%s -- %s", p.Name, strings.Join(natures, ", ")),
 						})
 					}
+					activePSCs = append(activePSCs, p)
 				}
 			}
 
-			evidence := "registered as an overseas entity (owns or controls UK land/property while incorporated abroad)"
+			var outstandingCharges int
+			if charges, err := chClient.GetCharges(hit.CompanyNumber, limit); err != nil {
+				note("%s (%s) charges: %v", hit.Name, hit.CompanyNumber, err)
+			} else {
+				for _, ch := range charges {
+					if ch.SatisfiedOn == "" {
+						outstandingCharges++
+						chargees = append(chargees, ch.PersonsEntitled...)
+					}
+				}
+			}
+			if outstandingCharges > 0 {
+				statements, err := chClient.GetPersonsWithSignificantControlStatements(hit.CompanyNumber, limit)
+				if err != nil {
+					note("%s (%s) PSC statements: %v", hit.Name, hit.CompanyNumber, err)
+				}
+				r.extra = append(r.extra, pscOpacityIndicators(statements, outstandingCharges, entityLabel)...)
+			}
+
 			if company, err := chClient.GetCompany(hit.CompanyNumber); err != nil {
 				note("%s (%s) profile: %v", hit.Name, hit.CompanyNumber, err)
-			} else if company.ForeignRegistryCountry != "" {
-				evidence = fmt.Sprintf("registered as an overseas entity, home registry: %s (%s)", company.ForeignRegistryName, company.ForeignRegistryCountry)
+			} else {
+				if hit.Type == "registered-overseas-entity" {
+					evidence := "registered as an overseas entity (owns or controls UK land/property while incorporated abroad)"
+					if company.ForeignRegistryCountry != "" {
+						evidence = fmt.Sprintf("registered as an overseas entity, home registry: %s (%s)", company.ForeignRegistryName, company.ForeignRegistryCountry)
+					}
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "overseas_entity",
+						Description: "This entity is on the UK's Register of Overseas Entities (ROE) -- a company incorporated abroad that owns or controls land or property in the UK, required to disclose its beneficial owners since the Economic Crime (Transparency and Enforcement) Act 2022 closed a well-known property-based money-laundering loophole. Most ROE-registered entities are unremarkable offshore holding structures for perfectly legitimate property investment, so this is a fact worth surfacing, not a finding of anything improper on its own",
+						Weight:      2,
+						Entities:    []string{entityLabel},
+						Evidence:    evidence,
+					})
+				}
+				if desc := frequentRenaming(company.PreviousNames); desc != "" {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "frequent_renaming",
+						Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
+						Weight:      2,
+						Entities:    []string{entityLabel},
+						Evidence:    desc,
+					})
+				}
+				if company.LastAccountsType == "dormant" {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "dormant_company",
+						Description: "This company's last filed accounts declared no significant trading activity -- common and often innocuous for a genuine holding company, but worth a second look for an otherwise-active organization",
+						Weight:      1,
+						Entities:    []string{entityLabel},
+						Evidence:    "last accounts type: dormant",
+					})
+				}
+				if company.AccountsOverdue {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "accounts_overdue",
+						Description: "This company has overdue statutory accounts -- often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off and is itself a compliance red flag",
+						Weight:      1,
+						Entities:    []string{entityLabel},
+						Evidence:    "accounts overdue",
+					})
+				}
+				if company.ConfirmationStatementOverdue {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "confirmation_statement_overdue",
+						Description: "This company has an overdue confirmation statement -- the annual filing confirming current officers/PSCs/shareholders, not financials, so this can lag even for a company current on its accounts. Often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off",
+						Weight:      1,
+						Entities:    []string{entityLabel},
+						Evidence:    "confirmation statement overdue",
+					})
+				}
+				if company.HasInsolvencyHistory {
+					if cases, err := chClient.GetInsolvency(hit.CompanyNumber); err != nil {
+						note("%s (%s) insolvency: %v", hit.Name, hit.CompanyNumber, err)
+					} else if len(cases) > 0 {
+						types := make([]string, 0, len(cases))
+						for _, ic := range cases {
+							types = append(types, ic.Type)
+						}
+						r.extra = append(r.extra, risk.Indicator{
+							Code:        "insolvency_history",
+							Description: "This company has one or more recorded insolvency cases (liquidation, administration, or a company voluntary arrangement) -- often a routine, lawful wind-down or restructuring, but worth a second look for an otherwise-active organization, especially alongside other indicators",
+							Weight:      1,
+							Entities:    []string{entityLabel},
+							Evidence:    strings.Join(types, ", "),
+						})
+					}
+				}
+				if ind := dormantSICWithChargesIndicator(company.SICCodes, outstandingCharges, entityLabel); ind != nil {
+					r.extra = append(r.extra, *ind)
+				}
+				if company.RegisteredOffice.PostalCode != "" {
+					if count, err := chClient.CountCompaniesAtLocation(company.RegisteredOffice.PostalCode); err != nil {
+						note("%s address density check: %v", hit.Name, err)
+					} else if count >= mailDropAddressThreshold {
+						r.extra = append(r.extra, risk.Indicator{
+							Code:        "mail_drop_address",
+							Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way)",
+							Weight:      2,
+							Entities:    []string{entityLabel},
+							Evidence:    fmt.Sprintf("%d companies registered at postcode %s", count, company.RegisteredOffice.PostalCode),
+						})
+					}
+				}
 			}
-			r.extra = append(r.extra, risk.Indicator{
-				Code:        "overseas_entity",
-				Description: "This entity is on the UK's Register of Overseas Entities (ROE) -- a company incorporated abroad that owns or controls land or property in the UK, required to disclose its beneficial owners since the Economic Crime (Transparency and Enforcement) Act 2022 closed a well-known property-based money-laundering loophole. Most ROE-registered entities are unremarkable offshore holding structures for perfectly legitimate property investment, so this is a fact worth surfacing, not a finding of anything improper on its own",
-				Weight:      2,
-				Entities:    []string{entityLabel},
-				Evidence:    evidence,
-			})
+
+			// PSC ownership-chain layering (crossing 2+ jurisdictions,
+			// or looping back to this same company) -- same check
+			// gatherUKCharityEntities runs, see followPSCChain's own
+			// doc comment for why chain length/failure to resolve to a
+			// person is deliberately not flagged on its own.
+			for _, p := range activePSCs {
+				if p.Kind != "corporate-entity-person-with-significant-control" || p.CorporateRegistrationNumber == "" {
+					continue
+				}
+				countries, loopedBack := followPSCChain(chClient, hit.CompanyNumber, p, limit)
+				if loopedBack {
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "ownership_loop",
+						Description: "This entity's own corporate beneficial-ownership chain loops back to itself -- structurally unusual (a company indirectly owning a stake in itself) and a known technique for obscuring who ultimately controls an entity, though a data or filing error somewhere in the chain is also possible",
+						Weight:      4,
+						Entities:    []string{entityLabel},
+						Evidence:    fmt.Sprintf("PSC chain starting from %s loops back to this same company", p.Name),
+					})
+				}
+				if len(countries) < 2 {
+					continue
+				}
+				r.extra = append(r.extra, risk.Indicator{
+					Code:        "multi_jurisdiction_ownership",
+					Description: "This entity's corporate beneficial-ownership chain crosses multiple registration jurisdictions -- layering ownership across borders is a known technique for obscuring who ultimately controls an entity, though multinational corporate groups also legitimately span jurisdictions for tax or regulatory reasons",
+					Weight:      2,
+					Entities:    []string{entityLabel},
+					Evidence:    fmt.Sprintf("ownership chain: %s", strings.Join(countries, " -> ")),
+				})
+			}
+
+			// Officer/PSC jurisdiction risk -- same check
+			// gatherUKCharityEntities runs (nationality/country of
+			// residence against FATF's lists), independent of any
+			// sanctions match.
+			flaggedPeople := map[string]bool{}
+			flagPersonJurisdiction := func(name, nationality, countryOfResidence string) {
+				for _, country := range []string{nationality, countryOfResidence} {
+					listed, listName, weight := risk.FATFStatus(country)
+					if !listed {
+						continue
+					}
+					key := strings.ToLower(strings.TrimSpace(name)) + "|" + listName
+					if flaggedPeople[key] {
+						continue
+					}
+					flaggedPeople[key] = true
+					r.extra = append(r.extra, risk.Indicator{
+						Code:        "person_jurisdiction_risk",
+						Description: "An officer or beneficial owner's nationality or country of residence is on FATF's high-risk or increased-monitoring list -- on its own a weaker signal than a sanctions match in a FATF-flagged jurisdiction, but worth noting regardless of any sanctions hit",
+						Weight:      weight - 1,
+						Entities:    []string{entityLabel},
+						Evidence:    fmt.Sprintf("%s -- %s (%s)", name, country, listName),
+					})
+				}
+			}
+			for _, o := range currentOfficers {
+				flagPersonJurisdiction(o.Name, o.Nationality, o.CountryOfResidence)
+			}
+			for _, p := range activePSCs {
+				flagPersonJurisdiction(p.Name, p.Nationality, p.CountryOfResidence)
+			}
 
 			termEntities = append(termEntities, risk.NewEntity("companieshouse", hit.CompanyNumber, hit.Name, addrs, people))
+
+			// Two-hop officer fan-out -- the mechanism that actually
+			// surfaces a shared director connecting this company to
+			// others no search term named. See officerFanOut's own
+			// doc comment.
+			fanned, fanExtra := officerFanOut(chClient, hit.CompanyNumber, currentOfficers, limit, entityLabel, note)
+			termEntities = append(termEntities, fanned...)
+			r.extra = append(r.extra, fanExtra...)
 		}
 		if len(termEntities) == 0 {
-			note("no registered-overseas-entity match for %q", query)
+			note("no match for %q", query)
 		}
 		r.entities = termEntities
 		cache.Set(cacheKey, termEntities)
@@ -998,98 +1196,113 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			// register-wide -- not just the ones a name search
 			// happens to find. This surfaces a shared director who
 			// never appears in either organization's own search
-			// results otherwise. Bounded to two hops -- the root's
-			// officers' other companies (hop 1), then those
-			// companies' own other officers' other companies in turn
-			// (hop 2, capped at officerHop2MaxCompanies companies) --
-			// deep enough to surface a director-of-a-director
-			// connection without fanning out indefinitely.
-			fannedOut := map[string]bool{}
-			var hop1Companies []companieshouse.Appointment
-			for _, o := range currentOfficers {
-				if o.OfficerID == "" {
-					continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
-				}
-				appointments, err := chClient.GetOfficerAppointments(o.OfficerID, limit)
-				if err != nil {
-					chNote("%s appointments for %s: %v", o.Name, detail.Name, err)
-					continue
-				}
-				// Appointment-burst and resignation-burst checks both
-				// reuse this same fetch -- no extra API call needed for
-				// either.
-				if desc := appointmentBurst(appointments); desc != "" {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "officer_appointment_burst",
-						Description: "An officer of this entity was appointed to several other companies within a short span -- a known nominee-director/shelf-company-formation pattern (confirmed live against a real UK corporate nominee-director service with hundreds of register-wide appointments, several landing on the very same day), though bulk company-formation services also use this same pattern lawfully, so it's a lead to investigate rather than proof on its own",
-						Weight:      2,
-						Entities:    []string{e.Label()},
-						Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
-					})
-				}
-				if desc := resignationBurst(appointments); desc != "" {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "officer_resignation_burst",
-						Description: "An officer of this entity had their appointment at several other companies all end within a short span -- the bulk-handover signature of a shelf-company-formation service completing (or unwinding) a batch of companies at once (confirmed live against the same real UK corporate nominee-director service officer_appointment_burst cites, whose resignations cluster even more tightly than its appointments do), though this is also how a lawful bulk company-formation service normally operates, so it's a lead to investigate rather than proof on its own",
-						Weight:      2,
-						Entities:    []string{e.Label()},
-						Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
-					})
-				}
-				for _, appt := range appointments {
-					if appt.ResignedOn != "" || sameCompanyNumber(appt.CompanyNumber, detail.CompaniesHouseNumber) || fannedOut[appt.CompanyNumber] {
-						continue // former appointments, the charity's own company itself, and dupes across officers
-					}
-					fannedOut[appt.CompanyNumber] = true
-					termEntities = append(termEntities, risk.NewEntity("companieshouse", appt.CompanyNumber, appt.CompanyName, nil, []string{o.Name}))
-					hop1Companies = append(hop1Companies, appt)
-				}
-			}
-
-			// Hop 2: pull each hop-1 company's own current officers
-			// (a separate call -- the appointments fetch above only
-			// names the company, not its other officers) and fan out
-			// through each of those the same way, one hop further.
-			// Not recursed again beyond this. appointmentBurst isn't
-			// re-checked here: a hop-2 officer isn't an officer of
-			// this entity itself, so attributing their own burst
-			// pattern to this entity's indicator list would overstate
-			// how directly it relates.
-			hop2Officers := map[string]bool{}
-			for i, hop1 := range hop1Companies {
-				if i >= officerHop2MaxCompanies {
-					break
-				}
-				officers, err := chClient.GetOfficers(hop1.CompanyNumber, limit)
-				if err != nil {
-					chNote("%s (hop 2 officers): %v", hop1.CompanyName, err)
-					continue
-				}
-				for _, o2 := range officers {
-					if o2.ResignedOn != "" || o2.OfficerID == "" || hop2Officers[o2.OfficerID] {
-						continue
-					}
-					hop2Officers[o2.OfficerID] = true
-					appointments2, err := chClient.GetOfficerAppointments(o2.OfficerID, limit)
-					if err != nil {
-						chNote("%s appointments (hop 2) for %s: %v", o2.Name, hop1.CompanyName, err)
-						continue
-					}
-					for _, appt2 := range appointments2 {
-						if appt2.ResignedOn != "" || sameCompanyNumber(appt2.CompanyNumber, detail.CompaniesHouseNumber) || fannedOut[appt2.CompanyNumber] {
-							continue
-						}
-						fannedOut[appt2.CompanyNumber] = true
-						termEntities = append(termEntities, risk.NewEntity("companieshouse", appt2.CompanyNumber, appt2.CompanyName, nil, []string{o2.Name}))
-					}
-				}
-			}
+			// results otherwise. Shared with gatherCompaniesHouseEntities
+			// (reached by searching Companies House directly by name,
+			// not via a charity link) -- see officerFanOut.
+			fanned, fanExtra := officerFanOut(chClient, detail.CompaniesHouseNumber, currentOfficers, limit, e.Label(), chNote)
+			termEntities = append(termEntities, fanned...)
+			r.extra = append(r.extra, fanExtra...)
 		}
 		r.entities = termEntities
 		cache.Set(cacheKey, termEntities)
 		return r
 	})
 	return flattenQueryResults(results)
+}
+
+// officerFanOut performs the two-hop Companies House officer
+// appointment fan-out: hop 1 is each current officer's own other
+// register-wide appointments (via their stable OfficerID, not just the
+// companies a name search happens to find), hop 2 pulls each hop-1
+// company's own current officers and fans out through those one
+// further step (bounded to officerHop2MaxCompanies companies -- not
+// recursed again beyond this), deep enough to surface a
+// director-of-a-director connection without fanning out indefinitely.
+// rootCompanyNumber is excluded from the fan-out (a company is never
+// "fanned out" into itself). Appointment-burst and resignation-burst
+// indicators are only checked at hop 1, against entityLabel -- a hop-2
+// officer isn't an officer of the root entity itself, so attributing
+// their own burst pattern to the root's indicator list would overstate
+// how directly it relates. Shared by every gatherer that reaches a
+// company via its current officers, regardless of how that company was
+// found (a charity's own linked company, or a direct Companies House
+// name search), so this logic lives in exactly one place.
+func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, currentOfficers []companieshouse.Officer, limit int, entityLabel string, note func(format string, a ...any)) (fannedOutEntities []risk.Entity, extra []risk.Indicator) {
+	fannedOut := map[string]bool{}
+	var hop1Companies []companieshouse.Appointment
+	for _, o := range currentOfficers {
+		if o.OfficerID == "" {
+			continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
+		}
+		appointments, err := chClient.GetOfficerAppointments(o.OfficerID, limit)
+		if err != nil {
+			note("%s appointments: %v", o.Name, err)
+			continue
+		}
+		// Appointment-burst and resignation-burst checks both reuse
+		// this same fetch -- no extra API call needed for either.
+		if desc := appointmentBurst(appointments); desc != "" {
+			extra = append(extra, risk.Indicator{
+				Code:        "officer_appointment_burst",
+				Description: "An officer of this entity was appointed to several other companies within a short span -- a known nominee-director/shelf-company-formation pattern (confirmed live against a real UK corporate nominee-director service with hundreds of register-wide appointments, several landing on the very same day), though bulk company-formation services also use this same pattern lawfully, so it's a lead to investigate rather than proof on its own",
+				Weight:      2,
+				Entities:    []string{entityLabel},
+				Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
+			})
+		}
+		if desc := resignationBurst(appointments); desc != "" {
+			extra = append(extra, risk.Indicator{
+				Code:        "officer_resignation_burst",
+				Description: "An officer of this entity had their appointment at several other companies all end within a short span -- the bulk-handover signature of a shelf-company-formation service completing (or unwinding) a batch of companies at once (confirmed live against the same real UK corporate nominee-director service officer_appointment_burst cites, whose resignations cluster even more tightly than its appointments do), though this is also how a lawful bulk company-formation service normally operates, so it's a lead to investigate rather than proof on its own",
+				Weight:      2,
+				Entities:    []string{entityLabel},
+				Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
+			})
+		}
+		for _, appt := range appointments {
+			if appt.ResignedOn != "" || sameCompanyNumber(appt.CompanyNumber, rootCompanyNumber) || fannedOut[appt.CompanyNumber] {
+				continue // former appointments, the root company itself, and dupes across officers
+			}
+			fannedOut[appt.CompanyNumber] = true
+			fannedOutEntities = append(fannedOutEntities, risk.NewEntity("companieshouse", appt.CompanyNumber, appt.CompanyName, nil, []string{o.Name}))
+			hop1Companies = append(hop1Companies, appt)
+		}
+	}
+
+	// Hop 2: pull each hop-1 company's own current officers (a
+	// separate call -- the appointments fetch above only names the
+	// company, not its other officers) and fan out through each of
+	// those the same way, one hop further.
+	hop2Officers := map[string]bool{}
+	for i, hop1 := range hop1Companies {
+		if i >= officerHop2MaxCompanies {
+			break
+		}
+		officers, err := chClient.GetOfficers(hop1.CompanyNumber, limit)
+		if err != nil {
+			note("%s (hop 2 officers): %v", hop1.CompanyName, err)
+			continue
+		}
+		for _, o2 := range officers {
+			if o2.ResignedOn != "" || o2.OfficerID == "" || hop2Officers[o2.OfficerID] {
+				continue
+			}
+			hop2Officers[o2.OfficerID] = true
+			appointments2, err := chClient.GetOfficerAppointments(o2.OfficerID, limit)
+			if err != nil {
+				note("%s appointments (hop 2) for %s: %v", o2.Name, hop1.CompanyName, err)
+				continue
+			}
+			for _, appt2 := range appointments2 {
+				if appt2.ResignedOn != "" || sameCompanyNumber(appt2.CompanyNumber, rootCompanyNumber) || fannedOut[appt2.CompanyNumber] {
+					continue
+				}
+				fannedOut[appt2.CompanyNumber] = true
+				fannedOutEntities = append(fannedOutEntities, risk.NewEntity("companieshouse", appt2.CompanyNumber, appt2.CompanyName, nil, []string{o2.Name}))
+			}
+		}
+	}
+	return fannedOutEntities, extra
 }
 
 // followPSCChain follows a corporate PSC's own persons-with-
