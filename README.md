@@ -32,9 +32,10 @@ registered-agent/address-based relationship mapping).
 | `uksanctions` | OFSI (UK Sanctions List) | UK financial sanctions designations | none |
 | `companieshouse` | UK Companies House | UK company officers/directors + beneficial owners (PSCs) | `COMPANIES_HOUSE_API_KEY` |
 | `person` | UK Companies House officer search | start from a person's name, not a company | `COMPANIES_HOUSE_API_KEY` |
+| `nzbn` | New Zealand Business Number (NZBN) register | NZ company entities + director/shareholder roles | `NZBN_API_KEY` |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Seven independent public-data sources across three countries, unified
+Eight independent public-data sources across four countries, unified
 under one CLI and one `--json` output convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
@@ -96,11 +97,20 @@ Separately, for organizations that don't file with the SEC at all:
   `risk` no longer filters that search down to ROE hits alone (see
   below), so an ROE entity now surfaces alongside every other company
   type a name search happens to find, not as a separate pass.
+- Searches New Zealand's NZBN (New Zealand Business Number) register by
+  name, or fetches one entity's profile plus its current directors, by
+  exact NZBN. Also searches the separate Companies Entity Role Search
+  API by director/shareholder name, the mechanism `risk` uses to fan
+  out from a found entity's director to their other directorships (see
+  below) -- unlike Companies House's officer search, this API has no
+  stable per-person ID, only a name, so that fan-out is inherently
+  fuzzier (requires your own subscription key, approved via a manual
+  review rather than instant self-serve -- see Setup).
 - Searches the Global LEI Foundation's (GLEIF) Legal Entity Identifier
   database by name -- unlike every other source above, GLEIF isn't
   scoped to one jurisdiction (an LEI is required for financial-market
   transaction reporting worldwide), so this is the only source that
-  can surface an entity outside the UK/US/AU this project otherwise
+  can surface an entity outside the UK/US/AU/NZ this project otherwise
   covers. No API key needed.
 
 And separately, for sanctions screening:
@@ -370,6 +380,26 @@ And on top of all of the above, structural risk heuristics:
   (the disclosed name is a trustee, not necessarily the person actually
   benefiting), though also routine for entirely lawful estate planning,
   so this is a lead to investigate, not proof of anything improper.
+  Every query term is also searched directly against New Zealand's NZBN
+  register (skipped entirely if NZBN_API_KEY isn't configured, the same
+  as every other optional credential in this project): each hit's
+  current address and current directors are pulled in, and an entity
+  whose own current status is a formal insolvency state
+  (VoluntaryAdministration, InReceivership, InLiquidation, or
+  InStatutoryAdministration -- MBIE's own published status codes) gets
+  an nzbn_insolvency_status indicator, the NZ analogue of Companies
+  House's insolvency_history above. Each current director is also
+  fanned out via the separate Companies Entity Role Search API, the
+  same idea as Companies House's officer fan-out but adapted to a
+  meaningfully different API: MBIE's director/shareholder search has no
+  stable per-person ID the way Companies House's officer ID is, only a
+  name, and that API's own documentation describes real fuzzy/partial
+  matching (e.g. a single-term search does a starts-with match on last
+  name). So this fan-out only accepts a hit whose returned name
+  normalizes to an exact match of the name being searched for, ruling
+  out the obvious case of an unrelated same-surname person -- a real
+  but weaker guarantee than Companies House's ID-based match, since two
+  different people can share an identical full name outright.
   Flagged patterns: a registered/mailing address, phone number, email, or website
   used by more than one entity, and the same individual appearing as an
   officer, director, or trustee of more than one of them (an
@@ -848,14 +878,16 @@ either by exporting it:
 export EDGAR_USER_AGENT="Your Name your.email@example.com"
 ```
 
-`ukcharity`, `sanctions`, `companieshouse`, and `risk`'s SAM.gov
-Exclusions screen are the exceptions to this project's no-API-key
-model: each of these APIs requires a registered key (free, but
-there's no keyless live-query alternative the way there is for SEC
+`ukcharity`, `sanctions`, `companieshouse`, `nzbn`, and `risk`'s
+SAM.gov Exclusions screen are the exceptions to this project's
+no-API-key model: each of these APIs requires a registered key (free,
+but there's no keyless live-query alternative the way there is for SEC
 EDGAR, ProPublica, or ACNC). `ukcharity` and `sanctions` sit behind
 Azure API Management, which issues every subscription two keys,
 primary and secondary, so you can rotate one without downtime;
-`companieshouse` and SAM.gov each issue a single key instead. To use
+`companieshouse` and SAM.gov each issue a single key instead; `nzbn`
+also sits behind Azure API Management, but its two keys are per
+*product* rather than primary/secondary -- see below. To use
 `ukcharity`:
 
 1. Sign up for a free account at
@@ -895,6 +927,24 @@ And to use `risk`'s SAM.gov Exclusions screen:
    registering a business entity and requesting the elevated "Data
    Entry" role raises that to 1,000/day, but isn't required just to
    use this
+
+And to use `nzbn` (and `risk`'s NZBN entity search/officer fan-out):
+
+1. Sign up for a free account at
+   [portal.api.business.govt.nz](https://portal.api.business.govt.nz)
+2. Subscribe to **both** the "NZBN" and "Companies Entity Role Search"
+   API products -- they're separate products under one account, and
+   both are needed (entity search/detail comes from the first, the
+   director/shareholder fan-out from the second)
+3. Approval is a manual review rather than instant self-serve: the
+   portal asks you to sign an API Access Agreement, and its own stated
+   SLA is granting access within one working day afterward
+4. Set `NZBN_API_KEY` to the subscription key. If your account happens
+   to issue a different key for the Companies Entity Role Search
+   product specifically, set `NZBN_ENTITY_ROLE_API_KEY` too -- unconfirmed
+   without a live account to test against, so this project defaults to
+   using one key for both and only needs the second variable if that
+   assumption turns out wrong for your account
 
 Or set them all by copying `.env.example` to `.env` and filling it in:
 
@@ -975,6 +1025,12 @@ go run ./cmd/paper-trail companieshouse --officer <officer id>
 # Start from a person's name instead of a company -- finds officer ids
 # to feed into --officer above (requires COMPANIES_HOUSE_API_KEY)
 go run ./cmd/paper-trail person "Example Name"
+
+# Search New Zealand's NZBN register by name (requires NZBN_API_KEY -- see Setup)
+go run ./cmd/paper-trail nzbn "Example Name"
+
+# Show one entity's profile + current directors by exact NZBN
+go run ./cmd/paper-trail nzbn --number 9429041782718
 
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
@@ -1115,7 +1171,7 @@ source <(paper-trail completion zsh)
 
 ```
 .github/workflows/ci.yml     # gofmt/vet/build/test -race on every push and PR to main
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, risk, completion, version subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, risk, completion, version subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
@@ -1124,6 +1180,7 @@ internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not compa
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
 internal/graph/              # builds a node/edge relationship graph, exports JSON/HTML/CSV/GraphML
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
+internal/nzbn/               # New Zealand NZBN + Companies Entity Role Search clients -- needs NZBN_API_KEY
 internal/ofsi/               # UK Sanctions List (OFSI) client -- no API key needed
 internal/risk/                # structural red-flag heuristics and scoring (calls no API itself)
 internal/riskcache/           # opt-in on-disk cache for risk --cache-ttl (see Usage below)
@@ -1144,8 +1201,10 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://data.trade.gov/consolidated_screening_list/v1/search` (US Consolidated Screening List -- OFAC SDN + State/BIS restricted-party lists, requires a free registered API key)
 - `https://search-uk-sanctions-list.service.gov.uk/api/search/designations-minimal-open-search` (UK Sanctions List, maintained by HM Treasury's OFSI -- the same public API behind the official search tool, no API key required; not a documented/versioned public API, so it could change without notice)
 - `https://api.company-information.service.gov.uk/` (UK Companies House Public Data API -- company search, profile, and officers, requires a free registered API key)
+- `https://api.business.govt.nz/gateway/nzbn/v5/` (New Zealand's NZBN API -- entity search and detail, requires a free but manually-approved subscription key)
+- `https://api.business.govt.nz/gateway/companies-office/companies-register/entity-roles/v3/` (New Zealand's Companies Entity Role Search API -- director/shareholder name search, same subscription account, requires its own approved product subscription)
 
-`ukcharity`, `sanctions`, and `companieshouse` are the three exceptions to this project's no-key model.
+`ukcharity`, `sanctions`, `companieshouse`, and `nzbn` are the exceptions to this project's no-key model.
 
 Every client above retries with exponential backoff on a 429 (rate-limited) response before giving up, so a momentary rate-limit hiccup during a large `risk` scan doesn't skip an entire source.
 

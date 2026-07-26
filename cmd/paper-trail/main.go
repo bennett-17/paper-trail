@@ -46,6 +46,8 @@ func main() {
 		runCompaniesHouse(os.Args[2:])
 	case "person":
 		runPerson(os.Args[2:])
+	case "nzbn":
+		runNZBN(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "completion":
@@ -85,6 +87,8 @@ Usage:
   paper-trail companieshouse --number <company number> [--json]
   paper-trail companieshouse --officer <officer id> [--limit <n>] [--json]
   paper-trail person <name> [--limit <n>] [--json]
+  paper-trail nzbn <query> [--limit <n>] [--json]
+  paper-trail nzbn --number <nzbn> [--json]
   paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
@@ -427,6 +431,20 @@ the real Mulberry Investments beneficial owners, all three held "as
 trust"). Trusts obscure who ultimately benefits (the disclosed name is
 a trustee, not necessarily the beneficiary), but are also routine for
 lawful estate planning, so a lead to investigate, not proof on its own.
+Every query term is also searched directly against New Zealand's NZBN
+register (skipped if NZBN_API_KEY isn't configured, same as every
+other optional credential here): each hit's current address and
+current directors are pulled in, and an entity whose own current
+status is a formal insolvency state (VoluntaryAdministration,
+InReceivership, InLiquidation, or InStatutoryAdministration) gets an
+nzbn_insolvency_status indicator, the NZ analogue of insolvency_history
+above. Each current director is also fanned out via the separate
+Companies Entity Role Search API -- unlike Companies House's officer
+ID, that API has no stable per-person ID, only a name, and its own
+docs describe real fuzzy/partial matching, so this fan-out only
+accepts a hit whose returned name normalizes to an exact match of the
+name searched for, ruling out an unrelated same-surname collision
+though not guaranteeing the same real person the way an ID match would.
 Flagged patterns: entities that share a registered/mailing address, phone
 number, email, or website, and the same individual appearing as an
 officer, director, or trustee of more than one of them -- including a

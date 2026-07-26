@@ -18,6 +18,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/graph"
+	"github.com/bennett-17/paper-trail/internal/nzbn"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/riskcache"
 )
@@ -52,6 +53,16 @@ const pscChainMaxDepth = 3
 // pscChainMaxDepth: a fixed cap keeps the extra API calls bounded
 // rather than scaling with the data.
 const officerHop2MaxCompanies = 5
+
+// nzDirectorFanOutMaxCompanies bounds how many of an NZBN director's
+// other current directorships get pulled in per officer, the same
+// conservative reasoning as officerHop2MaxCompanies. Kept smaller than
+// that constant's own value would suggest is necessary, since NZBN's
+// Companies Entity Role Search API has no stable per-person ID to fan
+// out from (see gatherNZBNEntities) -- a tighter cap limits how far a
+// same-name collision with an unrelated person can spread even after
+// the exact-normalized-name gate already applied.
+const nzDirectorFanOutMaxCompanies = 5
 
 // highOfficerCompensationRatio and highOfficerCompensationMinExpenses
 // together gate the high_officer_compensation indicator: total
@@ -719,6 +730,17 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		chClient = nil
 	}
 
+	// NZBN -- New Zealand's business/company register. No credential
+	// is configured by default (requires a manually-approved MBIE
+	// subscription key, see nzbn.NewClient), so this is silently
+	// skipped for most users, the same as every other optional
+	// credential in this file.
+	nzClient, nzErr := nzbn.NewClient("")
+	if nzErr != nil {
+		note("NZBN", "skipped (%v)", nzErr)
+		nzClient = nil
+	}
+
 	// Phase 1: every source below resolves query terms into entities
 	// independently of the others -- EDGAR, IRS Form 990, ACNC, GLEIF,
 	// and UK Charity Commission (with its nested Companies House
@@ -731,9 +753,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// mutex -- they're merged in a fixed order below, after every
 	// goroutine finishes, so output stays deterministic regardless of
 	// which source happens to finish first.
-	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, chDirectEntities []risk.Entity
-	var edgarExtra, npExtra, gleifExtra, ukExtra, chDirectExtra []risk.Indicator
-	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, chDirectNotes []string
+	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, chDirectEntities, nzEntities []risk.Entity
+	var edgarExtra, npExtra, gleifExtra, ukExtra, chDirectExtra, nzExtra []risk.Indicator
+	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, chDirectNotes, nzNotes []string
 	var wg sync.WaitGroup
 
 	if edgarClient != nil {
@@ -768,6 +790,11 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer wg.Done()
 		chDirectEntities, chDirectExtra, chDirectNotes = gatherCompaniesHouseEntities(chClient, queries, limit, cache, cacheTTL, progress)
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		nzEntities, nzExtra, nzNotes = gatherNZBNEntities(nzClient, queries, limit, cache, cacheTTL, progress)
+	}()
 	wg.Wait()
 
 	entities = append(entities, edgarEntities...)
@@ -776,17 +803,20 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	entities = append(entities, gleifEntities...)
 	entities = append(entities, ukEntities...)
 	entities = append(entities, chDirectEntities...)
+	entities = append(entities, nzEntities...)
 	extra = append(extra, edgarExtra...)
 	extra = append(extra, npExtra...)
 	extra = append(extra, gleifExtra...)
 	extra = append(extra, ukExtra...)
 	extra = append(extra, chDirectExtra...)
+	extra = append(extra, nzExtra...)
 	notes = append(notes, edgarNotes...)
 	notes = append(notes, npNotes...)
 	notes = append(notes, acncNotes...)
 	notes = append(notes, gleifNotes...)
 	notes = append(notes, ukNotes...)
 	notes = append(notes, chDirectNotes...)
+	notes = append(notes, nzNotes...)
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these

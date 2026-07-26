@@ -13,6 +13,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/gleif"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
+	"github.com/bennett-17/paper-trail/internal/nzbn"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/riskcache"
 	"github.com/bennett-17/paper-trail/internal/ukcharity"
@@ -1303,6 +1304,157 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 		}
 	}
 	return fannedOutEntities, extra
+}
+
+// gatherNZBNEntities searches New Zealand's NZBN register (entity name
+// search across current/past entity and trading names) for every query
+// term, pulling in each hit's current addresses and current directors,
+// then fans out to every other company a current director also
+// directs -- the same idea as officerFanOut above, adapted to a
+// meaningfully different API.
+//
+// Companies House's fan-out is anchored on a stable per-person officer
+// ID (confirmed live: the same person's OfficerID is identical across
+// every one of their appointments register-wide). MBIE's Companies
+// Entity Role Search API -- the only way to search NZ directors by
+// name at all -- has no equivalent: it's a name search only, and its
+// own documentation describes real fuzzy/partial matching behavior
+// (e.g. a single-term search does a starts-with match on last name).
+// So nzDirectorFanOut only accepts a hit whose returned name normalizes
+// (via risk.NormalizeNameFuzzy, the same normalization this project's
+// own shared_person check uses) to an exact match of the name being
+// searched for -- ruling out the obvious case of an unrelated
+// same-surname person, though still not a guarantee of the same real
+// individual the way an ID match would be. Bounded to the first
+// nzDirectorFanOutMaxCompanies distinct companies per director.
+//
+// nzClient may be nil (NZBN client creation failed, e.g. no
+// NZBN_API_KEY configured) -- matching how a missing Companies House
+// credential is handled elsewhere in this file.
+func gatherNZBNEntities(nzClient *nzbn.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+	if nzClient == nil {
+		return nil, nil, nil
+	}
+	results := runConcurrentQueries(queries, func(qi int, query string) queryResult {
+		progress.report("NZBN", "term %d/%d: %q", qi+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) {
+			r.notes = append(r.notes, "NZBN: "+fmt.Sprintf(format, a...))
+		}
+
+		cacheKey := riskcache.Key("nzbn", query, limit)
+		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = cached
+			return r
+		}
+
+		result, err := nzClient.SearchEntities(query, limit)
+		if err != nil {
+			note("%v", err)
+			return r
+		}
+
+		var termEntities []risk.Entity
+		for i, hit := range result.Entities {
+			if i >= limit {
+				break
+			}
+			progress.report("NZBN", "  %s (%d/%d for %q)", hit.Name, i+1, min(len(result.Entities), limit), query)
+
+			entity, err := nzClient.GetEntity(hit.NZBN)
+			if err != nil {
+				note("%s (%s): %v", hit.Name, hit.NZBN, err)
+				continue
+			}
+
+			var addrs []string
+			for _, a := range entity.Addresses {
+				if line := a.AsSingleLine(); line != "" {
+					addrs = append(addrs, line)
+				}
+			}
+			entityLabel := fmt.Sprintf("nzbn: %s (%s)", entity.Name, entity.NZBN)
+
+			var people []string
+			var currentDirectors []nzbn.Role
+			for _, role := range entity.Roles {
+				people = append(people, role.Name)
+				if role.EndDate == "" && strings.EqualFold(role.RoleType, "director") {
+					currentDirectors = append(currentDirectors, role)
+				}
+			}
+
+			// The entity's own current status, analogous to Companies
+			// House's HasInsolvencyHistory but reported directly rather
+			// than needing a separate lookup -- confirmed from MBIE's
+			// own published entity-status code list, where
+			// VoluntaryAdministration, InReceivership, InLiquidation, and
+			// InStatutoryAdministration are all live formal-insolvency
+			// states, distinct from an ordinary Inactive or
+			// RemovedClosed entity. Often a routine, lawful wind-down or
+			// restructuring, but worth a second look for an otherwise-
+			// active organization, especially alongside other
+			// indicators -- same framing as Companies House's own
+			// insolvency_history indicator.
+			switch entity.StatusCode {
+			case "VoluntaryAdministration", "InReceivership", "InLiquidation", "InStatutoryAdministration":
+				r.extra = append(r.extra, risk.Indicator{
+					Code:        "nzbn_insolvency_status",
+					Description: "This entity's own current status on the NZBN register is a formal insolvency state -- often a routine, lawful wind-down or restructuring, but worth a second look for an otherwise-active organization, especially alongside other indicators",
+					Weight:      1,
+					Entities:    []string{entityLabel},
+					Evidence:    entity.StatusDescription,
+				})
+			}
+
+			termEntities = append(termEntities, risk.NewEntity("nzbn", entity.NZBN, entity.Name, addrs, people))
+			termEntities = append(termEntities, nzDirectorFanOut(nzClient, entity.NZBN, currentDirectors, note)...)
+		}
+		if len(termEntities) == 0 {
+			note("no match for %q", query)
+		}
+		r.entities = termEntities
+		cache.Set(cacheKey, termEntities)
+		return r
+	})
+	return flattenQueryResults(results)
+}
+
+// nzDirectorFanOut looks up each current director's other directorships
+// via the Companies Entity Role Search API and returns them as new
+// entities. See gatherNZBNEntities's doc comment for why this requires
+// an exact normalized-name match before accepting a hit, unlike
+// Companies House's ID-anchored officerFanOut.
+func nzDirectorFanOut(nzClient *nzbn.Client, rootNZBN string, currentDirectors []nzbn.Role, note func(format string, a ...any)) []risk.Entity {
+	var fannedOut []risk.Entity
+	seen := map[string]bool{}
+	for _, d := range currentDirectors {
+		if d.Name == "" {
+			continue
+		}
+		result, err := nzClient.SearchEntityRoles(d.Name, "DIR", nzDirectorFanOutMaxCompanies*2)
+		if err != nil {
+			note("%s role search: %v", d.Name, err)
+			continue
+		}
+		normQueried := risk.NormalizeNameFuzzy(d.Name)
+		found := 0
+		for _, role := range result.Roles {
+			if found >= nzDirectorFanOutMaxCompanies {
+				break
+			}
+			if role.ResignationDate != "" || role.AssociatedCompanyNZBN == "" || role.AssociatedCompanyNZBN == rootNZBN || seen[role.AssociatedCompanyNZBN] {
+				continue // former appointments, the root entity itself, and dupes across directors
+			}
+			if risk.NormalizeNameFuzzy(role.Name) != normQueried {
+				continue // likely a different person with a similar or identical name -- see doc comment above
+			}
+			seen[role.AssociatedCompanyNZBN] = true
+			found++
+			fannedOut = append(fannedOut, risk.NewEntity("nzbn", role.AssociatedCompanyNZBN, role.AssociatedCompanyName, nil, []string{d.Name}))
+		}
+	}
+	return fannedOut
 }
 
 // followPSCChain follows a corporate PSC's own persons-with-

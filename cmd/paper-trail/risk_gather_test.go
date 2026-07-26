@@ -11,6 +11,7 @@ import (
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
+	"github.com/bennett-17/paper-trail/internal/nzbn"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/riskcache"
 )
@@ -937,5 +938,138 @@ func TestGatherCompaniesHouseEntitiesNilClientReturnsNothing(t *testing.T) {
 	entities, extra, notes := gatherCompaniesHouseEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
 	if entities != nil || extra != nil || notes != nil {
 		t.Errorf("got (%v, %v, %v), want all nil when chClient is nil", entities, extra, notes)
+	}
+}
+
+func newNZBNTestClient(t *testing.T, srv *httptest.Server) *nzbn.Client {
+	t.Helper()
+	c, err := nzbn.NewClient("test-key")
+	if err != nil {
+		t.Fatalf("nzbn.NewClient: %v", err)
+	}
+	c.MinInterval = 0
+	c.RetryBaseDelay = time.Millisecond
+	c.BaseURL = srv.URL
+	c.EntityRoleBaseURL = srv.URL
+	return c
+}
+
+func TestGatherNZBNEntitiesFindsEntityAndFlagsInsolvencyStatus(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/entities", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"totalItems":1,"items":[{"nzbn":"9429041782718","entityName":"GRIZZLY LIMITED","entityStatusCode":"InLiquidation","entityStatusDescription":"In Liquidation","registrationDate":"2010-01-01"}]}`)
+	})
+	mux.HandleFunc("/entities/9429041782718", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"nzbn": "9429041782718",
+			"entityName": "GRIZZLY LIMITED",
+			"entityStatusCode": "InLiquidation",
+			"entityStatusDescription": "In Liquidation",
+			"addresses": {"addressList": [{"address1": "1 Queen Street", "postCode": "1010", "countryCode": "NZ", "endDate": ""}]},
+			"roles": [{"roleType": "Director", "startDate": "2010-01-01", "endDate": "", "rolePerson": {"firstName": "Belinda", "lastName": "Smith"}}]
+		}`)
+	})
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"totalResults":0,"roles":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	nzClient := newNZBNTestClient(t, srv)
+
+	entities, extra, _ := gatherNZBNEntities(nzClient, []string{"Grizzly"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+
+	if len(entities) != 1 || entities[0].ID != "9429041782718" || len(entities[0].People) != 1 || entities[0].People[0] != "Belinda Smith" {
+		t.Fatalf("entities = %+v, want 1 entity with director Belinda Smith", entities)
+	}
+	var found bool
+	for _, ind := range extra {
+		if ind.Code == "nzbn_insolvency_status" {
+			found = true
+			if !strings.Contains(ind.Evidence, "In Liquidation") {
+				t.Errorf("Evidence = %q, want it to cite the liquidation status", ind.Evidence)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected nzbn_insolvency_status indicator, got %+v", extra)
+	}
+}
+
+// TestGatherNZBNEntitiesFansOutSharedDirector is modeled on the real
+// network this feature exists to catch, the NZ analogue of
+// TestGatherCompaniesHouseEntitiesFansOutSharedDirector: a directly-
+// found entity's own current director also directs a second,
+// otherwise entirely unrelated entity that no query term named.
+func TestGatherNZBNEntitiesFansOutSharedDirector(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/entities", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"totalItems":1,"items":[{"nzbn":"111","entityName":"FOUND LIMITED","entityStatusCode":"Registered"}]}`)
+	})
+	mux.HandleFunc("/entities/111", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"nzbn": "111",
+			"entityName": "FOUND LIMITED",
+			"entityStatusCode": "Registered",
+			"roles": [{"roleType": "Director", "endDate": "", "rolePerson": {"firstName": "Jane", "lastName": "Smith"}}]
+		}`)
+	})
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"totalResults":1,"roles":[{"firstName":"Jane","lastName":"Smith","roleType":"Director","associatedCompanyName":"UNRELATED-LOOKING LIMITED","associatedCompanyNzbn":222}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	nzClient := newNZBNTestClient(t, srv)
+
+	entities, _, _ := gatherNZBNEntities(nzClient, []string{"Found Limited"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+
+	var foundFannedOut bool
+	for _, e := range entities {
+		if e.ID == "222" {
+			foundFannedOut = true
+		}
+	}
+	if !foundFannedOut {
+		t.Fatalf("fanned-out entity (222, reached via a shared director) missing from entities: %+v", entities)
+	}
+}
+
+// TestGatherNZBNEntitiesFanOutRejectsNameCollision confirms the
+// exact-normalized-name gate documented on gatherNZBNEntities: a role
+// search result for a different person who merely shares a name isn't
+// accepted, since there's no stable per-person ID in this API to
+// disambiguate the way Companies House's officer ID does.
+func TestGatherNZBNEntitiesFanOutRejectsNameCollision(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/entities", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"totalItems":1,"items":[{"nzbn":"111","entityName":"FOUND LIMITED","entityStatusCode":"Registered"}]}`)
+	})
+	mux.HandleFunc("/entities/111", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+			"nzbn": "111",
+			"entityName": "FOUND LIMITED",
+			"entityStatusCode": "Registered",
+			"roles": [{"roleType": "Director", "endDate": "", "rolePerson": {"firstName": "Jane", "lastName": "Smith"}}]
+		}`)
+	})
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"totalResults":1,"roles":[{"firstName":"Janet","lastName":"Smithson","roleType":"Director","associatedCompanyName":"COINCIDENTAL NAMESAKE LIMITED","associatedCompanyNzbn":333}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	nzClient := newNZBNTestClient(t, srv)
+
+	entities, _, _ := gatherNZBNEntities(nzClient, []string{"Found Limited"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+
+	for _, e := range entities {
+		if e.ID == "333" {
+			t.Fatalf("a differently-named role search hit must not be fanned out as the same person: %+v", entities)
+		}
+	}
+}
+
+func TestGatherNZBNEntitiesNilClientReturnsNothing(t *testing.T) {
+	entities, extra, notes := gatherNZBNEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+	if entities != nil || extra != nil || notes != nil {
+		t.Errorf("got (%v, %v, %v), want all nil when nzClient is nil", entities, extra, notes)
 	}
 }
