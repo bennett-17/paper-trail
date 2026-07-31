@@ -62,15 +62,24 @@ type Client struct {
 	// MaxRetries/RetryBaseDelay govern retry-with-backoff. Confirmed
 	// live that this free service is genuinely flaky under ordinary
 	// use: a transient HTTP 502 (reproduced twice in immediate
-	// succession, gone on the next attempt seconds later), and,
-	// separately, a transient HTTP 404 for a domain that had returned
-	// real results seconds earlier and did again moments after (ruled
-	// out as a legitimate "no results" response -- that shape is a 200
-	// with an empty JSON array "[]", confirmed live, never a 404) --
-	// the same category of real-world flakiness internal/wayback
-	// already retries around, so this retries 404/502/503 rather than
+	// succession, gone on the next attempt seconds later), a transient
+	// HTTP 404 for a domain that had returned real results seconds
+	// earlier and did again moments after (ruled out as a legitimate
+	// "no results" response -- that shape is a 200 with an empty JSON
+	// array "[]", confirmed live, never a 404), and, separately, a
+	// request that outright times out for a real, valid domain
+	// (oxfam.org.au, live-verified against a real risk scan) -- the
+	// same category of real-world flakiness internal/wayback already
+	// retries around, so this retries 404/502/503/timeouts rather than
 	// assuming a single status code the way most other clients in this
-	// project do.
+	// project do. HTTPClient.Timeout is deliberately shorter than this
+	// project's other clients (which mostly use 15-20s) specifically
+	// because of that last case: a plain timeout is retried up to
+	// MaxRetries times, so a 30s-per-attempt timeout meant a single
+	// unresponsive query could cost up to two minutes before giving
+	// up, confirmed live to dominate an otherwise-fast scan's total
+	// wall-clock time. A shorter per-attempt timeout fails faster
+	// without giving up sooner on the retry budget itself.
 	MaxRetries     int
 	RetryBaseDelay time.Duration
 
@@ -81,7 +90,7 @@ type Client struct {
 // NewClient builds a Client.
 func NewClient() *Client {
 	return &Client{
-		HTTPClient:     &http.Client{Timeout: 30 * time.Second},
+		HTTPClient:     &http.Client{Timeout: 12 * time.Second},
 		MinInterval:    500 * time.Millisecond,
 		UserAgent:      "paper-trail (https://github.com/bennett-17/paper-trail)",
 		BaseURL:        DefaultBaseURL,
