@@ -1,10 +1,4 @@
-```
-  ____   _    ____  _____ ____    _____ ____      _    ___ _
- |  _ \ / \  |  _ \| ____|  _ \  |_   _|  _ \    / \  |_ _| |
- | |_) / _ \ | |_) |  _| | |_) |   | | | |_) |  / _ \  | || |
- |  __/ ___ \|  __/| |___|  _ <    | | |  _ <  / ___ \ | || |___
- |_| /_/   \_\_|   |_____|_| \_\   |_| |_| \_\/_/   \_\___|_____|
-```
+<img src="banner.png" alt="Paper Trail: a cartoon tycoon fleeing with a money bag while a UFO's tractor beam catches him" width="100%">
 
 [![CI](https://github.com/bennett-17/paper-trail/actions/workflows/ci.yml/badge.svg)](https://github.com/bennett-17/paper-trail/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
