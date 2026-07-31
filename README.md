@@ -1,3 +1,15 @@
+```
+  ____   _    ____  _____ ____    _____ ____      _    ___ _
+ |  _ \ / \  |  _ \| ____|  _ \  |_   _|  _ \    / \  |_ _| |
+ | |_) / _ \ | |_) |  _| | |_) |   | | | |_) |  / _ \  | || |
+ |  __/ ___ \|  __/| |___|  _ <    | | |  _ <  / ___ \ | || |___
+ |_| /_/   \_\_|   |_____|_| \_\   |_| |_| \_\/_/   \_\___|_____|
+```
+
+[![CI](https://github.com/bennett-17/paper-trail/actions/workflows/ci.yml/badge.svg)](https://github.com/bennett-17/paper-trail/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 # Paper Trail
 
 An open-source OSINT tool for mapping corporate entity relationships using
@@ -33,9 +45,10 @@ registered-agent/address-based relationship mapping).
 | `companieshouse` | UK Companies House | UK company officers/directors + beneficial owners (PSCs) | `COMPANIES_HOUSE_API_KEY` |
 | `person` | UK Companies House officer search | start from a person's name, not a company | `COMPANIES_HOUSE_API_KEY` |
 | `nzbn` | New Zealand Business Number (NZBN) register | NZ company entities + director/shareholder roles | `NZBN_API_KEY` |
+| `crtsh` | crt.sh (Certificate Transparency logs) | TLS certificates issued for a domain, worldwide | none |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Eight independent public-data sources across four countries, unified
+Nine independent public-data sources across four countries, unified
 under one CLI and one `--json` output convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
@@ -112,6 +125,18 @@ Separately, for organizations that don't file with the SEC at all:
   transaction reporting worldwide), so this is the only source that
   can surface an entity outside the UK/US/AU/NZ this project otherwise
   covers. No API key needed.
+- Searches crt.sh's Certificate Transparency (CT) log index by domain
+  -- every publicly-trusted certificate authority has had to publish
+  every certificate it issues to public, append-only CT logs since
+  ~2018 or major browsers won't trust it, and crt.sh indexes all of
+  them. This isn't a company/entity search the way every other source
+  above is -- it's infrastructure, not registry data -- so it's used
+  differently: `risk` looks up every entity's own known website domain
+  this way to find every OTHER domain that has ever shared a
+  certificate with it, a technical link a shell-company network
+  sharing an operator or hosting setup can leave behind even when
+  nothing else (address, officer, phone) visibly overlaps. Free and
+  keyless, no registration of any kind.
 
 And separately, for sanctions screening:
 
@@ -136,68 +161,83 @@ And separately, for sanctions screening:
   one registered suspiciously recently, a classic signal for a shell
   company or scam operation dressed up with a fresh-looking website.
 
-And on top of all of the above, structural risk heuristics:
+### Structural risk heuristics (`risk`)
 
-- `risk` runs one or more names across every source that's configured,
-  normalizes whatever address/officer/contact data each source exposes,
-  and flags shared values across the *combined* results of every name
-  given. Every source (and, once entities are resolved, every
-  cross-check against them) runs concurrently rather than one after
-  another, since they're independent APIs each with their own rate
-  limiting -- a large multi-term scan finishes substantially faster
-  than running each source in sequence would, with identical results
-  (confirmed live: a 25-term scan produced byte-identical output
-  before and after this change, in under a third of the wall-clock
-  time). Within each source, up to 4 query terms are also processed
-  concurrently rather than one at a time, for the same reason --
-  confirmed live under the race detector against a real multi-term
-  scan (which also caught and fixed a latent race in EDGAR's ticker-
-  map lazy-load, unreachable before query terms could run concurrently
-  against the same client). Progress lines stream to stderr as a scan runs (never to
-  stdout or a `--output` file, so a `--json` report is never at risk)
-  -- `--quiet` suppresses them. For SEC EDGAR, any related CIKs (see lookup's "Related CIKs"
-  check) get their own address/insider lookup too, not just a bare
-  name, so a corporate restructuring can actually surface a shared
-  address or officer instead of being invisible to every heuristic.
-  Each EDGAR company also gets its Schedule 13D/13G filers pulled in --
+`risk` runs one or more names across every source that's configured,
+normalizes whatever address/officer/contact data each source exposes,
+and flags shared values across the *combined* results of every name
+given.
+
+Every source (and, once entities are resolved, every cross-check
+against them) runs concurrently rather than one after another, since
+they're independent APIs each with their own rate limiting -- a large
+multi-term scan finishes substantially faster than running each source
+in sequence would, with identical results (confirmed live: a 25-term
+scan produced byte-identical output before and after this change, in
+under a third of the wall-clock time). Within each source, up to 4
+query terms are also processed concurrently rather than one at a time,
+for the same reason -- confirmed live under the race detector against
+a real multi-term scan (which also caught and fixed a latent race in
+EDGAR's ticker-map lazy-load, unreachable before query terms could run
+concurrently against the same client).
+
+Progress lines stream to stderr as a scan runs (never to stdout or a
+`--output` file, so a `--json` report is never at risk) -- `--quiet`
+suppresses them.
+
+<details>
+<summary><strong>Indicators and mechanics, by area</strong> (click to expand -- this is the detailed reference; skip to <a href="#setup">Setup</a>/<a href="#usage">Usage</a> if you just want to run the tool)</summary>
+
+#### SEC EDGAR: related entities and beneficial owners
+
+- For SEC EDGAR, any related CIKs (see `lookup`'s "Related CIKs" check)
+  get their own address/insider lookup too, not just a bare name, so a
+  corporate restructuring can actually surface a shared address or
+  officer instead of being invisible to every heuristic.
+- Each EDGAR company also gets its Schedule 13D/13G filers pulled in --
   5%+ beneficial owners, a different signal than Form 3/4/5 insiders
   since a 13D/13G filer (often an institutional or activist investor)
-  isn't necessarily an officer or director at all; two entities
-  sharing the same filer get a shared_beneficial_owner indicator,
-  weighted lowest since a handful of major index funds hold 5%+ stakes
-  in an enormous number of otherwise-unrelated public companies.
-  A UK charity that's also a registered company gets its Companies
+  isn't necessarily an officer or director at all. Two entities sharing
+  the same filer get a **shared_beneficial_owner** indicator, weighted
+  lowest since a handful of major index funds hold 5%+ stakes in an
+  enormous number of otherwise-unrelated public companies.
+
+#### UK Companies House: officer network and fan-out
+
+- A UK charity that's also a registered company gets its Companies
   House officers *and* current persons with significant control (PSCs)
   pulled in alongside its Charity Commission trustees -- otherwise a
   company's directors and beneficial owners would be invisible to this
-  tool entirely, since ukcharity itself only exposes trustees. Each
-  current officer is also fanned out via Companies House's per-person
-  appointment record, pulling in every OTHER company that same person
-  directs or is secretary of register-wide -- not just the companies
-  the original search terms happen to find. This is how a shared
-  director between two otherwise-unconnected organizations shows up
-  even when neither one's own name search would ever surface the
-  other. This fan-out goes two hops deep, not just one: each company
-  found this way also has its own current officers pulled in and
-  fanned out again in turn (bounded to the first 5 such companies, to
-  keep the extra API calls fixed rather than scaling with the data) --
-  deep enough to surface a "director of a director" connection that a
-  single hop would miss entirely. That same per-person appointment history is
-  also scanned for an appointment burst -- three or more distinct
-  companies appointing the same officer within a single week gets an
-  officer_appointment_burst indicator, reusing this fetch rather than
-  needing a separate one. Calibrated against a real Companies House
-  corporate nominee-director service confirmed live with hundreds of
-  register-wide appointments, several landing on the very same day
-  (e.g. three separate companies all gaining the same corporate
-  director on one day in its real history) -- this is exactly how a
-  bulk shelf-company-formation or nominee-director/-secretary service
-  operates, which is often entirely lawful, but is also how a nominee
-  is used to obscure who's actually behind a company, so it's a lead
-  to investigate rather than proof on its own. The mirror image gets
-  checked too -- an officer_resignation_burst indicator fires when
-  several other companies' appointments for the same officer all
-  *ended* within a single week, the bulk-handover signature of a
+  tool entirely, since `ukcharity` itself only exposes trustees.
+- Each current officer is also fanned out via Companies House's
+  per-person appointment record, pulling in every OTHER company that
+  same person directs or is secretary of register-wide -- not just the
+  companies the original search terms happen to find. This is how a
+  shared director between two otherwise-unconnected organizations shows
+  up even when neither one's own name search would ever surface the
+  other.
+- This fan-out goes two hops deep, not just one: each company found
+  this way also has its own current officers pulled in and fanned out
+  again in turn (bounded to the first 5 such companies, to keep the
+  extra API calls fixed rather than scaling with the data) -- deep
+  enough to surface a "director of a director" connection that a
+  single hop would miss entirely.
+- **officer_appointment_burst**: that same per-person appointment
+  history is also scanned for an appointment burst -- three or more
+  distinct companies appointing the same officer within a single week,
+  reusing this fetch rather than needing a separate one. Calibrated
+  against a real Companies House corporate nominee-director service
+  confirmed live with hundreds of register-wide appointments, several
+  landing on the very same day (e.g. three separate companies all
+  gaining the same corporate director on one day in its real history)
+  -- this is exactly how a bulk shelf-company-formation or
+  nominee-director/-secretary service operates, which is often
+  entirely lawful, but is also how a nominee is used to obscure who's
+  actually behind a company, so it's a lead to investigate rather than
+  proof on its own.
+- **officer_resignation_burst**: the mirror image -- fires when several
+  other companies' appointments for the same officer all *ended*
+  within a single week, the bulk-handover signature of a
   shelf-company-formation service completing or unwinding a batch.
   Confirmed live against the same real corporate nominee-director
   service: its resignations cluster even more tightly than its
@@ -205,135 +245,130 @@ And on top of all of the above, structural risk heuristics:
   same day, part of an 8-company wave inside a single week). Same
   framing as officer_appointment_burst -- common in lawful bulk
   formation services, but also how a nominee is unwound, so a lead to
-  investigate either way. Every Companies-House-
-  sourced entity in a scan (including ones found only via the officer
-  fan-out above) is also cross-referenced by registration number: a
-  sequential_registration_numbers indicator fires when two or more
-  fall within a tight numeric span of each other, within the same
-  jurisdiction/type prefix (a plain England/Wales number vs. a
+  investigate either way.
+- **sequential_registration_numbers**: every Companies-House-sourced
+  entity in a scan (including ones found only via the officer fan-out
+  above) is also cross-referenced by registration number -- fires when
+  two or more fall within a tight numeric span of each other, within
+  the same jurisdiction/type prefix (a plain England/Wales number vs. a
   Scottish "SC" one are different sequences entirely, so those are
   never compared to each other). This needs to be much tighter than
-  same-day: confirmed live that even 85 companies incorporated the
-  same day at the same known mail-drop address (see mail_drop_address
+  same-day: confirmed live that even 85 companies incorporated the same
+  day at the same known mail-drop address (see mail_drop_address
   below) spanned numeric gaps in the thousands, since Companies House
   processes thousands of incorporations nationwide per working day --
   so a gap this tight is a stronger, more specific signal than
   formation_cluster's same-day/week grouping alone, closer to "filed
-  back-to-back in one session" than just "the same busy week", though
-  a busy formation agent's ordinary queue can still produce this by
-  chance. Every entity in a scan, regardless of source, is also
-  compared against every other by name similarity: a near_duplicate_name
-  indicator fires when two entities' normalized names sit within a
-  small edit distance of each other (2 characters or fewer) but aren't
-  identical -- a classic impersonation/typosquatting pattern (a
-  fraudulent "Acme Holdngs Ltd" standing in for the real "Acme Holdings
-  Ltd") that no exact-match check anywhere else in this tool would ever
-  catch. A fixed, small absolute distance rather than a percentage of
-  name length, since a typosquat is characterized by one swapped,
-  inserted, or deleted character, not a proportional change; short
-  names (under 6 characters normalized) are skipped entirely to avoid
-  flooding this with meaningless acronym collisions ("IBM" vs "IBN").
-  Also common, and entirely innocuous, for legitimately numbered
-  subsidiaries within one corporate group ("Acme Group 1 Ltd" /
-  "Acme Group 2 Ltd" differ by a single digit), so this is a lead to
-  investigate, not proof of impersonation on its own. Each UK charity's own registered postcode is
-  also checked against Companies House's advanced search for how many
-  companies register-wide share it -- a mail_drop_address indicator
-  fires when that count is unusually high, consistent with a
-  company-formation-agent mail-drop address rather than a genuine
-  operating address (confirmed live: a known mail-drop address had
-  roughly 190,000 companies registered at it, versus 5-70 for ordinary
-  addresses). Unlike shared_address, this flags one entity's own
-  address in isolation, using the whole register as the comparison
-  set, rather than needing a second entity already found at the same
-  address. That same company's own dated name-change history is also
-  checked for two or more renames within a short span -- a
-  frequent_renaming indicator (confirmed live against Tesco PLC's real
-  two-rename history, correctly not flagged since those spanned 36
-  years, versus a simulated fast-renaming pattern of 3 renames within
-  18 months, which is), since a single rebrand decades apart is
-  routine but several renames in quick succession is a known
-  reputation-laundering/shell-company pattern, not itself proof of
-  one. The same company profile is also checked for dormancy and
-  overdue accounts: company_status stays "active" for a dormant
-  company (confirmed live), so a dormant_company indicator catches
-  what status alone would miss, and an accounts_overdue indicator
-  flags a company currently behind on statutory filings. A separate
-  confirmation_statement_overdue indicator flags the same for the
-  confirmation statement -- the annual filing confirming current
-  officers/PSCs/shareholders, not financials, so a company can be
-  current on one and overdue on the other. That same company profile
-  also flags whether Companies House has ever recorded an insolvency
-  case against it (liquidation, administration, or a company voluntary
-  arrangement) -- an insolvency_history indicator, checked via a
-  dedicated endpoint only when the profile itself says there's real
-  case data there (confirmed live: it 404s otherwise), so no wasted
-  call for the common case. Each of these four signals is common and
-  often innocuous on its own -- a wind-down or restructuring is often
-  routine and entirely lawful -- but worth a second look for an
-  otherwise-active organization. Every outstanding charge found (see
-  below) also triggers a check of the company's own PSC statements -- a
-  separate endpoint from ordinary PSCs, only fetched when there's a
-  charge to cross-reference against, since that's the only
-  circumstance the check can fire in. A psc_opacity_with_active_charges
-  indicator fires when an active "no individual or entity with
-  significant control has been identified" statement (Companies
+  back-to-back in one session" than just "the same busy week", though a
+  busy formation agent's ordinary queue can still produce this by
+  chance.
+- **mail_drop_address**: each UK charity's own registered postcode
+  (and, for a direct Companies House hit, the company's own postcode)
+  is checked against Companies House's advanced search for how many
+  companies register-wide share it -- fires when that count is
+  unusually high, consistent with a company-formation-agent mail-drop
+  address rather than a genuine operating address (confirmed live: a
+  known mail-drop address had roughly 190,000 companies registered at
+  it, versus 5-70 for ordinary addresses). Unlike shared_address, this
+  flags one entity's own address in isolation, using the whole register
+  as the comparison set, rather than needing a second entity already
+  found at the same address.
+- **frequent_renaming**: that same company's own dated name-change
+  history is checked for two or more renames within a short span
+  (confirmed live against Tesco PLC's real two-rename history,
+  correctly not flagged since those spanned 36 years, versus a
+  simulated fast-renaming pattern of 3 renames within 18 months, which
+  is) -- a single rebrand decades apart is routine but several renames
+  in quick succession is a known reputation-laundering/shell-company
+  pattern, not itself proof of one.
+- **dormant_company** / **accounts_overdue** /
+  **confirmation_statement_overdue** / **insolvency_history**: the same
+  company profile is checked for dormancy and overdue accounts --
+  `company_status` stays "active" for a dormant company (confirmed
+  live), so dormant_company catches what status alone would miss, and
+  accounts_overdue flags a company currently behind on statutory
+  filings. confirmation_statement_overdue flags the same for the
+  confirmation statement instead -- the annual filing confirming
+  current officers/PSCs/shareholders, not financials, so a company can
+  be current on one and overdue on the other. insolvency_history flags
+  whether Companies House has ever recorded an insolvency case against
+  it (liquidation, administration, or a company voluntary arrangement),
+  checked via a dedicated endpoint only when the profile itself says
+  there's real case data there (confirmed live: it 404s otherwise), so
+  no wasted call for the common case. Each of these four signals is
+  common and often innocuous on its own -- a wind-down or
+  restructuring is often routine and entirely lawful -- but worth a
+  second look for an otherwise-active organization.
+- **psc_opacity_with_active_charges**: every outstanding charge found
+  also triggers a check of the company's own PSC statements -- a
+  separate endpoint, only fetched when there's a charge to
+  cross-reference against, since that's the only circumstance the
+  check can fire in. Fires when an active "no individual or entity
+  with significant control has been identified" statement (Companies
   House's own wording, not this project's) coincides with at least one
-  live charge -- officially nobody controls the company, yet it's still
-  borrowing against real assets. Confirmed live against a real example
-  (Northern Ireland Association of Citizens Advice Bureaux Limited,
-  NI017574: this exact statement alongside 4 outstanding mortgage
-  charges) that this combination is entirely routine and innocuous for
-  a guarantee company with no shares or shareholders at all -- a
-  structure common to charities and membership organizations -- so it's
-  a lead worth investigating, not proof of anything improper. The same
-  outstanding-charge count also feeds a second, unrelated contradiction
-  check: a dormant_sic_with_charges indicator fires when the company's
-  own declared SIC code is one of Companies House's two reserved codes
-  for "dormant" (99999) or "non-trading" (74990) -- rather than an
-  ordinary industry classification -- while it's still carrying live
-  secured debt, since a genuinely dormant or non-trading company
+  live charge -- officially nobody controls the company, yet it's
+  still borrowing against real assets. Confirmed live against a real
+  example (Northern Ireland Association of Citizens Advice Bureaux
+  Limited, NI017574: this exact statement alongside 4 outstanding
+  mortgage charges) that this combination is entirely routine and
+  innocuous for a guarantee company with no shares or shareholders at
+  all -- a structure common to charities and membership organizations
+  -- so it's a lead worth investigating, not proof of anything
+  improper.
+- **dormant_sic_with_charges**: the same outstanding-charge count also
+  feeds a second, unrelated contradiction check -- fires when the
+  company's own declared SIC code is one of Companies House's two
+  reserved codes for "dormant" (99999) or "non-trading" (74990) rather
+  than an ordinary industry classification, while it's still carrying
+  live secured debt, since a genuinely dormant or non-trading company
   shouldn't have any. Confirmed live against a real example (ALCALI
   LTD, SC312375: SIC code 74990, active status, one outstanding
   "Standard security" charge from 2008 against a property in Oban) --
   could reflect a stale SIC code never updated after the company
   resumed activity, or a legacy charge from before it went dormant that
-  was simply never released, so a lead to investigate, not proof on its
-  own. Each UK charity's own
-  trustee count (already fetched, no extra API call needed) is checked
-  for governance concentration too: two or fewer trustees gets a
-  few_trustees indicator (confirmed live against a real charity with
-  exactly one), the same threshold UK charity governance guidance
-  itself recommends against, though it's common and often innocuous
-  for a small or newly formed charity -- skipped when a charity has
-  zero trustees on record, since that's more likely missing data than
-  a real governance gap. The same detail record (no extra API call
+  was simply never released, so a lead to investigate, not proof on
+  its own.
+
+#### UK charity governance
+
+- **few_trustees**: each UK charity's own trustee count (already
+  fetched, no extra API call needed) is checked for governance
+  concentration too -- two or fewer trustees (confirmed live against a
+  real charity with exactly one), the same threshold UK charity
+  governance guidance itself recommends against, though it's common
+  and often innocuous for a small or newly formed charity -- skipped
+  entirely when a charity has zero trustees on record, since that's
+  more likely missing data than a real governance gap.
+- **charity_insolvent**: the same detail record (no extra API call
   needed) also carries the charity's own insolvency status directly
-  from the Charity Commission -- a charity_insolvent indicator fires
-  when it's insolvent or in administration, distinct from a linked
-  company's own Companies House insolvency history checked separately
-  below: not every charity structure (a trust, or a CIO) has a
-  Companies House link at all, so this is the only insolvency signal
-  available for those. Separately, a charity_interim_manager indicator
-  fires when the Charity Commission has appointed an interim manager to
-  run the charity -- a formal regulatory intervention under s.76 of
-  the Charities Act 2011, imposed almost always in the course of a
-  statutory inquiry into serious mismanagement or misconduct, so unlike
-  every other charity indicator here this is an already-adjudicated
-  regulatory action, not a correlation this project infers -- the same
-  category of signal as Companies House's own disqualified-directors
-  register, and weighted the same (this tool's highest weight).
-  Confirmed live that both fields are real and present on a real
-  charity's own detail record (Oxfam, registered number 202918, both
-  false, as expected for a charity in good standing). UK charities
-  sharing a Charity Commission registered number under different
-  suffixes (a main charity and its own linked/subsidiary charities) get
-  a registry_linked_group indicator -- unlike every other one here,
-  this isn't circumstantial, it's a fact the Charity Commission's own
-  data already states, so it's scored low: the linkage is routine and
-  expected on its own, and mainly useful as context for interpreting
-  other indicators between the same entities.
-  Every query term is also searched directly against Companies House
+  from the Charity Commission -- fires when it's insolvent or in
+  administration, distinct from a linked company's own Companies House
+  insolvency history checked separately above: not every charity
+  structure (a trust, or a CIO) has a Companies House link at all, so
+  this is the only insolvency signal available for those.
+- **charity_interim_manager**: fires when the Charity Commission has
+  appointed an interim manager to run the charity -- a formal
+  regulatory intervention under s.76 of the Charities Act 2011, imposed
+  almost always in the course of a statutory inquiry into serious
+  mismanagement or misconduct, so unlike every other charity indicator
+  here this is an already-adjudicated regulatory action, not a
+  correlation this project infers -- the same category of signal as
+  Companies House's own disqualified-directors register, and weighted
+  the same (this tool's highest weight). Confirmed live that both
+  fields are real and present on a real charity's own detail record
+  (Oxfam, registered number 202918, both false, as expected for a
+  charity in good standing).
+- **registry_linked_group**: UK charities sharing a Charity Commission
+  registered number under different suffixes (a main charity and its
+  own linked/subsidiary charities) get this -- unlike every other one
+  here, this isn't circumstantial, it's a fact the Charity Commission's
+  own data already states, so it's scored low: the linkage is routine
+  and expected on its own, and mainly useful as context for
+  interpreting other indicators between the same entities.
+
+#### Direct Companies House search & the Register of Overseas Entities
+
+- Every query term is also searched directly against Companies House
   itself (not just reached indirectly via a UK charity's own linked
   company), and every hit is processed regardless of company type --
   this used to be filtered down to hits of type
@@ -343,320 +378,402 @@ And on top of all of the above, structural risk heuristics:
   reach it was by manually chaining the standalone `companieshouse`
   command by hand. Confirmed live: a single `risk` query for one
   Scientology-affiliated organization's name now auto-discovers its
-  entire real UK corporate network in one pass -- a shared director,
-  a real-estate holding company, and a related trust -- all of which
+  entire real UK corporate network in one pass -- a shared director, a
+  real-estate holding company, and a related trust -- all of which
   previously required several rounds of manual follow-up to find. Each
   hit still gets the same officer/PSC/charges/company-profile pulls and
   the same officer fan-out described above, whatever its company type.
-  An overseas_entity indicator fires specifically for hits of type
+- **overseas_entity**: fires specifically for hits of type
   registered-overseas-entity, since being on the Register of Overseas
-  Entities (ROE) at all is a fact worth surfacing -- a company incorporated
-  abroad that owns or controls UK land/property, required to disclose
-  its beneficial owners since the Economic Crime (Transparency and
-  Enforcement) Act 2022 closed a well-known property-based money-
-  laundering loophole. Confirmed live against a real example (Mulberry
-  Investments Limited, company number OE007240, home registry the
-  Jersey Financial Services Commission): most ROE entities are
-  unremarkable offshore holding structures for perfectly legitimate
-  property investment, so this is a lead worth noting, not a finding of
-  anything improper on its own. Each one's disclosed beneficial owners
-  are pulled in via the same persons-with-significant-control endpoint
-  used for ordinary PSCs above, and get a roe_beneficial_owner_sanctioned
-  indicator if Companies House itself reports one as sanctioned --
-  unlike every other sanctions check in this tool (a name-only match
-  this project runs itself against a separately queried list), this is
-  the regulator's own screening result reported directly on the
-  beneficial-ownership record, an already-adjudicated fact rather than
-  a correlation this project inferred. Every active PSC (ROE beneficial
-  owner or ordinary domestic PSC alike) also gets its own
-  nature-of-control data checked for trust involvement -- a
-  trust_controlled_psc indicator fires when control is exercised
-  through a trust rather than directly, Companies House's own data, not
-  an inference (confirmed against its full published PSC
+  Entities (ROE) at all is a fact worth surfacing -- a company
+  incorporated abroad that owns or controls UK land/property, required
+  to disclose its beneficial owners since the Economic Crime
+  (Transparency and Enforcement) Act 2022 closed a well-known
+  property-based money-laundering loophole. Confirmed live against a
+  real example (Mulberry Investments Limited, company number OE007240,
+  home registry the Jersey Financial Services Commission): most ROE
+  entities are unremarkable offshore holding structures for perfectly
+  legitimate property investment, so this is a lead worth noting, not
+  a finding of anything improper on its own.
+- **roe_beneficial_owner_sanctioned**: each ROE entity's disclosed
+  beneficial owners are pulled in via the same
+  persons-with-significant-control endpoint used for ordinary PSCs
+  above, and get this indicator if Companies House itself reports one
+  as sanctioned -- unlike every other sanctions check in this tool (a
+  name-only match this project runs itself against a separately
+  queried list), this is the regulator's own screening result reported
+  directly on the beneficial-ownership record, an already-adjudicated
+  fact rather than a correlation this project inferred.
+- **trust_controlled_psc**: every active PSC (ROE beneficial owner or
+  ordinary domestic PSC alike) also gets its own nature-of-control data
+  checked for trust involvement -- fires when control is exercised
+  through a trust rather than directly, Companies House's own data,
+  not an inference (confirmed against its full published PSC
   nature-of-control codelist: every trust-mediated code carries an
   "-as-trust" segment, live-verified on the real Mulberry Investments
   beneficial owners above, all three held "as trust"). Trusts are a
   known technique for obscuring who ultimately benefits from an entity
   (the disclosed name is a trustee, not necessarily the person actually
-  benefiting), though also routine for entirely lawful estate planning,
-  so this is a lead to investigate, not proof of anything improper.
-  Every query term is also searched directly against New Zealand's NZBN
-  register (skipped entirely if NZBN_API_KEY isn't configured, the same
-  as every other optional credential in this project): each hit's
-  current address and current directors are pulled in, and an entity
-  whose own current status is a formal insolvency state
-  (VoluntaryAdministration, InReceivership, InLiquidation, or
-  InStatutoryAdministration -- MBIE's own published status codes) gets
-  an nzbn_insolvency_status indicator, the NZ analogue of Companies
-  House's insolvency_history above. Each current director is also
-  fanned out via the separate Companies Entity Role Search API, the
-  same idea as Companies House's officer fan-out but adapted to a
-  meaningfully different API: MBIE's director/shareholder search has no
-  stable per-person ID the way Companies House's officer ID is, only a
-  name, and that API's own documentation describes real fuzzy/partial
-  matching (e.g. a single-term search does a starts-with match on last
-  name). So this fan-out only accepts a hit whose returned name
-  normalizes to an exact match of the name being searched for, ruling
-  out the obvious case of an unrelated same-surname person -- a real
-  but weaker guarantee than Companies House's ID-based match, since two
-  different people can share an identical full name outright.
-  Flagged patterns: a registered/mailing address, phone number, email, or website
-  used by more than one entity, and the same individual appearing as an
-  officer, director, or trustee of more than one of them (an
-  "interlocking directorate"), plus a weaker, lower-scored version of
-  that same check for names that only match once titles/honorifics are
-  stripped and word order is ignored (different sources format the same
-  person differently, and an exact match alone misses that). Addresses
-  get the same treatment, stripping suite/unit/floor/room numbers so
-  two entities at the same building under different specific offices
-  still match (e.g. "123 Main St, Suite 200" vs. "123 Main St, Suite
-  450") -- confirmed live catching two real same-building matches a
-  25-org scan's exact matcher missed entirely. Both the exact and fuzzy
-  matchers also fold common Latin diacritics before comparing (e.g.
-  "José García" vs. "Jose Garcia", "Müller" vs. "Muller") -- a
-  hand-maintained common-character table, not full Unicode
-  normalization, since that needs a dependency this stdlib-only
-  project doesn't take. Contact emails get a second, broader comparison
-  too: a shared_email_domain indicator fires when two entities' emails
-  differ but share the same *custom* domain (e.g. one entity on
+  benefiting), though also routine for entirely lawful estate
+  planning, so this is a lead to investigate, not proof of anything
+  improper.
+
+#### New Zealand: NZBN
+
+- Every query term is also searched directly against New Zealand's
+  NZBN register (skipped entirely if `NZBN_API_KEY` isn't configured,
+  the same as every other optional credential in this project): each
+  hit's current address and current directors are pulled in.
+- **nzbn_insolvency_status**: fires when an entity's own current status
+  is a formal insolvency state (VoluntaryAdministration,
+  InReceivership, InLiquidation, or InStatutoryAdministration -- MBIE's
+  own published status codes), the NZ analogue of Companies House's
+  insolvency_history above.
+- Each current director is also fanned out via the separate Companies
+  Entity Role Search API, the same idea as Companies House's officer
+  fan-out but adapted to a meaningfully different API: MBIE's
+  director/shareholder search has no stable per-person ID the way
+  Companies House's officer ID is, only a name, and that API's own
+  documentation describes real fuzzy/partial matching (e.g. a
+  single-term search does a starts-with match on last name). So this
+  fan-out only accepts a hit whose returned name normalizes to an
+  exact match of the name being searched for, ruling out the obvious
+  case of an unrelated same-surname person -- a real but weaker
+  guarantee than Companies House's ID-based match, since two different
+  people can share an identical full name outright.
+
+#### Cross-entity matching
+
+- **shared_address** / **shared_person**: a registered/mailing address,
+  phone number, email, or website used by more than one entity, and
+  the same individual appearing as an officer, director, or trustee of
+  more than one of them (an "interlocking directorate").
+- **shared_person_fuzzy**: a weaker, lower-scored version of the same
+  check for names that only match once titles/honorifics are stripped
+  and word order is ignored (different sources format the same person
+  differently, and an exact match alone misses that).
+- Addresses get the same fuzzy treatment, stripping suite/unit/floor/
+  room numbers so two entities at the same building under different
+  specific offices still match (e.g. "123 Main St, Suite 200" vs. "123
+  Main St, Suite 450") -- confirmed live catching two real
+  same-building matches a 25-org scan's exact matcher missed entirely.
+- Both the exact and fuzzy matchers also fold common Latin diacritics
+  before comparing (e.g. "José García" vs. "Jose Garcia", "Müller" vs.
+  "Muller") -- a hand-maintained common-character table, not full
+  Unicode normalization, since that needs a dependency this
+  stdlib-only project doesn't take.
+- **shared_email_domain**: contact emails get a second, broader
+  comparison -- fires when two entities' emails differ but share the
+  same *custom* domain (e.g. one entity on
   info@some-registered-agent.com and another on
-  contact@some-registered-agent.com) -- weighted lowest, since a shared
-  private domain can also just mean a shared corporate-group IT
+  contact@some-registered-agent.com) -- weighted lowest, since a
+  shared private domain can also just mean a shared corporate-group IT
   department, but still worth surfacing since an exact-address match
   alone would miss it entirely. Large public providers (gmail.com,
   yahoo.com, and similar, a hand-maintained list, not an exhaustive
   registry lookup) are excluded, since a shared public domain says
-  nothing about any relationship at all. Every phone number this
-  project has anywhere comes from this one UK Charity Commission field
-  (confirmed by inspection -- no other source sets it at all), so it's
-  always a UK charity's own number by construction; a
-  foreign_phone_country indicator fires when it's nonetheless written
-  in international format with a non-UK calling code (e.g. "+1 212 555
-  0100" on an England & Wales charity's own contact record), using a
-  small hand-maintained calling-code table -- an unrecognized code, or
-  a number with no international prefix at all (the overwhelming common
-  case, e.g. a plain national-format "020 7946 0991"), is deliberately
-  not flagged rather than guessed at. Could reflect a genuine overseas
-  office or a diaspora/international charity's real foreign contact
-  line, so a lead to note, not proof of anything improper -- plus any
-  hit against either the US sanctions screen or the UK Sanctions List
-  (the two overlap heavily but not completely, so both are checked) on
-  any name or person found, plus a third, independent designee list --
-  the UN Security Council Consolidated Sanctions List
-  (un_sanctions_match). Unlike the US/UK sources, the UN publishes no
-  live per-query search API at all, just a single bulk file (confirmed
-  live: ~1,000 individuals and entities combined), so this one matches
-  client-side against the whole list, using the same full-token-set
-  name comparison as shared_person_fuzzy -- and only for a name of two
-  or more words, since a single-word match against ~1,000 entries with
-  nothing narrowing the field server-side first (the way the US/UK
-  screens' own query already does) would be too noisy to trust. Plus a match against the ICIJ Offshore
-  Leaks Database (icij_offshore_leaks_match) -- the combined Panama
-  Papers, Paradise Papers, Pandora Papers, Offshore Leaks, and Bahamas
-  Leaks investigations, queried live via ICIJ's free, keyless
-  reconciliation API (confirmed live, no registration found). Only a
-  result ICIJ itself flags as a strong match is used (confirmed live
-  this is far more reliable than that API's own text-similarity score
-  alone, which stays well above zero even for an unrelated name that
-  merely shares a word -- a common name like "John Smith" pulls back
-  several address/entity results this way, correctly none flagged as
-  a strong match). Appearing in one of these leaks covers many
-  entirely legal offshore structures, so on its own this is not
-  evidence of wrongdoing, per ICIJ's own guidance -- weighted lower
-  than a sanctions match accordingly. The same scope also gets checked
-  against the US SAM.gov Exclusions list (sam_exclusion) -- firms,
-  individuals, and vessels debarred, suspended, or otherwise excluded
-  from federal contracts or assistance. Distinct from a sanctions
-  match: exclusion is a federal-procurement eligibility action, not a
-  sanctions designation, and the two lists only partly overlap. Unlike
-  every other US/UK source here, SAM.gov has no keyless option --
-  requires your own free `SAM_GOV_API_KEY` (see Setup) -- and this
-  screen is skipped cleanly (like companieshouse/ukcharity without
-  their own keys) when it isn't set. And a separate flag when a sanctions
-  hit's own country (or, for a UK hit, its sanctions regime, when
-  that regime happens to be named after a country) is on FATF's
-  high-risk or increased-monitoring list (a manually maintained
-  snapshot refreshed after FATF's periodic plenary meetings, not a
-  live feed -- FATF doesn't publish these as an API).
-  Every current Companies House officer and active PSC also gets
-  checked directly, regardless of any sanctions hit: their nationality
-  and country of residence are checked against FATF's lists too,
-  producing a person_jurisdiction_risk indicator on their own --
-  weaker than the sanctions-linked check above, but a signal this tool
-  would otherwise never surface at all.
-  Every distinct officer/trustee/beneficial-owner name found is also
-  screened against Wikidata's own "politician" occupation tag
-  (pep_match) -- a standard AML/KYC Politically Exposed Person check
-  this tool didn't have before, free and keyless since it's Wikidata's
-  own public search and entity API, not a dedicated PEP-screening
-  service. Confirmed live that name matching alone isn't reliable
-  enough here: searching "Angela Merkel" returns her real Wikidata
-  record alongside an unrelated society board member and three
-  biography-book entries, all sharing the exact same label -- so
-  candidates are first filtered to a fuzzy full-name match (the same
-  comparison shared_person_fuzzy and disqualified_director use), and
-  only a surviving candidate's occupation data is actually checked
-  (batched into a single request per person, regardless of how many
-  candidates matched). Also confirmed live along the way: raw SPARQL
-  label matching (an obvious first approach) silently misses Merkel's
-  own canonical record entirely, since her label is stored under
-  Wikidata's language-independent "mul" tag rather than "en" -- a
-  genuine, current data-modeling detail that's why this uses Wikidata's
-  own search API instead. A match is a lead to verify, not a confirmed
-  identity -- a common name can still collide with an unrelated real
-  politician -- and even a genuine match isn't wrongdoing on its own:
-  PEP status means extra scrutiny is conventionally warranted, not that
-  anything improper happened.
-  Every entity's own website (whichever source exposed one) also gets
-  its domain registration date looked up via RDAP -- the free,
-  keyless, IETF-standardized successor to WHOIS -- and a young_domain
-  indicator fires when it was registered within the last 30 days, a
-  widely used security-industry convention for a "newly registered
-  domain", not a threshold this project calibrated itself. Confirmed
-  live against two real domains on two different registries
-  (google.com via Verisign's own RDAP server, bbc.co.uk via Nominet's)
-  that every RDAP record exposes its registration date the same way;
-  also confirmed live that RDAP 404s for an arbitrary subdomain rather
-  than the actual registered domain (querying "www.google.com" fails
-  where "google.com" succeeds), so since this project has no
-  public-suffix-list dependency to determine the exact registrable
-  domain for every TLD's structure, one leading label at a time is
-  stripped and retried until a lookup succeeds. A freshly registered
-  domain dressed up as an established business is a classic shell-
-  company/scam signal, but it's also just how any genuinely new,
-  legitimate business's website starts out, so a lead to investigate,
-  not proof on its own. A domain that isn't young by registration date
-  also gets a second, complementary check against the free Internet
-  Archive Wayback Machine CDX API: its earliest archived snapshot --
-  when the domain first had real, crawlable content, a different
-  question than when someone merely claimed it. A
-  dormant_domain_reactivated indicator fires when that gap is large
-  (5+ years) -- a domain registered long ago but only recently having
-  real content archived, consistent with a previously-dormant or
-  parked domain suddenly put to active use to make a new operation
-  look more established than it is via an old registration record.
-  Unlike the calibrated thresholds elsewhere in this project, 5 years
-  is a reasoned default rather than one benchmarked against a specific
-  real case -- finding one would mean probing an actual live fraud
-  domain, which this project won't do -- chosen deliberately
-  conservative to stay clear of the common, entirely innocuous reason
-  for a multi-year gap: a domain bought defensively long before a
-  genuinely new business or charity got around to building its site.
-  Confirmed live that this specific free service is flaky enough to
-  need its own retry-with-backoff, on both a real HTTP 503 and even a
-  bare network-level timeout -- broader than every other client in
-  this project, whose retries are scoped to a specific status code
-  only, since a network-level failure was the more common one observed
-  for this particular source. Also confirmed live, a genuine quirk:
-  when a domain has no archived snapshots at all, the API returns an
-  HTML "503 Service Unavailable" page wrapped in an HTTP 200 status,
-  not a clean empty result -- treated here as "nothing found", not an
-  error.
-  Each active corporate PSC (a beneficial owner that's itself a
-  company, not a person) also gets its own PSC chain followed up to
-  three hops further via Companies House's registration-number
-  linkage, collecting every distinct country the chain's companies
-  are registered in. Confirmed live against the real Tesco corporate
-  group that a chain can legitimately end without ever reaching an
-  individual at all (Tesco Plc, at the top of Tesco Stores Limited's
-  ownership chain, has zero PSCs of its own -- UK law exempts
-  already-exchange-regulated public companies from PSC reporting), so
-  this deliberately does NOT flag on chain length or on failing to
-  resolve to a person. Instead a multi_jurisdiction_ownership
-  indicator fires only when the chain crosses two or more distinct
-  registration countries (e.g. UK -> Jersey -> BVI) -- a same-country
-  domestic group like Tesco's (England -> England) does not trigger
-  this. Layering ownership across borders is a known technique for
-  obscuring ultimate control, though multinational corporate groups
-  also legitimately span jurisdictions for tax or regulatory reasons,
-  so this is a lead to investigate, not proof on its own. That same
-  chain walk also checks whether it ever loops back to the entity it
-  started from -- an ownership_loop indicator, fired when a company's
-  own traced PSC chain eventually points back to that same company
-  (i.e. it indirectly, and impossibly, ends up owning a stake in
-  itself). UK company law itself restricts the simplest version of
-  this directly, so a genuine hit is rare and higher-weighted than
-  multi_jurisdiction_ownership -- a known technique for obscuring
-  ultimate control in more complex or offshore structures, though a
-  data or filing error somewhere in the chain is also possible.
-  GLEIF-sourced entities get a similar check with global reach: a
-  gleif_cross_border_parent indicator fires when an entity's
-  GLEIF-reported ultimate parent is registered in a different country
-  -- confirmed live against real multinational groups (Nestlé USA,
-  Inc.'s ultimate parent correctly resolves to Switzerland's Nestlé
-  S.A.; Goldman Sachs International's UK entity correctly resolves to
-  its US parent, The Goldman Sachs Group, Inc.). GLEIF resolves this
-  server-side across the whole ownership chain, so it needs one lookup,
-  not a hop-by-hop walk the way the PSC chain above works. Deliberately
-  checks the *ultimate* parent, not the direct one: confirmed live that
-  a direct parent is often still same-country even when the group is
-  genuinely multinational (Nestlé USA's own direct parent is itself
-  US-registered -- the cross-border jump only shows up one level
-  higher). Same framing as multi_jurisdiction_ownership: a normal
-  structure for many multinational corporate groups, and also a known
-  technique for obscuring ultimate control, so a lead to investigate,
-  not proof on its own. That same ultimate-parent lookup also feeds a
-  gleif_common_ultimate_parent indicator, unlike every other Shared*
-  check in this tool: two entities can share an ultimate parent while
-  having completely different names, addresses, phone numbers, and
+  nothing about any relationship at all.
+- **foreign_phone_country**: every phone number this project has
+  anywhere comes from this one UK Charity Commission field (confirmed
+  by inspection -- no other source sets it at all), so it's always a
+  UK charity's own number by construction; fires when it's nonetheless
+  written in international format with a non-UK calling code (e.g.
+  "+1 212 555 0100" on an England & Wales charity's own contact
+  record), using a small hand-maintained calling-code table -- an
+  unrecognized code, or a number with no international prefix at all
+  (the overwhelming common case, e.g. a plain national-format "020
+  7946 0991"), is deliberately not flagged rather than guessed at.
+  Could reflect a genuine overseas office or a diaspora/international
+  charity's real foreign contact line, so a lead to note, not proof of
+  anything improper.
+
+#### Sanctions & watchlist screening
+
+- **sanctions_match** / **uk_sanctions_match**: any hit against either
+  the US sanctions screen or the UK Sanctions List (the two overlap
+  heavily but not completely, so both are checked) on any name or
+  person found.
+- **un_sanctions_match**: a third, independent designee list -- the UN
+  Security Council Consolidated Sanctions List. Unlike the US/UK
+  sources, the UN publishes no live per-query search API at all, just
+  a single bulk file (confirmed live: ~1,000 individuals and entities
+  combined), so this one matches client-side against the whole list,
+  using the same full-token-set name comparison as
+  shared_person_fuzzy -- and only for a name of two or more words,
+  since a single-word match against ~1,000 entries with nothing
+  narrowing the field server-side first (the way the US/UK screens'
+  own query already does) would be too noisy to trust.
+- **icij_offshore_leaks_match**: a match against the ICIJ Offshore
+  Leaks Database -- the combined Panama Papers, Paradise Papers,
+  Pandora Papers, Offshore Leaks, and Bahamas Leaks investigations,
+  queried live via ICIJ's free, keyless reconciliation API (confirmed
+  live, no registration found). Only a result ICIJ itself flags as a
+  strong match is used (confirmed live this is far more reliable than
+  that API's own text-similarity score alone, which stays well above
+  zero even for an unrelated name that merely shares a word -- a
+  common name like "John Smith" pulls back several address/entity
+  results this way, correctly none flagged as a strong match).
+  Appearing in one of these leaks covers many entirely legal offshore
+  structures, so on its own this is not evidence of wrongdoing, per
+  ICIJ's own guidance -- weighted lower than a sanctions match
+  accordingly.
+- **sam_exclusion**: the same scope also gets checked against the US
+  SAM.gov Exclusions list -- firms, individuals, and vessels debarred,
+  suspended, or otherwise excluded from federal contracts or
+  assistance. Distinct from a sanctions match: exclusion is a
+  federal-procurement eligibility action, not a sanctions designation,
+  and the two lists only partly overlap. Unlike every other US/UK
+  source here, SAM.gov has no keyless option -- requires your own free
+  `SAM_GOV_API_KEY` (see Setup) -- and this screen is skipped cleanly
+  (like companieshouse/ukcharity without their own keys) when it isn't
+  set.
+- A separate flag fires when a sanctions hit's own country (or, for a
+  UK hit, its sanctions regime, when that regime happens to be named
+  after a country) is on FATF's high-risk or increased-monitoring list
+  (a manually maintained snapshot refreshed after FATF's periodic
+  plenary meetings, not a live feed -- FATF doesn't publish these as
+  an API).
+- **person_jurisdiction_risk**: every current Companies House officer
+  and active PSC also gets checked directly, regardless of any
+  sanctions hit -- their nationality and country of residence are
+  checked against FATF's lists too, weaker than the sanctions-linked
+  check above, but a signal this tool would otherwise never surface at
+  all.
+
+#### Politically exposed persons
+
+- **pep_match**: every distinct officer/trustee/beneficial-owner name
+  found is also screened against Wikidata's own "politician" occupation
+  tag -- a standard AML/KYC Politically Exposed Person check this tool
+  didn't have before, free and keyless since it's Wikidata's own
+  public search and entity API, not a dedicated PEP-screening service.
+  - Confirmed live that name matching alone isn't reliable enough
+    here: searching "Angela Merkel" returns her real Wikidata record
+    alongside an unrelated society board member and three
+    biography-book entries, all sharing the exact same label -- so
+    candidates are first filtered to a fuzzy full-name match (the same
+    comparison shared_person_fuzzy and disqualified_director use), and
+    only a surviving candidate's occupation data is actually checked
+    (batched into a single request per person, regardless of how many
+    candidates matched).
+  - Also confirmed live along the way: raw SPARQL label matching (an
+    obvious first approach) silently misses Merkel's own canonical
+    record entirely, since her label is stored under Wikidata's
+    language-independent "mul" tag rather than "en" -- a genuine,
+    current data-modeling detail that's why this uses Wikidata's own
+    search API instead.
+  - A match is a lead to verify, not a confirmed identity -- a common
+    name can still collide with an unrelated real politician -- and
+    even a genuine match isn't wrongdoing on its own: PEP status means
+    extra scrutiny is conventionally warranted, not that anything
+    improper happened.
+
+#### Domain forensics
+
+- **young_domain**: every entity's own website (whichever source
+  exposed one) also gets its domain registration date looked up via
+  RDAP -- the free, keyless, IETF-standardized successor to WHOIS --
+  and fires when it was registered within the last 30 days, a widely
+  used security-industry convention for a "newly registered domain",
+  not a threshold this project calibrated itself.
+  - Confirmed live against two real domains on two different
+    registries (google.com via Verisign's own RDAP server, bbc.co.uk
+    via Nominet's) that every RDAP record exposes its registration
+    date the same way; also confirmed live that RDAP 404s for an
+    arbitrary subdomain rather than the actual registered domain
+    (querying "www.google.com" fails where "google.com" succeeds), so
+    since this project has no public-suffix-list dependency to
+    determine the exact registrable domain for every TLD's structure,
+    one leading label at a time is stripped and retried until a lookup
+    succeeds.
+  - A freshly registered domain dressed up as an established business
+    is a classic shell-company/scam signal, but it's also just how any
+    genuinely new, legitimate business's website starts out, so a
+    lead to investigate, not proof on its own.
+- **dormant_domain_reactivated**: a domain that isn't young by
+  registration date also gets a second, complementary check against
+  the free Internet Archive Wayback Machine CDX API -- its earliest
+  archived snapshot, when the domain first had real, crawlable
+  content, a different question than when someone merely claimed it.
+  Fires when that gap is large (5+ years) -- a domain registered long
+  ago but only recently having real content archived, consistent with
+  a previously-dormant or parked domain suddenly put to active use to
+  make a new operation look more established than it is via an old
+  registration record.
+  - Unlike the calibrated thresholds elsewhere in this project, 5
+    years is a reasoned default rather than one benchmarked against a
+    specific real case -- finding one would mean probing an actual
+    live fraud domain, which this project won't do -- chosen
+    deliberately conservative to stay clear of the common, entirely
+    innocuous reason for a multi-year gap: a domain bought defensively
+    long before a genuinely new business or charity got around to
+    building its site.
+  - Confirmed live that this specific free service is flaky enough to
+    need its own retry-with-backoff, on both a real HTTP 503 and even
+    a bare network-level timeout -- broader than every other client in
+    this project, whose retries are scoped to a specific status code
+    only, since a network-level failure was the more common one
+    observed for this particular source.
+  - Also confirmed live, a genuine quirk: when a domain has no
+    archived snapshots at all, the API returns an HTML "503 Service
+    Unavailable" page wrapped in an HTTP 200 status, not a clean empty
+    result -- treated here as "nothing found", not an error.
+
+#### Certificate Transparency
+
+- **ct_shared_certificate**: every distinct website domain across all
+  resolved entities is looked up in crt.sh's Certificate Transparency
+  log search (free, keyless, no registration -- every certificate a
+  public CA has issued has been logged there since ~2018). Fires when
+  a certificate's SAN list covers two DIFFERENT entities' own known
+  domains together -- unlike a shared address or phone number, this is
+  a genuine technical infrastructure link: the exact same TLS
+  certificate was issued to protect both domains at once, consistent
+  with the same operator or hosting setup running both. Shared
+  hosting/CDN providers can also legitimately bundle unrelated
+  customers this way on an older-style shared certificate, so it's a
+  lead to investigate, not proof of anything improper.
+  - Deliberately does NOT flag a certificate merely covering a
+    subdomain of the SAME domain (e.g. "*.example.com" alongside
+    "example.com") -- that's ordinary, not a cross-entity link at all
+    -- nor does it flag one entity legitimately listing two of its own
+    domains under one certificate; only a SAN entry matching a
+    DIFFERENT entity's own distinct domain counts.
+  - Confirmed live that crt.sh returns one JSON row per (certificate,
+    CT log) pair, not one row per certificate -- the same certificate
+    can be logged in several different CT logs (a redundancy
+    requirement, not duplicate issuance), so rows are collapsed by
+    issuer+serial-number pair before comparing SAN lists.
+  - Confirmed live that this free service is genuinely flaky under
+    ordinary use: a transient HTTP 502, and, separately, a transient
+    HTTP 404 for a domain that had returned real results seconds
+    earlier and did again moments after -- ruled out as a legitimate
+    "no results" response (that shape is a 200 with an empty JSON
+    array, confirmed live, never a 404) -- so this retries
+    404/502/503 rather than assuming a single status code the way most
+    other clients in this project do.
+
+#### Ownership chain analysis
+
+- **multi_jurisdiction_ownership** / **ownership_loop**: each active
+  corporate PSC (a beneficial owner that's itself a company, not a
+  person) also gets its own PSC chain followed up to three hops
+  further via Companies House's registration-number linkage,
+  collecting every distinct country the chain's companies are
+  registered in.
+  - Confirmed live against the real Tesco corporate group that a chain
+    can legitimately end without ever reaching an individual at all
+    (Tesco Plc, at the top of Tesco Stores Limited's ownership chain,
+    has zero PSCs of its own -- UK law exempts already-exchange-
+    regulated public companies from PSC reporting), so this
+    deliberately does NOT flag on chain length or on failing to
+    resolve to a person.
+  - Instead multi_jurisdiction_ownership fires only when the chain
+    crosses two or more distinct registration countries (e.g. UK ->
+    Jersey -> BVI) -- a same-country domestic group like Tesco's
+    (England -> England) does not trigger this. Layering ownership
+    across borders is a known technique for obscuring ultimate
+    control, though multinational corporate groups also legitimately
+    span jurisdictions for tax or regulatory reasons, so this is a
+    lead to investigate, not proof on its own.
+  - ownership_loop fires when a company's own traced PSC chain
+    eventually points back to that same company (i.e. it indirectly,
+    and impossibly, ends up owning a stake in itself). UK company law
+    itself restricts the simplest version of this directly, so a
+    genuine hit is rare and higher-weighted than
+    multi_jurisdiction_ownership -- a known technique for obscuring
+    ultimate control in more complex or offshore structures, though a
+    data or filing error somewhere in the chain is also possible.
+- **gleif_cross_border_parent**: GLEIF-sourced entities get a similar
+  check with global reach -- fires when an entity's GLEIF-reported
+  ultimate parent is registered in a different country -- confirmed
+  live against real multinational groups (Nestlé USA, Inc.'s ultimate
+  parent correctly resolves to Switzerland's Nestlé S.A.; Goldman
+  Sachs International's UK entity correctly resolves to its US parent,
+  The Goldman Sachs Group, Inc.). GLEIF resolves this server-side
+  across the whole ownership chain, so it needs one lookup, not a
+  hop-by-hop walk the way the PSC chain above works.
+  - Deliberately checks the *ultimate* parent, not the direct one:
+    confirmed live that a direct parent is often still same-country
+    even when the group is genuinely multinational (Nestlé USA's own
+    direct parent is itself US-registered -- the cross-border jump
+    only shows up one level higher). Same framing as
+    multi_jurisdiction_ownership: a normal structure for many
+    multinational corporate groups, and also a known technique for
+    obscuring ultimate control, so a lead to investigate, not proof on
+    its own.
+- **gleif_common_ultimate_parent**: that same ultimate-parent lookup
+  also feeds this indicator, unlike every other Shared* check in this
+  tool -- two entities can share an ultimate parent while having
+  completely different names, addresses, phone numbers, and
   countries, so this is the one signal here that can link entities
   with no other visible overlap at all. Confirmed live: querying
   "Goldman Sachs International" and "Goldman Sachs Group Europe SE"
   together correctly links them via their shared parent, The Goldman
-  Sachs Group, Inc. -- and in that real case the two also turned out to
-  share a registered address, so the existing corroborated-pairs rollup
-  picked up both signals on the same pair automatically, no extra code
-  needed. Same framing as the cross-border check: common ownership
-  within a large, legitimate corporate group is itself routine, so a
-  lead to investigate, not proof of anything improper.
-  Officer/trustee names sourced from Companies House and the UK
-  Charity Commission are also checked against Companies House's
-  disqualified-directors register -- unlike every other indicator here
-  this is an already-adjudicated regulatory action, not a correlation,
-  so it's the highest-weighted indicator in the tool; it's still a
-  name-only match, though (the search has no date-of-birth/address
-  filter), so it's a lead to verify like a sanctions hit, not a
-  confirmed identity. UK charities' outstanding registered charges
+  Sachs Group, Inc. -- and in that real case the two also turned out
+  to share a registered address, so the existing corroborated-pairs
+  rollup picked up both signals on the same pair automatically, no
+  extra code needed. Same framing as the cross-border check: common
+  ownership within a large, legitimate corporate group is itself
+  routine, so a lead to investigate, not proof of anything improper.
+
+#### Disqualified directors & shared lenders
+
+- **disqualified_director**: officer/trustee names sourced from
+  Companies House and the UK Charity Commission are also checked
+  against Companies House's disqualified-directors register -- unlike
+  every other indicator here this is an already-adjudicated regulatory
+  action, not a correlation, so it's the highest-weighted indicator in
+  the tool; it's still a name-only match, though (the search has no
+  date-of-birth/address filter), so it's a lead to verify like a
+  sanctions hit, not a confirmed identity.
+- **shared_chargee**: UK charities' outstanding registered charges
   (mortgages/debentures) are pulled in too, and two entities whose
-  charges name the same lender or chargeholder get a shared_chargee
-  indicator -- weighted lowest, alongside formation_cluster and
+  charges name the same lender or chargeholder get this indicator --
+  weighted lowest, alongside formation_cluster and
   registry_linked_group, since a shared lender is routine and
   low-signal when it's one of a handful of major UK clearing banks and
   only more notable for a smaller or private lender.
-  Each query term is also run against SEC's full-text index (see
-  fulltext above) for a mention in some *other* company's filing --
-  its own indicator, scored lowest of the bunch since a filing can
-  mention a name for reasons that have nothing to do with any real
-  connection. Each query term is separately checked against the GDELT
-  Project's indexed worldwide news coverage too (gdelt_news_mention) --
-  a broader, more current, but less structured version of the same
-  idea: this catches a name turning up anywhere in global news, not
-  just inside another company's SEC filing. Confirmed live against a
-  real, current story (a Swedbank fine tied to the Panama Papers).
-  Scored the same low weight and treated the same way -- a lead to
-  verify, not a finding. Confirmed live that GDELT enforces a strict
-  rate limit of one request every 5 seconds, far stricter than any
-  other source this tool uses, so this check alone can dominate a
-  large multi-term scan's wall-clock time -- an accepted tradeoff of
-  using it, not a bug. A query term with at least one mention also gets
-  a second GDELT call for its day-by-day average sentiment (GDELT's own
-  Average Tone metric) -- a bare mention says nothing about whether the
-  coverage was good, bad, or neutral, so a gdelt_negative_tone indicator
-  fires separately when the average across the whole window skews
-  clearly negative, a sharper and more specific signal than presence
-  alone. Calibrated against two real, live-verified examples over the
-  same ~81-day window: "Swedbank" (routine bank coverage) averages
-  +0.01, nowhere near the threshold; "Wirecard" (the real, proven
-  accounting-fraud collapse) averages -0.61, clearly crossing it --
-  -0.5 sits between the two. Skipped entirely for a query with zero
-  mentions, both because there's nothing to average and to avoid
+
+#### News & filing mentions
+
+- **edgar_fulltext_mention**: each query term is also run against SEC's
+  full-text index (see `fulltext` above) for a mention in some *other*
+  company's filing -- its own indicator, scored lowest of the bunch
+  since a filing can mention a name for reasons that have nothing to
+  do with any real connection.
+- **gdelt_news_mention**: each query term is separately checked against
+  the GDELT Project's indexed worldwide news coverage too -- a
+  broader, more current, but less structured version of the same idea:
+  this catches a name turning up anywhere in global news, not just
+  inside another company's SEC filing. Confirmed live against a real,
+  current story (a Swedbank fine tied to the Panama Papers). Scored
+  the same low weight and treated the same way -- a lead to verify,
+  not a finding.
+  - Confirmed live that GDELT enforces a strict rate limit of one
+    request every 5 seconds, far stricter than any other source this
+    tool uses, so this check alone can dominate a large multi-term
+    scan's wall-clock time -- an accepted tradeoff of using it, not a
+    bug.
+- **gdelt_negative_tone**: a query term with at least one mention also
+  gets a second GDELT call for its day-by-day average sentiment
+  (GDELT's own Average Tone metric) -- a bare mention says nothing
+  about whether the coverage was good, bad, or neutral, so this
+  indicator fires separately when the average across the whole window
+  skews clearly negative, a sharper and more specific signal than
+  presence alone. Calibrated against two real, live-verified examples
+  over the same ~81-day window: "Swedbank" (routine bank coverage)
+  averages +0.01, nowhere near the threshold; "Wirecard" (the real,
+  proven accounting-fraud collapse) averages -0.61, clearly crossing
+  it -- -0.5 sits between the two. Skipped entirely for a query with
+  zero mentions, both because there's nothing to average and to avoid
   doubling GDELT's already-dominant rate-limit cost for a term with no
   coverage at all. Sustained negative sentiment can reflect real
   trouble, but can just as easily mean routine coverage of a genuinely
   bad but lawful event (a recall, a strike, a natural disaster) --
   still a lead to read the actual coverage over, not proof on its own.
-  The same "at least one mention" gate also covers a third GDELT check:
-  a gdelt_illicit_theme indicator fires when coverage includes an
+- **gdelt_illicit_theme**: the same "at least one mention" gate also
+  covers a third GDELT check -- fires when coverage includes an
   article GDELT's own Global Knowledge Graph classifies under a
   corruption, organized-crime, or money-laundering theme (a narrow,
   deliberately curated slice of GDELT's own ~59,000-entry theme
@@ -673,155 +790,175 @@ And on top of all of the above, structural risk heuristics:
   passing mention, a cited source, or unrelated context in the same
   article -- so a lead to read the actual coverage over, not proof on
   its own.
-  Each primary resolved EDGAR company is also checked
-  against SEC's XBRL data for its most recently reported total assets
-  -- a shell_company_assets indicator flags anything under $150,000
-  despite being an active filer, SEC's own working definition of a
-  shell company (confirmed live against a real self-disclosed shell,
-  which ran $63k-$72k, versus a real pre-revenue biotech at
-  $4.5M-$7.8M). This only catches nominal-assets shells, not a
-  pre-merger SPAC sitting on a large trust account -- a textbook shell
-  with substantial reported assets, a different pattern entirely.
-  UK, AU, and US nonprofit entities also carry a formation
-  or registration date (or, for US nonprofits, the IRS's tax-exemption
-  ruling date) where the source exposes one -- EDGAR doesn't -- and a
-  cluster of entities formed within 14 days of each other gets its own
-  indicator, the weakest signal of the bunch, since a shared date can
-  just as easily mean a regulator bulk-migrated pre-existing entities
-  on one date rather than anything having been newly formed together
-  (confirmed live: Australia's ACNC register launched 3 December 2012,
-  and that exact date shows up as the "registration date" for charities
-  that existed long before it). US nonprofits' multi-year Form 990
-  filing history is also checked for the largest year-over-year swing
-  in revenue or assets -- a financial_anomaly indicator flags anything
-  5x or larger, same low weight as formation_cluster, since a dramatic
-  swing is just as often a one-time grant or a program winding down as
-  anything else. The same filing history also feeds a
-  high_officer_compensation indicator -- total compensation to current
+
+#### Financial red flags
+
+- **shell_company_assets**: each primary resolved EDGAR company is also
+  checked against SEC's XBRL data for its most recently reported total
+  assets -- flags anything under $150,000 despite being an active
+  filer, SEC's own working definition of a shell company (confirmed
+  live against a real self-disclosed shell, which ran $63k-$72k,
+  versus a real pre-revenue biotech at $4.5M-$7.8M). This only catches
+  nominal-assets shells, not a pre-merger SPAC sitting on a large trust
+  account -- a textbook shell with substantial reported assets, a
+  different pattern entirely.
+- **formation_cluster**: UK, AU, and US nonprofit entities also carry a
+  formation or registration date (or, for US nonprofits, the IRS's
+  tax-exemption ruling date) where the source exposes one -- EDGAR
+  doesn't -- and a cluster of entities formed within 14 days of each
+  other gets its own indicator, the weakest signal of the bunch, since
+  a shared date can just as easily mean a regulator bulk-migrated
+  pre-existing entities on one date rather than anything having been
+  newly formed together (confirmed live: Australia's ACNC register
+  launched 3 December 2012, and that exact date shows up as the
+  "registration date" for charities that existed long before it).
+- **financial_anomaly**: US nonprofits' multi-year Form 990 filing
+  history is also checked for the largest year-over-year swing in
+  revenue or assets -- flags anything 5x or larger, same low weight as
+  formation_cluster, since a dramatic swing is just as often a
+  one-time grant or a program winding down as anything else.
+- **high_officer_compensation**: the same filing history also feeds
+  this indicator -- total compensation to current
   officers/directors/trustees/key employees exceeding 30% of total
-  functional expenses, on a base above $1M -- though that's a named-
-  role dollar total, not individual names: ProPublica's API never
-  exposes who the officers actually are, so unlike EDGAR, Companies
-  House, and UK charities, US nonprofits can't contribute to the
-  shared_person check below regardless. Phone/email are UK-only today, website
-  is UK+AU; AU entities have no officer/trustee data (see above) and so
+  functional expenses, on a base above $1M -- though that's a
+  named-role dollar total, not individual names: ProPublica's API
+  never exposes who the officers actually are, so unlike EDGAR,
+  Companies House, and UK charities, US nonprofits can't contribute to
+  the shared_person check above regardless.
+- **Coverage caveat**: phone/email are UK-only today, website is
+  UK+AU; AU entities have no officer/trustee data (see above) and so
   can only ever match on shared address or website, never shared
-  person. Passing
-  related names together (e.g.
-  the same organization's presence in two different countries) is the
-  only way to catch an overlap between them; checked one at a time,
-  each run only compares within its own results. Every point in the
-  resulting score is a plain sum of named, evidence-linked indicators --
-  never a bare number, and never a claim about money laundering, tax
-  evasion, or terrorism financing specifically -- sorted highest-weight
-  first so the most significant findings lead the report instead of
-  being buried in a long flat list. A separate
-  "Corroborated pairs" section calls out any two entities connected by
-  two or more *different kinds* of indicator (a shared address alone
-  is common and often innocuous; the same two entities also sharing an
-  officer is a materially stronger combination) -- it adds no weight of
-  its own, since every point is already counted by the indicators that
-  produced it; it's a reorganization of that evidence, surfacing a
-  pattern a flat indicator list makes easy to miss. The single-entity
-  version of that same idea gets its own real indicator instead: a
-  convergent_risk indicator fires when one entity alone is independently
-  named by three or more *distinct* indicator codes at once -- three
-  weak signals converging on the same place is a materially stronger
-  lead than the same three signals scattered across three unrelated
-  entities. Unlike Corroborated pairs, this one does carry its own
-  weight (one point per distinct converging code, capped at 6, this
-  tool's own ceiling) since the convergence itself, not just the sum of
-  the parts it's built from, is treated as an independent finding worth
-  calling out rather than a silent side effect buried in the total.
-  Still just a lead: a large, well-documented entity can legitimately
-  rack up several unrelated weak hits (say, a shared registered-agent
-  address plus a common institutional director) with nothing improper
-  going on. Every report also
-  carries a plain LOW/MEDIUM/HIGH confidence read next to the numeric
-  score -- deliberately not a pure function of the total, since summing
-  many weak signals shouldn't outrank one strong one: a single
-  high-weight indicator (a sanctions match or the disqualified-
-  directors match) or two or more corroborated pairs each push
-  straight to HIGH on their own, one corroborated pair or a moderate
-  indicator or a high-enough total is MEDIUM, everything else is LOW.
-  The band always comes with a one-line reason naming the specific
-  factor behind it (e.g. "disqualified_director indicator at weight
-  6" or "2 corroborated pairs"), so it's never a black box.
-  It's a
-  lead-generation report, not a finding. `--diff <path>` compares a run
-  against a previously saved `--output --json` report and shows only
-  what's new -- entities, indicators, and the score change -- for
-  re-checking the same watchlist over time without manually spotting
-  what changed in a wall of repeated output. `--watch <duration>`
-  re-runs this same scan every `<duration>`, forever, until interrupted
-  (Ctrl+C), automatically diffing each run against the previous one --
-  an automatic, self-chaining `--diff`, so there's no need to manage a
-  saved `--output` file between runs yourself (an initial `--diff` is
-  still honored as the very first watch iteration's baseline). Every
-  `--output`/`--json`/`--graph`/etc. destination is rewritten each
-  tick. Minimum interval 1m, to stay polite to the sources queried;
-  mutually exclusive with `--fail-on` (a continuous monitor shouldn't
-  exit the process) -- pair it with `--webhook` instead to get alerted
-  only when something actually changes. `--batch` scores every
-  `<query>`/`--input-file` entry independently instead of
-  cross-referencing them together the way a normal scan deliberately
-  does -- one scorecard row per entity (query, entities found, score,
-  confidence, indicator count, top indicator code) as CSV (or JSON
-  array with `--json`), for screening a vendor/donor/grantee list where
-  N separate verdicts are wanted, not one combined report where a
-  shared address between two unrelated entities would otherwise read
-  as a false "connection" just because they were checked together.
-  Entries are scored sequentially, not concurrently, to avoid hammering
-  every source with N scans' worth of requests at once. Mutually
-  exclusive with `--diff`/`--watch`/`--fail-on`/`--webhook` (all assume
-  one overall score); `--top`/`--min-weight`/`--indicator`/
-  `--min-corroboration`/`--summary`/graph exports are ignored in this
-  mode, since none apply to a one-row-per-entity scorecard.
-  `--serve <port>` starts a local web server at
+  person. Passing related names together (e.g. the same organization's
+  presence in two different countries) is the only way to catch an
+  overlap between them; checked one at a time, each run only compares
+  within its own results.
+
+#### Scoring, corroboration, and confidence
+
+- Every point in the resulting score is a plain sum of named,
+  evidence-linked indicators -- never a bare number, and never a claim
+  about money laundering, tax evasion, or terrorism financing
+  specifically -- sorted highest-weight first so the most significant
+  findings lead the report instead of being buried in a long flat
+  list.
+- A separate "Corroborated pairs" section calls out any two entities
+  connected by two or more *different kinds* of indicator (a shared
+  address alone is common and often innocuous; the same two entities
+  also sharing an officer is a materially stronger combination) -- it
+  adds no weight of its own, since every point is already counted by
+  the indicators that produced it; it's a reorganization of that
+  evidence, surfacing a pattern a flat indicator list makes easy to
+  miss.
+- **convergent_risk**: the single-entity version of that same idea
+  gets its own real indicator instead -- fires when one entity alone
+  is independently named by three or more *distinct* indicator codes
+  at once -- three weak signals converging on the same place is a
+  materially stronger lead than the same three signals scattered
+  across three unrelated entities. Unlike Corroborated pairs, this one
+  does carry its own weight (one point per distinct converging code,
+  capped at 6, this tool's own ceiling) since the convergence itself,
+  not just the sum of the parts it's built from, is treated as an
+  independent finding worth calling out rather than a silent side
+  effect buried in the total. Still just a lead: a large,
+  well-documented entity can legitimately rack up several unrelated
+  weak hits (say, a shared registered-agent address plus a common
+  institutional director) with nothing improper going on.
+- Every report also carries a plain LOW/MEDIUM/HIGH confidence read
+  next to the numeric score -- deliberately not a pure function of the
+  total, since summing many weak signals shouldn't outrank one strong
+  one: a single high-weight indicator (a sanctions match or the
+  disqualified-directors match) or two or more corroborated pairs each
+  push straight to HIGH on their own, one corroborated pair or a
+  moderate indicator or a high-enough total is MEDIUM, everything else
+  is LOW. The band always comes with a one-line reason naming the
+  specific factor behind it (e.g. "disqualified_director indicator at
+  weight 6" or "2 corroborated pairs"), so it's never a black box.
+
+It's a lead-generation report, not a finding.
+
+#### Watchlist automation & report management
+
+- `--diff <path>` compares a run against a previously saved
+  `--output --json` report and shows only what's new -- entities,
+  indicators, and the score change -- for re-checking the same
+  watchlist over time without manually spotting what changed in a wall
+  of repeated output.
+- `--watch <duration>` re-runs this same scan every `<duration>`,
+  forever, until interrupted (Ctrl+C), automatically diffing each run
+  against the previous one -- an automatic, self-chaining `--diff`, so
+  there's no need to manage a saved `--output` file between runs
+  yourself (an initial `--diff` is still honored as the very first
+  watch iteration's baseline). Every `--output`/`--json`/`--graph`/etc.
+  destination is rewritten each tick. Minimum interval 1m, to stay
+  polite to the sources queried; mutually exclusive with `--fail-on`
+  (a continuous monitor shouldn't exit the process) -- pair it with
+  `--webhook` instead to get alerted only when something actually
+  changes.
+- `--batch` scores every `<query>`/`--input-file` entry independently
+  instead of cross-referencing them together the way a normal scan
+  deliberately does -- one scorecard row per entity (query, entities
+  found, score, confidence, indicator count, top indicator code) as
+  CSV (or JSON array with `--json`), for screening a
+  vendor/donor/grantee list where N separate verdicts are wanted, not
+  one combined report where a shared address between two unrelated
+  entities would otherwise read as a false "connection" just because
+  they were checked together. Entries are scored sequentially, not
+  concurrently, to avoid hammering every source with N scans' worth of
+  requests at once. Mutually exclusive with
+  `--diff`/`--watch`/`--fail-on`/`--webhook` (all assume one overall
+  score); `--top`/`--min-weight`/`--indicator`/`--min-corroboration`/
+  `--summary`/graph exports are ignored in this mode, since none apply
+  to a one-row-per-entity scorecard.
+- `--serve <port>` starts a local web server at
   `http://127.0.0.1:<port>` (always loopback-only, never reachable
   from the network) with a search form instead of running one scan --
   type one name per line and get the same HTML report `--report-html`
-  writes to a file, rendered in the browser instead. Each search is its
-  own independent scan through the same live-query pipeline the CLI
-  itself uses, not a background job or a database, so it takes as long
-  as the equivalent command-line query would. Runs until interrupted
-  (Ctrl+C); takes no `<query>`/`--input-file`/`--batch` and is mutually
-  exclusive with `--diff`/`--watch`/`--fail-on`/`--webhook`, though
-  `--limit`/`--cache-ttl`/`--exclude`/`--exclude-file` still apply to
-  every search submitted through the form.
-  `--top <n>` shows only the
-  `<n>` highest-weight indicators, noting how many were hidden.
-  `--min-weight <n>` and `--indicator <codes>` filter by relevance
-  instead of count -- only indicators at or above a weight, or matching
-  specific comma-separated codes (e.g. `--indicator
+  writes to a file, rendered in the browser instead. Each search is
+  its own independent scan through the same live-query pipeline the
+  CLI itself uses, not a background job or a database, so it takes as
+  long as the equivalent command-line query would. Runs until
+  interrupted (Ctrl+C); takes no `<query>`/`--input-file`/`--batch`
+  and is mutually exclusive with `--diff`/`--watch`/`--fail-on`/
+  `--webhook`, though `--limit`/`--cache-ttl`/`--exclude`/
+  `--exclude-file` still apply to every search submitted through the
+  form.
+
+#### Filtering & output flags
+
+- `--top <n>` shows only the `<n>` highest-weight indicators, noting
+  how many were hidden.
+- `--min-weight <n>` and `--indicator <codes>` filter by relevance
+  instead of count -- only indicators at or above a weight, or
+  matching specific comma-separated codes (e.g. `--indicator
   disqualified_director,sanctions_match`) -- and combine with `--top`
   for "the top N matching this filter". The total score and confidence
   band still reflect every indicator found regardless of any of these,
-  and `--diff` still compares against the full set, so none of them can
-  hide a genuinely new indicator from a diff. `--min-corroboration <n>`
-  is the same idea for the Corroborations rollup instead: show only
-  corroborated pairs matched on at least `<n>` distinct indicator
-  codes -- Corroborations never contributed to Total in the first
-  place, so there's nothing to recompute. `--exclude <terms>`
-  (comma-separated) and `--exclude-file <path>` are different from all
-  of the above: any indicator whose evidence or entity labels contain
-  one of these terms (case-insensitive) is treated as not a real
-  finding at all -- removed before `--diff` runs (so it can never
-  resurface as "new" later) and the total score/confidence band are
-  recomputed without it. Use this to permanently dismiss a lead you've
-  already reviewed and cleared, across every future run.
-  `--fail-on <band>` (LOW, MEDIUM, or HIGH) makes the process exit
+  and `--diff` still compares against the full set, so none of them
+  can hide a genuinely new indicator from a diff.
+- `--min-corroboration <n>` is the same idea for the Corroborations
+  rollup instead: show only corroborated pairs matched on at least
+  `<n>` distinct indicator codes -- Corroborations never contributed
+  to Total in the first place, so there's nothing to recompute.
+- `--exclude <terms>` (comma-separated) and `--exclude-file <path>`
+  are different from all of the above: any indicator whose evidence or
+  entity labels contain one of these terms (case-insensitive) is
+  treated as not a real finding at all -- removed before `--diff` runs
+  (so it can never resurface as "new" later) and the total
+  score/confidence band are recomputed without it. Use this to
+  permanently dismiss a lead you've already reviewed and cleared,
+  across every future run.
+- `--fail-on <band>` (LOW, MEDIUM, or HIGH) makes the process exit
   non-zero if the final confidence band reaches that level or higher
   -- the report is still written/printed either way, only the exit
   status changes -- so a scan can gate a CI pipeline, cron job, or
   pre-merge check instead of requiring someone to read the output.
-  `--summary` replaces the full report with one compact line (or one
+- `--summary` replaces the full report with one compact line (or one
   small object with `--json`) -- score, confidence, entity/indicator
   counts, plus hidden/excluded counts and a short diff summary if
   either applies -- for scripting/dashboards. Combine with `--fail-on`
   and `--quiet` for a silent CI check that only prints one line and
   exits non-zero on a real hit.
-  `--webhook <url>` requires `--fail-on` or `--watch` too: with
+- `--webhook <url>` requires `--fail-on` or `--watch` too: with
   `--fail-on`, a JSON alert is POSTed to `<url>` when the threshold is
   met, before exiting; with `--watch` instead, an alert fires on any
   tick whose diff shows new entities or indicators since the last
@@ -830,13 +967,15 @@ And on top of all of the above, structural risk heuristics:
   message format (confirmed live against each platform's current
   docs); any other URL gets the full compact summary as the POST body.
   A failed send is a warning, not a change to the exit status --
-  `--fail-on` already communicates that (and under `--watch` there's no
-  exit status to speak of, since the process keeps running).
-  The text report (not `--json`) colors the confidence band and each
+  `--fail-on` already communicates that (and under `--watch` there's
+  no exit status to speak of, since the process keeps running).
+- The text report (not `--json`) colors the confidence band and each
   indicator's weight (red 5+, yellow 3-4, green below), auto-disabled
   when the `NO_COLOR` env var is set or output isn't an interactive
-  terminal (redirected to a file, piped, or a real file via `--output`)
-  -- `--no-color` disables it unconditionally too.
+  terminal (redirected to a file, piped, or a real file via
+  `--output`) -- `--no-color` disables it unconditionally too.
+
+</details>
 
 `~/.paper-trailrc` sets defaults for any `risk` flag above without
 retyping them every run: one `flag-name = value` pair per line (blank
@@ -1032,6 +1171,10 @@ go run ./cmd/paper-trail nzbn "Example Name"
 # Show one entity's profile + current directors by exact NZBN
 go run ./cmd/paper-trail nzbn --number 9429041782718
 
+# List every certificate found for a domain via public Certificate
+# Transparency logs (crt.sh) -- free, keyless, no registration
+go run ./cmd/paper-trail crtsh example.com
+
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
 go run ./cmd/paper-trail risk "Example Name"
@@ -1171,10 +1314,11 @@ source <(paper-trail completion zsh)
 
 ```
 .github/workflows/ci.yml     # gofmt/vet/build/test -race on every push and PR to main
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, risk, completion, version subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, crtsh, risk, completion, version subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
+internal/crtsh/              # crt.sh Certificate Transparency log client -- no API key needed
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
@@ -1203,6 +1347,7 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://api.company-information.service.gov.uk/` (UK Companies House Public Data API -- company search, profile, and officers, requires a free registered API key)
 - `https://api.business.govt.nz/gateway/nzbn/v5/` (New Zealand's NZBN API -- entity search and detail, requires a free but manually-approved subscription key)
 - `https://api.business.govt.nz/gateway/companies-office/companies-register/entity-roles/v3/` (New Zealand's Companies Entity Role Search API -- director/shareholder name search, same subscription account, requires its own approved product subscription)
+- `https://crt.sh/` (Certificate Transparency log search, operated by Sectigo -- indexes every certificate any publicly-trusted CA has issued since ~2018, no API key required)
 
 `ukcharity`, `sanctions`, `companieshouse`, and `nzbn` are the exceptions to this project's no-key model.
 

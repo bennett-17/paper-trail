@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
+	"github.com/bennett-17/paper-trail/internal/crtsh"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/graph"
 	"github.com/bennett-17/paper-trail/internal/nzbn"
@@ -741,6 +742,10 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		nzClient = nil
 	}
 
+	// crt.sh Certificate Transparency search -- free, keyless, no
+	// credential to check for, unlike every client constructed above.
+	ctClient := crtsh.NewClient()
+
 	// Phase 1: every source below resolves query terms into entities
 	// independently of the others -- EDGAR, IRS Form 990, ACNC, GLEIF,
 	// and UK Charity Commission (with its nested Companies House
@@ -831,8 +836,8 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// organization; the RDAP domain-age screen checks every entity's
 	// own website, not a name at all. Merged in the same fixed order as
 	// before so output stays deterministic.
-	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes []string
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra, ctExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes, ctNotes []string
 	var wg2 sync.WaitGroup
 
 	wg2.Add(1)
@@ -885,6 +890,11 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer wg2.Done()
 		domainExtra, domainNotes = screenDomainAge(entities, progress)
 	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		ctExtra, ctNotes = screenCertificateTransparency(ctClient, entities, progress)
+	}()
 	wg2.Wait()
 
 	extra = append(extra, usExtra...)
@@ -897,6 +907,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	extra = append(extra, samExtra...)
 	extra = append(extra, pepExtra...)
 	extra = append(extra, domainExtra...)
+	extra = append(extra, ctExtra...)
 	notes = append(notes, usNotes...)
 	notes = append(notes, ukSanctionsNotes...)
 	notes = append(notes, unNotes...)
@@ -907,6 +918,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, samNotes...)
 	notes = append(notes, pepNotes...)
 	notes = append(notes, domainNotes...)
+	notes = append(notes, ctNotes...)
 
 	// Cross-referencing runs once over the combined pool from every
 	// query term -- this is the whole point of taking multiple terms:

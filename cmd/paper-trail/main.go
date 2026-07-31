@@ -48,6 +48,8 @@ func main() {
 		runPerson(os.Args[2:])
 	case "nzbn":
 		runNZBN(os.Args[2:])
+	case "crtsh":
+		runCrtsh(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "completion":
@@ -89,6 +91,7 @@ Usage:
   paper-trail person <name> [--limit <n>] [--json]
   paper-trail nzbn <query> [--limit <n>] [--json]
   paper-trail nzbn --number <nzbn> [--json]
+  paper-trail crtsh <domain> [--json]
   paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
@@ -445,6 +448,18 @@ docs describe real fuzzy/partial matching, so this fan-out only
 accepts a hit whose returned name normalizes to an exact match of the
 name searched for, ruling out an unrelated same-surname collision
 though not guaranteeing the same real person the way an ID match would.
+Every distinct website domain across all resolved entities is also
+looked up in crt.sh's Certificate Transparency log search (free,
+keyless, no registration) -- a ct_shared_certificate indicator fires
+when a certificate's SAN list covers two DIFFERENT entities' own known
+domains together, a genuine technical infrastructure link (the exact
+same TLS certificate protects both at once) distinct from a shared
+address or phone number. Doesn't flag a certificate merely covering a
+subdomain of the same domain, or one entity's own two domains sharing
+a cert -- only a SAN matching a DIFFERENT entity's own distinct domain
+counts. Shared hosting/CDN providers can also legitimately bundle
+unrelated customers this way on an older-style shared certificate, so
+it's a lead to investigate, not proof on its own.
 Flagged patterns: entities that share a registered/mailing address, phone
 number, email, or website, and the same individual appearing as an
 officer, director, or trustee of more than one of them -- including a

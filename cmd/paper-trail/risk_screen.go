@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
+	"github.com/bennett-17/paper-trail/internal/crtsh"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/gdelt"
 	"github.com/bennett-17/paper-trail/internal/icij"
@@ -621,6 +623,116 @@ func screenDomainAge(entities []risk.Entity, progress *progressReporter) (extra 
 				Entities:    []string{e.Label()},
 				Evidence:    fmt.Sprintf("%s registered %s, earliest archived content %s (%.1f years later)", host, registered.Format("2006-01-02"), snapshot.Format("2006-01-02"), gap.Hours()/24/365),
 			})
+		}
+	}
+	return extra, notes
+}
+
+// normalizeCertName normalizes a Certificate Transparency SAN entry
+// the same way websiteHost normalizes an entity's own website, so the
+// two can be compared directly: strips a leading "*." wildcard label
+// and a "www." prefix (crt.sh's own name_value entries are already
+// lowercase, but this lowercases defensively regardless).
+func normalizeCertName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimPrefix(s, "*.")
+	return strings.TrimPrefix(s, "www.")
+}
+
+// screenCertificateTransparency looks up every distinct website domain
+// across all resolved entities in crt.sh's Certificate Transparency
+// log search (crtsh above -- free and keyless, no registration: every
+// certificate a public CA has issued has been logged there since 2018,
+// confirmed live with no API key required). A ct_shared_certificate
+// indicator fires when a certificate's SAN list covers two DIFFERENT
+// entities' own known domains together -- unlike a shared address or
+// phone number, this is a genuine technical infrastructure link (the
+// exact same TLS certificate was issued to protect both domains at
+// once), a signal a shell-company network sharing an operator or
+// hosting setup can leave behind even when nothing else visibly
+// overlaps. Deliberately does NOT flag a certificate merely covering a
+// subdomain of the SAME domain (e.g. "*.example.com" alongside
+// "example.com") -- that's ordinary, not a cross-entity link at all;
+// only a SAN entry matching a DIFFERENT entity's own distinct domain
+// counts, and an entity that happens to list two of its own domains
+// under one certificate itself doesn't count either (same entity on
+// both sides isn't a cross-entity finding).
+//
+// Scoped to entities that actually have a website (most sources this
+// tool covers don't expose one at all); one crt.sh lookup per distinct
+// domain, deduplicated the same way screenDomainAge's RDAP/Wayback
+// lookups are, since the same domain can appear on multiple entities.
+func screenCertificateTransparency(client *crtsh.Client, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "Certificate Transparency: "+fmt.Sprintf(format, a...))
+	}
+
+	// One pass to collect every distinct domain this scan already
+	// knows about, and which entities (by label) claim it -- so a
+	// certificate's SAN list can be checked against domains OTHER
+	// entities already have, not just the one being queried.
+	hostEntities := map[string]map[string]bool{}
+	for _, e := range entities {
+		for _, w := range e.Websites {
+			host := normalizeCertName(websiteHost(w))
+			if host == "" {
+				continue
+			}
+			if hostEntities[host] == nil {
+				hostEntities[host] = map[string]bool{}
+			}
+			hostEntities[host][e.Label()] = true
+		}
+	}
+	if len(hostEntities) == 0 {
+		return nil, nil
+	}
+
+	hosts := make([]string, 0, len(hostEntities))
+	for h := range hostEntities {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts) // deterministic query/progress order, not a scoring input
+
+	fired := map[string]bool{} // dedupe key: sorted "labelA|labelB|certificateKey"
+	for i, host := range hosts {
+		progress.report("Certificate Transparency", "checking %q (%d/%d)", host, i+1, len(hosts))
+		certs, err := client.Certificates(host)
+		if err != nil {
+			note("%q: %v", host, err)
+			continue
+		}
+		for _, cert := range certs {
+			for _, san := range cert.SANs {
+				other := normalizeCertName(san)
+				if other == "" || other == host {
+					continue
+				}
+				if _, known := hostEntities[other]; !known {
+					continue // not a domain any entity in this scan already has
+				}
+				for labelA := range hostEntities[host] {
+					for labelB := range hostEntities[other] {
+						if labelA == labelB {
+							continue
+						}
+						pair := []string{labelA, labelB}
+						sort.Strings(pair)
+						dedupeKey := pair[0] + "|" + pair[1] + "|" + cert.Key
+						if fired[dedupeKey] {
+							continue
+						}
+						fired[dedupeKey] = true
+						extra = append(extra, risk.Indicator{
+							Code:        "ct_shared_certificate",
+							Description: "Two entities' own websites are covered by the exact same TLS certificate, per public Certificate Transparency logs -- unlike a shared address or phone number, this is a genuine technical infrastructure link: the same certificate was issued to protect both domains together, consistent with the same operator or hosting setup running both. Shared hosting/CDN providers can also legitimately bundle unrelated customers this way on an older-style shared certificate, so it's a lead to investigate, not proof of anything improper",
+							Weight:      2,
+							Entities:    pair,
+							Evidence:    fmt.Sprintf("%s and %s both covered by the same certificate (serial %s, issuer: %s, valid %s to %s)", host, other, cert.SerialNumber, cert.IssuerName, cert.NotBefore.Format("2006-01-02"), cert.NotAfter.Format("2006-01-02")),
+						})
+					}
+				}
+			}
 		}
 	}
 	return extra, notes
