@@ -138,6 +138,61 @@ func TestServeTemplateEscapesFormQueryInsideScript(t *testing.T) {
 	}
 }
 
+// TestServeTemplateRendersBannerWhenAvailable confirms HasBanner
+// swaps the plain-text heading for the repo's banner image, served
+// from the /banner.png route this same process registers.
+func TestServeTemplateRendersBannerWhenAvailable(t *testing.T) {
+	tmpl, err := reportTemplate("serve", servePageTemplate)
+	if err != nil {
+		t.Fatalf("reportTemplate: %v", err)
+	}
+	var buf strings.Builder
+	view := serveView{HasBanner: true}
+	if err := tmpl.Execute(&buf, view); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	html := buf.String()
+	if !strings.Contains(html, `src="/banner.png"`) {
+		t.Error("expected the banner <img> tag when HasBanner is true")
+	}
+	if strings.Contains(html, "<h1>paper-trail</h1>") {
+		t.Error("the plain-text heading must not also render alongside the banner")
+	}
+}
+
+// TestServeTemplateRendersHeadingWhenBannerUnavailable guards the
+// fallback: banner.png might not be readable (e.g. the binary was run
+// from outside the repo -- see loadBanner's own doc comment), and the
+// page must still render something sensible instead of a broken image.
+func TestServeTemplateRendersHeadingWhenBannerUnavailable(t *testing.T) {
+	tmpl, err := reportTemplate("serve", servePageTemplate)
+	if err != nil {
+		t.Fatalf("reportTemplate: %v", err)
+	}
+	var buf strings.Builder
+	view := serveView{HasBanner: false}
+	if err := tmpl.Execute(&buf, view); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	html := buf.String()
+	if !strings.Contains(html, "<h1>paper-trail</h1>") {
+		t.Error("expected the plain-text heading fallback when HasBanner is false")
+	}
+	if strings.Contains(html, `src="/banner.png"`) {
+		t.Error("the banner <img> tag must not render when HasBanner is false")
+	}
+}
+
+// TestLoadBannerDoesNotPanicWithoutFile confirms loadBanner degrades
+// to nil rather than erroring when banner.png isn't in the current
+// working directory -- true for `go test`'s own cwd (cmd/paper-trail/,
+// not the repo root banner.png actually lives in), which incidentally
+// exercises the exact same fallback path a release binary run from
+// outside the repo would hit.
+func TestLoadBannerDoesNotPanicWithoutFile(t *testing.T) {
+	_ = loadBanner() // must not panic regardless of the result
+}
+
 func TestServeTemplateRendersReportWhenPresent(t *testing.T) {
 	tmpl, err := reportTemplate("serve", servePageTemplate)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bennett-17/paper-trail/internal/riskcache"
@@ -17,16 +18,46 @@ import (
 
 // serveView is what servePageTemplate renders -- the search form's
 // current value, whether a scan should be kicked off via the /scan SSE
-// endpoint, and the rendered report (nil on every request now that a
-// submitted query defers to /scan rather than running synchronously;
-// kept as a field, and still exercised directly by
+// endpoint, whether the repo's banner image loaded successfully, and
+// the rendered report (nil on every request now that a submitted
+// query defers to /scan rather than running synchronously; kept as a
+// field, and still exercised directly by
 // TestServeTemplateRendersReportWhenPresent, since the template itself
 // is still capable of rendering a report inline if a future caller
 // ever wants to skip the SSE round-trip).
 type serveView struct {
 	FormQuery string
 	Scanning  bool
+	HasBanner bool
 	Report    *reportHTMLView
+}
+
+// bannerOnce/bannerBytes cache banner.png's contents for the lifetime
+// of the process -- read once, from the current working directory,
+// the first time either the page or the /banner.png route needs it.
+// Deliberately not embedded into the binary at build time: banner.png
+// lives at the repo root (README.md's own <img> tag depends on that
+// exact path to render on GitHub), and Go's embed directive can't
+// reach a file outside the embedding source file's own package
+// directory without a duplicate copy to keep in sync. Reading from
+// disk instead means this only works when --serve is run from the
+// repo root (true for both `go run ./cmd/paper-trail` and this
+// project's own .claude/launch.json dev config) -- a missing or
+// unreadable file is treated as "no banner", not an error, so a
+// release binary run from an arbitrary directory just falls back to
+// the plain-text heading instead of a broken image.
+var (
+	bannerOnce  sync.Once
+	bannerBytes []byte
+)
+
+func loadBanner() []byte {
+	bannerOnce.Do(func() {
+		if b, err := os.ReadFile("banner.png"); err == nil {
+			bannerBytes = b
+		}
+	})
+	return bannerBytes
 }
 
 // runRiskServe starts a local, loopback-only HTTP server -- always
@@ -56,6 +87,15 @@ func runRiskServe(port string, limit int, cache *riskcache.Cache, cacheTTL time.
 	mux.HandleFunc("/scan", func(w http.ResponseWriter, r *http.Request) {
 		serveScanSSE(w, r, tmpl, limit, cache, cacheTTL, excludeTerms)
 	})
+	mux.HandleFunc("/banner.png", func(w http.ResponseWriter, r *http.Request) {
+		banner := loadBanner()
+		if banner == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(banner)
+	})
 
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "paper-trail: serving local web UI at http://%s -- Ctrl+C to stop\n", addr)
@@ -74,7 +114,7 @@ func runRiskServe(port string, limit int, cache *riskcache.Cache, cacheTTL time.
 func serveRiskRequest(w http.ResponseWriter, r *http.Request, tmpl *template.Template) {
 	formQuery := r.URL.Query().Get("q")
 	queries := splitServeQueries(formQuery)
-	view := serveView{FormQuery: formQuery, Scanning: len(queries) > 0}
+	view := serveView{FormQuery: formQuery, Scanning: len(queries) > 0, HasBanner: loadBanner() != nil}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, view); err != nil {
@@ -213,6 +253,7 @@ const servePageTemplate = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 ` + reportStyle + `
 <style>
+  .banner { max-width: 100%; height: auto; display: block; margin-bottom: 1em; }
   .search-form { margin-bottom: 1.5em; }
   .search-form textarea {
     width: 100%;
@@ -256,7 +297,7 @@ const servePageTemplate = `<!DOCTYPE html>
 </head>
 <body>
 
-<h1>paper-trail</h1>
+{{if .HasBanner}}<img class="banner" src="/banner.png" alt="Paper Trail">{{else}}<h1>paper-trail</h1>{{end}}
 <form class="search-form" method="get" action="/">
   <textarea name="q" placeholder="One name per line -- multiple lines are cross-referenced together, same as passing several arguments on the command line">{{.FormQuery}}</textarea>
   <div><button type="submit">Search</button></div>
