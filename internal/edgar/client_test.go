@@ -300,6 +300,40 @@ func TestGetFilingsFilteredByForm(t *testing.T) {
 	}
 }
 
+// TestGetFilingsParsesItemsForm8K guards the field this project's
+// restatement check (Item 4.02) depends on: the "items" array in SEC's
+// submissions JSON, aligned by index with accessionNumber/form/etc.
+func TestGetFilingsParsesItemsForm8K(t *testing.T) {
+	submissions := mustReadFixture(t, "submissions_apple.json")
+	srv := newTestServer(t, "", submissions, "", 0, 0)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	filings, err := c.GetFilings("0000320193", "8-K", 10)
+	if err != nil {
+		t.Fatalf("GetFilings: %v", err)
+	}
+	if len(filings) != 1 {
+		t.Fatalf("got %d filings, want 1", len(filings))
+	}
+	if filings[0].Items != "2.02,4.02,9.01" {
+		t.Errorf("got Items %q, want 2.02,4.02,9.01", filings[0].Items)
+	}
+	if !filings[0].HasItem("4.02") {
+		t.Error("HasItem(4.02) = false, want true")
+	}
+	if filings[0].HasItem("5.02") {
+		t.Error("HasItem(5.02) = true, want false (not in this filing's items)")
+	}
+}
+
+func TestFilingHasItemFalseWhenNoItems(t *testing.T) {
+	f := Filing{Form: "10-Q"}
+	if f.HasItem("4.02") {
+		t.Error("HasItem(4.02) = true, want false for a filing with no items at all")
+	}
+}
+
 // TestGetInsiderRelationshipsFetchesReportingOwners exercises the full
 // path against the Form 4, Form 5, and Form 3 feeds: entries that only
 // carry a filing-href (no reporting owner name, matching SEC's current

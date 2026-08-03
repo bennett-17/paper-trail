@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/gleif"
+	"github.com/bennett-17/paper-trail/internal/littlesis"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
 	"github.com/bennett-17/paper-trail/internal/nzbn"
 	"github.com/bennett-17/paper-trail/internal/risk"
@@ -129,6 +131,34 @@ func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int,
 				Entities:    []string{primaryEntity.Label()},
 				Evidence:    fmt.Sprintf("total assets $%d as of %s", val, asOf),
 			})
+		}
+
+		// Restatement check: an 8-K filed with Item 4.02 is a company's
+		// own admission that previously issued financial statements (or
+		// a completed interim review) should no longer be relied on --
+		// SEC's own trigger for this item is exactly that determination,
+		// made by the company or its auditor. Unlike most indicators in
+		// this project, this isn't an inference from a pattern -- it's
+		// the filer directly disclosing the fact, which is why it's
+		// scored higher than shell_company_assets above. Only checked
+		// for the primary resolved company per query term, same
+		// proportionality reasoning as the shell-company check.
+		if filings, err := edgarClient.GetFilings(cik, "8-K", 1000); err != nil {
+			note("%s restatement check: %v", company.Name, err)
+		} else {
+			for _, f := range filings {
+				if !f.HasItem("4.02") {
+					continue
+				}
+				r.extra = append(r.extra, risk.Indicator{
+					Code:        "restatement_disclosed",
+					Description: "This filer has disclosed an 8-K Item 4.02 -- a determination (by the company or its auditor) that previously issued financial statements, or a completed interim review, should no longer be relied on. This is a direct, self-reported fact, not an inference -- though a restatement can range from a minor technical correction to a serious accounting failure, and this alone doesn't say which",
+					Weight:      3,
+					Entities:    []string{primaryEntity.Label()},
+					Evidence:    fmt.Sprintf("8-K filed %s (accession %s): %s", f.FilingDate, f.AccessionNumber, f.IndexURL()),
+				})
+				break // one occurrence is enough; related follow-up 8-Ks on the same restatement shouldn't inflate the score
+			}
 		}
 
 		// Related CIKs (former identities after a corporate
@@ -303,6 +333,81 @@ func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cac
 	return entities, notes
 }
 
+// gatherLittleSisEntities resolves every query term against LittleSis's
+// free, keyless, crowdsourced "who-knows-who" database. Only
+// organization hits (candidate.IsOrg()) become risk.Entity records --
+// a person hit isn't itself an entity in this project's model. Unlike
+// every other source in this project, LittleSis directly exposes
+// board/executive relationship data as its own first-class concept
+// (not derived from an officer filing), which is what populates
+// People here: for each organization match, its documented
+// relationships are checked and only board members / executives
+// (category_attributes.is_board or is_executive, per
+// internal/littlesis) are kept -- a plain employee relationship is
+// deliberately excluded, the same officer-level-only scope this
+// project applies to every other source's People field. This is what
+// lets a LittleSis-sourced board membership feed the shared_person
+// cross-reference check exactly like a Companies House director or an
+// EDGAR Schedule 13D filer does. LittleSis exposes no structured
+// address, so (unlike GLEIF) this source never contributes to the
+// shared-address check.
+func gatherLittleSisEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string) {
+	lsClient := littlesis.NewClient()
+	results := runConcurrentQueries(queries, func(i int, query string) queryResult {
+		progress.report("LittleSis", "term %d/%d: %q", i+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) {
+			r.notes = append(r.notes, "LittleSis: "+fmt.Sprintf(format, a...))
+		}
+
+		cacheKey := riskcache.Key("littlesis", query, limit)
+		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = cached
+			return r
+		}
+
+		candidates, err := lsClient.SearchByName(query, limit)
+		if err != nil {
+			note("%v", err)
+			return r
+		}
+		var termEntities []risk.Entity
+		for _, cand := range candidates {
+			if !cand.IsOrg() {
+				continue
+			}
+			var people []string
+			if rels, relErr := lsClient.Relationships(cand.ID, 0); relErr != nil {
+				note("%s relationships: %v", cand.Name, relErr)
+			} else {
+				seen := map[string]bool{}
+				for _, rel := range rels {
+					if !rel.IsBoard && !rel.IsExecutive {
+						continue
+					}
+					name := strings.TrimSpace(rel.OtherEntityName)
+					if name == "" || seen[name] {
+						continue
+					}
+					seen[name] = true
+					people = append(people, name)
+				}
+			}
+			termEntities = append(termEntities, risk.NewEntity("littlesis", strconv.Itoa(cand.ID), cand.Name, nil, people))
+		}
+		if len(termEntities) == 0 {
+			note("no organization match for %q", query)
+			cache.Set(cacheKey, nil)
+			return r
+		}
+		r.entities = termEntities
+		cache.Set(cacheKey, termEntities)
+		return r
+	})
+	entities, _, notes = flattenQueryResults(results)
+	return entities, notes
+}
+
 // gatherGLEIFEntities resolves every query term against the Global
 // LEI Foundation's legal entity database -- unlike every other source
 // here, GLEIF isn't scoped to one jurisdiction (an LEI is required for
@@ -388,9 +493,32 @@ func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, ca
 							Evidence:    fmt.Sprintf("%s (%s) -- ultimate parent %s (%s)", rec.Name, rec.Jurisdiction, parent.Name, parent.Jurisdiction),
 						})
 					}
+				} else {
+					// parent == nil means no parent reported -- confirmed
+					// live to be a normal, common outcome, not an error.
+					// GLEIF requires every registrant to either report a
+					// real parent or explicitly report why not (one of a
+					// fixed set of reason codes, e.g. "NATURAL_PERSONS" --
+					// the entity's owners are people, not a consolidating
+					// corporate parent -- or "NON_CONSOLIDATING",
+					// "NO_KNOWN_PERSON"). Surfacing that reason (when GLEIF
+					// has one on file) turns a silent gap into an
+					// explained one -- most reasons are entirely routine,
+					// but the reason itself is worth a second look
+					// alongside other indicators, and its absence (no
+					// exception on file either) is itself informative.
+					if exc, excErr := gleifClient.UltimateParentReportingException(rec.LEI); excErr != nil {
+						note("%s reporting exception: %v", rec.Name, excErr)
+					} else if exc != nil {
+						r.extra = append(r.extra, risk.Indicator{
+							Code:        "gleif_no_beneficial_owner_reported",
+							Description: "This entity reports no ultimate parent to GLEIF, with an official exception reason on file explaining why -- often entirely routine (e.g. \"NATURAL_PERSONS\" means the entity's owners are individuals, not a consolidating corporate parent), but worth a second look alongside other indicators, especially for a reason code that itself signals opacity",
+							Weight:      1,
+							Entities:    []string{e.Label()},
+							Evidence:    fmt.Sprintf("%s -- reporting exception: %s (%s)", rec.Name, exc.Reason, exc.Category),
+						})
+					}
 				}
-				// parent == nil means no parent reported -- confirmed
-				// live to be a normal, common outcome, not an error.
 			}
 			termEntities = append(termEntities, e)
 		}

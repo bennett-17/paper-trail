@@ -114,6 +114,63 @@ func TestDirectParentReturnsNilNotErrorOn404(t *testing.T) {
 	}
 }
 
+// This fixture is modeled directly on the real, live-verified GLEIF
+// ultimate-parent-reporting-exception response for Apple Inc.'s LEI
+// (an entity with no reported ultimate parent).
+const realReportingExceptionResponse = `{
+  "data": {
+    "type": "reporting-exceptions",
+    "id": "HWUPKR0MPOU8FGXBT394|19|abc|ULTIMATE_ACCOUNTING_CONSOLIDATION_PARENT|",
+    "attributes": {
+      "validFrom": null,
+      "validTo": null,
+      "lei": "HWUPKR0MPOU8FGXBT394",
+      "category": "ULTIMATE_ACCOUNTING_CONSOLIDATION_PARENT",
+      "reason": "NATURAL_PERSONS",
+      "reference": null
+    }
+  }
+}`
+
+func TestUltimateParentReportingExceptionParsesRecord(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lei-records/HWUPKR0MPOU8FGXBT394/ultimate-parent-reporting-exception", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, realReportingExceptionResponse)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	exc, err := c.UltimateParentReportingException("HWUPKR0MPOU8FGXBT394")
+	if err != nil {
+		t.Fatalf("UltimateParentReportingException: %v", err)
+	}
+	if exc == nil {
+		t.Fatal("exc = nil, want a reporting exception")
+	}
+	if exc.Reason != "NATURAL_PERSONS" || exc.Category != "ULTIMATE_ACCOUNTING_CONSOLIDATION_PARENT" {
+		t.Errorf("exc = %+v", exc)
+	}
+}
+
+func TestDirectParentReportingExceptionReturnsNilNotErrorOn404(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lei-records/SOME_LEI/direct-parent-reporting-exception", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	exc, err := c.DirectParentReportingException("SOME_LEI")
+	if err != nil {
+		t.Fatalf("DirectParentReportingException: %v, want nil error when no exception is on file either", err)
+	}
+	if exc != nil {
+		t.Errorf("exc = %+v, want nil", exc)
+	}
+}
+
 func TestUltimateParentParsesRecord(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/lei-records/W22LROWP2IHZNBB6K528/ultimate-parent", func(w http.ResponseWriter, r *http.Request) {

@@ -11,14 +11,17 @@ import (
 	"github.com/bennett-17/paper-trail/internal/courtlistener"
 	"github.com/bennett-17/paper-trail/internal/crtsh"
 	"github.com/bennett-17/paper-trail/internal/edgar"
+	"github.com/bennett-17/paper-trail/internal/gazette"
 	"github.com/bennett-17/paper-trail/internal/gdelt"
 	"github.com/bennett-17/paper-trail/internal/icij"
 	"github.com/bennett-17/paper-trail/internal/ofsi"
+	"github.com/bennett-17/paper-trail/internal/openfec"
 	"github.com/bennett-17/paper-trail/internal/rdap"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/samgov"
 	"github.com/bennett-17/paper-trail/internal/sanctions"
 	"github.com/bennett-17/paper-trail/internal/unsc"
+	"github.com/bennett-17/paper-trail/internal/usaspending"
 	"github.com/bennett-17/paper-trail/internal/wayback"
 	"github.com/bennett-17/paper-trail/internal/wikidata"
 )
@@ -982,6 +985,168 @@ func screenCourtListener(clClient *courtlistener.Client, queries []string, limit
 				Entities:    []string{fmt.Sprintf("search query: %q", query)},
 				Evidence:    fmt.Sprintf("%s -- %s, filed %s (docket %s): %s", d.CaseName, d.Court, orDash(d.DateFiled), orDash(d.DocketNumber), d.DocketURL),
 			})
+		}
+	}
+	return extra, notes
+}
+
+// screenOpenFECContributions checks every distinct person name gathered
+// from entities (officers, trustees, directors -- whichever a source
+// exposes) against the FEC's Schedule A itemized individual
+// contribution records. Scoped to person names only, never query
+// terms: federal campaign contributions are legally attributed to the
+// individual donor, not their employer or any organization, so an
+// organization query term has nothing to match here. Unlike
+// screenPoliticallyExposedPersons (which fuzzy-matches candidates
+// against Wikidata's own curated, comparatively small set of tagged
+// politicians before ever checking an occupation), OpenFEC's own
+// contributor-name search has no such pre-filter -- millions of
+// itemized contributions span every common American name, so a match
+// here is far more likely to be an unrelated namesake than a
+// screenDomainAge or screenPoliticallyExposedPersons hit is. Scored at
+// the same lowest weight as litigation_mention/gdelt_news_mention/
+// edgar_fulltext_mention for exactly that reason: a lead to verify
+// against the contribution's own employer/occupation/committee fields,
+// not a confirmed identity match.
+func screenOpenFECContributions(entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "OpenFEC: "+fmt.Sprintf(format, a...))
+	}
+	fecClient := openfec.NewClient("")
+
+	checked := map[string]bool{}
+	for _, e := range entities {
+		for _, p := range e.People {
+			key := strings.ToLower(strings.TrimSpace(p))
+			if key == "" || checked[key] {
+				continue
+			}
+			checked[key] = true
+			progress.report("OpenFEC", "checking %q (%d so far)", p, len(checked))
+
+			contributions, err := fecClient.SearchContributions(p, 3)
+			if err != nil {
+				note("%q: %v", p, err)
+				continue
+			}
+			for _, c := range contributions {
+				extra = append(extra, risk.Indicator{
+					Code:        "political_contribution",
+					Description: "Name matches an itemized federal campaign contribution on FEC Schedule A -- a common name can easily collide with an unrelated donor nationwide (this is a name-only match, not a confirmed identity check), and a genuine match is routine, publicly disclosed political activity, not wrongdoing. Worth checking the contribution's own employer/occupation fields against this entity for a real connection before treating it as a lead",
+					Weight:      1,
+					Entities:    []string{e.Label()},
+					Evidence:    fmt.Sprintf("%s -- $%.2f to %s (%s) on %s, employer: %s", c.ContributorName, c.Amount, orDash(c.CommitteeName), orDash(c.CommitteeID), orDash(c.Date), orDash(c.ContributorEmployer)),
+				})
+			}
+		}
+	}
+	return extra, notes
+}
+
+// screenUSASpendingAwards checks each query term against
+// USAspending.gov's federal contract/grant/loan recipient search.
+// Scoped to query terms only, not every distinct person name this
+// project finds, the same reasoning screenGDELTMentions and
+// screenCourtListener already use: federal awards are made to
+// registered organizations, not the individual officers/trustees this
+// project separately surfaces, so a person-name search here would
+// mostly just add API calls without adding signal. Not itself a red
+// flag -- most federal contractors and grantees are exactly what they
+// claim to be -- but it's context this project otherwise has no way to
+// surface: whether an entity claiming government work actually has the
+// awards to show for it, or whether a nonprofit/shell-looking company
+// turns out to be a significant federal contractor.
+func screenUSASpendingAwards(queries []string, limit int, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "USAspending.gov: "+fmt.Sprintf(format, a...))
+	}
+	usaClient := usaspending.NewClient()
+
+	screened := map[string]bool{}
+	for _, query := range queries {
+		key := strings.ToLower(strings.TrimSpace(query))
+		if key == "" || screened[key] {
+			continue
+		}
+		screened[key] = true
+		progress.report("USAspending.gov", "checking %q (%d so far)", query, len(screened))
+
+		awards, err := usaClient.SearchAwards(query, limit)
+		if err != nil {
+			note("%q: %v", query, err)
+			continue
+		}
+		var total float64
+		var largest usaspending.Award
+		for _, a := range awards {
+			total += a.Amount
+			if a.Amount > largest.Amount {
+				largest = a
+			}
+		}
+		if len(awards) == 0 {
+			continue
+		}
+		extra = append(extra, risk.Indicator{
+			Code:        "federal_award_recipient",
+			Description: "This name matches the recipient of one or more US federal contracts, grants, or loans on USAspending.gov -- context, not a red flag: most federal contractors and grantees are exactly what they claim to be. Surfaced because this project otherwise has no way to see it, e.g. corroborating a claimed government relationship, or flagging that a nonprofit/shell-looking entity is a significant federal recipient",
+			Weight:      1,
+			Entities:    []string{fmt.Sprintf("search query: %q", query)},
+			Evidence:    fmt.Sprintf("%d award(s) found, $%.2f total; largest: %s -- $%.2f from %s (%s to %s)", len(awards), total, largest.RecipientName, largest.Amount, largest.AwardingAgency, orDash(largest.StartDate), orDash(largest.EndDate)),
+		})
+	}
+	return extra, notes
+}
+
+// screenGazetteInsolvencyNotices checks each query term plus every
+// distinct person name found (officers, trustees, directors) against
+// The Gazette's insolvency notice category -- the UK's statutory
+// publication of record for liquidation, administration, company
+// voluntary arrangements, and personal bankruptcy. Person names are
+// screened here (unlike screenUSASpendingAwards above) because this
+// category covers individual bankruptcy notices as well as company
+// ones -- a director's own personal insolvency history is exactly the
+// kind of connection this project's officer fan-out exists to surface.
+// Unlike insolvency_history (Companies House's own status field,
+// already surfaced elsewhere in this project), a Gazette hit is the
+// original statutory publication, not a downstream summary of it.
+func screenGazetteInsolvencyNotices(queries []string, entities []risk.Entity, limit int, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "The Gazette: "+fmt.Sprintf(format, a...))
+	}
+	gzClient := gazette.NewClient()
+
+	screened := map[string]bool{}
+	screen := func(name, screenedFor string) {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || screened[key] {
+			return
+		}
+		screened[key] = true
+		progress.report("The Gazette", "checking %q (%d so far)", name, len(screened))
+
+		notices, err := gzClient.SearchInsolvencyNotices(name, limit)
+		if err != nil {
+			note("%q: %v", name, err)
+			return
+		}
+		for _, n := range notices {
+			extra = append(extra, risk.Indicator{
+				Code:        "gazette_insolvency_notice",
+				Description: "Name matches a published insolvency notice in The Gazette -- the UK's statutory publication of record for liquidation, administration, company voluntary arrangements, and personal bankruptcy under the Insolvency Act 1986. This is the original statutory record, not a derived status flag, but often a routine, lawful wind-down or restructuring -- worth a second look for an otherwise-active organization or an officer/director, especially alongside other indicators",
+				Weight:      1,
+				Entities:    []string{screenedFor},
+				Evidence:    fmt.Sprintf("%s -- %s, published %s: %s", n.Title, orDash(n.Category), orDash(n.Published), n.URL),
+			})
+		}
+	}
+
+	for _, query := range queries {
+		screen(query, fmt.Sprintf("search query: %q", query))
+	}
+	for _, e := range entities {
+		for _, p := range e.People {
+			screen(p, e.Label())
 		}
 	}
 	return extra, notes

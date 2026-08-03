@@ -41,9 +41,13 @@ registered-agent/address-based relationship mapping).
 | `nzbn` | New Zealand Business Number (NZBN) register | NZ company entities + director/shareholder roles | `NZBN_API_KEY` |
 | `crtsh` | crt.sh (Certificate Transparency logs) | TLS certificates issued for a domain, worldwide | none |
 | `courtlistener` | CourtListener (RECAP Archive) | federal PACER litigation a name is party to | none |
+| `littlesis` | LittleSis | crowdsourced who-knows-who connections, worldwide | none |
+| `openfec` | FEC OpenFEC (Schedule A) | itemized US federal campaign contributions by individual | none (works via FEC's shared `DEMO_KEY`) |
+| `usaspending` | USAspending.gov | US federal contracts/grants/loans by recipient | none |
+| `gazette` | The Gazette | UK statutory insolvency notices (companies + individuals) | none |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Ten independent public-data sources across four countries, unified
+Fourteen independent public-data sources across four countries, unified
 under one CLI and one `--json` output convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
@@ -132,6 +136,26 @@ Separately, for organizations that don't file with the SEC at all:
   sharing an operator or hosting setup can leave behind even when
   nothing else (address, officer, phone) visibly overlaps. Free and
   keyless, no registration of any kind.
+- Searches CourtListener's free, keyless RECAP Archive by party name --
+  federal PACER court dockets (run by the nonprofit Free Law Project)
+  a name is a plaintiff, defendant, or other party to.
+- Searches LittleSis, a free, crowdsourced "who-knows-who" database of
+  connections among powerful people and organizations -- unlike every
+  registry source above, entries are community-curated from news
+  reporting and public records, not an official filing. Its
+  documented board/executive relationships feed `risk`'s officer
+  network the same way a Companies House director does.
+- Searches the FEC's OpenFEC API for itemized Schedule A individual
+  campaign contributions by contributor name -- works with no
+  registration via FEC's public shared `DEMO_KEY`, or your own free key
+  for a higher rate limit (see Setup).
+- Searches USAspending.gov, the official record of US federal
+  contracts, grants, and loans, by recipient name -- free and keyless.
+- Searches The Gazette, the UK's official statutory publication of
+  record, for insolvency notices (liquidation, administration, company
+  voluntary arrangements, and personal bankruptcy) by name -- free and
+  keyless, and the original statutory publication, not a downstream
+  status summary.
 
 And separately, for sanctions screening:
 
@@ -731,6 +755,16 @@ code, just a different final render target.
   extra code needed. Same framing as the cross-border check: common
   ownership within a large, legitimate corporate group is itself
   routine, so a lead to investigate, not proof of anything improper.
+- **gleif_no_beneficial_owner_reported**: when GLEIF reports no
+  ultimate parent at all, the entity's own reporting-exception record
+  is checked too -- GLEIF requires every registrant to either report a
+  real parent or explicitly report why not, from a fixed set of reason
+  codes (e.g. `NATURAL_PERSONS`: the entity's owners are individuals,
+  not a consolidating corporate parent). This indicator fires when
+  GLEIF has an exception reason on file, turning a silent gap into an
+  explained one. Scored lowest, since most reasons are entirely
+  routine, but still worth a second look alongside other indicators,
+  especially for a reason code that itself signals opacity.
 
 #### Disqualified directors & shared lenders
 
@@ -827,6 +861,45 @@ code, just a different final render target.
   request timeout is a real, if occasional, failure mode alongside the
   documented 429 -- both retried with backoff.
 
+#### Political, federal-spending & UK insolvency signals
+
+- **political_contribution**: every distinct person name this project
+  finds is also checked against the FEC's OpenFEC API for itemized
+  Schedule A individual campaign contributions. Scored at the same
+  lowest weight as the mention checks above -- FEC records span
+  millions of common American names with no curated pre-filter (unlike
+  Wikidata's own tagged-politician set behind pep_match below), so a
+  name-only match here is even more likely to be an unrelated namesake.
+  A lead to verify against the contribution's own employer/occupation
+  fields, not a confirmed identity. Works with no registration via
+  FEC's public shared `DEMO_KEY`; set `OPENFEC_API_KEY` for a higher
+  rate limit (see Setup).
+- **federal_award_recipient**: each query term is also checked against
+  USAspending.gov's federal contract/grant recipient search -- context,
+  not a red flag on its own, since most federal contractors and
+  grantees are exactly what they claim to be. Surfaced because this
+  project otherwise has no way to see it: corroborating a claimed
+  government relationship, or flagging that a nonprofit/shell-looking
+  entity is a significant federal recipient. Free and keyless.
+- **gazette_insolvency_notice**: each query term and distinct person
+  name is also checked against The Gazette -- the UK's official
+  statutory publication of record -- specifically its insolvency
+  notice category (liquidation, administration, company voluntary
+  arrangements, and personal bankruptcy under the Insolvency Act 1986).
+  Person names are screened here (unlike federal_award_recipient
+  above) since this category covers individual bankruptcy notices too
+  -- exactly the kind of connection this project's officer fan-out
+  exists to surface. Unlike insolvency_history (Companies House's own
+  downstream status field, below), this is the original statutory
+  publication. Free and keyless.
+
+LittleSis (a free, crowdsourced "who-knows-who" database) doesn't add
+its own indicator -- instead, every organization it matches gets its
+documented board members and executives (not plain employees) folded
+into that entity's officer list, feeding shared_person and every other
+officer-based check above exactly the way a Companies House director
+does.
+
 #### Financial red flags
 
 - **shell_company_assets**: each primary resolved EDGAR company is also
@@ -838,6 +911,16 @@ code, just a different final render target.
   nominal-assets shells, not a pre-merger SPAC sitting on a large trust
   account -- a textbook shell with substantial reported assets, a
   different pattern entirely.
+- **restatement_disclosed**: that same primary EDGAR company's 8-K
+  filing history is also checked for an Item 4.02 disclosure -- a
+  determination (by the company or its auditor) that previously issued
+  financial statements should no longer be relied on. Scored higher
+  than shell_company_assets since this is the filer's own direct,
+  self-reported fact, not an inference from a financial pattern -- a
+  restatement can range from a minor technical correction to a serious
+  accounting failure, and this alone doesn't say which, but unlike
+  almost everything else in this tool it can't be explained away as a
+  name collision or routine correlation.
 - **formation_cluster**: UK, AU, and US nonprofit entities also carry a
   formation or registration date (or, for US nonprofits, the IRS's
   tax-exemption ruling date) where the source exposes one -- EDGAR
@@ -1128,6 +1211,14 @@ And to use `nzbn` (and `risk`'s NZBN entity search/officer fan-out):
    using one key for both and only needs the second variable if that
    assumption turns out wrong for your account
 
+`openfec` (and `risk`'s OpenFEC screen) needs no setup at all -- it
+works immediately via FEC's public shared `DEMO_KEY`. Optionally, for
+a higher personal rate limit instead of sharing that pool:
+
+1. Get a free key instantly (no approval wait) at
+   [api.data.gov/signup/?api=fec](https://api.data.gov/signup/?api=fec)
+2. Set `OPENFEC_API_KEY` to it
+
 Or set them all by copying `.env.example` to `.env` and filling it in:
 
 ```bash
@@ -1221,6 +1312,22 @@ go run ./cmd/paper-trail crtsh example.com
 # Search federal PACER litigation a party name appears in via
 # CourtListener's RECAP Archive -- free, keyless, no registration
 go run ./cmd/paper-trail courtlistener "Example Name"
+
+# Search LittleSis's crowdsourced who-knows-who database, including
+# each match's documented board members/executives -- free, keyless
+go run ./cmd/paper-trail littlesis "Example Name"
+
+# Search itemized FEC campaign contributions by contributor name --
+# works with no registration via FEC's shared DEMO_KEY
+go run ./cmd/paper-trail openfec "Jane Q Smith"
+
+# Search US federal contracts/grants by recipient name via
+# USAspending.gov -- free, keyless, no registration
+go run ./cmd/paper-trail usaspending "Example Corp"
+
+# Search UK statutory insolvency notices (companies and individuals)
+# via The Gazette -- free, keyless, no registration
+go run ./cmd/paper-trail gazette "Example Name"
 
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
@@ -1361,7 +1468,7 @@ source <(paper-trail completion zsh)
 
 ```
 .github/workflows/ci.yml     # gofmt/vet/build/test -race on every push and PR to main
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, crtsh, courtlistener, risk, completion, version subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, crtsh, courtlistener, littlesis, openfec, usaspending, gazette, risk, completion, version subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
@@ -1370,14 +1477,19 @@ internal/crtsh/              # crt.sh Certificate Transparency log client -- no 
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
+internal/gazette/            # The Gazette (UK statutory insolvency notices) client -- no API key needed
+internal/gleif/              # GLEIF Legal Entity Identifier database client -- no API key needed
 internal/graph/              # builds a node/edge relationship graph, exports JSON/HTML/CSV/GraphML
+internal/littlesis/          # LittleSis crowdsourced who-knows-who database client -- no API key needed
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
 internal/nzbn/               # New Zealand NZBN + Companies Entity Role Search clients -- needs NZBN_API_KEY
 internal/ofsi/               # UK Sanctions List (OFSI) client -- no API key needed
+internal/openfec/            # FEC OpenFEC (campaign contribution) client -- works via shared DEMO_KEY, or OPENFEC_API_KEY
 internal/risk/                # structural red-flag heuristics and scoring (calls no API itself)
 internal/riskcache/           # opt-in on-disk cache for risk --cache-ttl (see Usage below)
 internal/sanctions/          # US Consolidated Screening List client -- needs CSL_API_KEY_PRIMARY
 internal/ukcharity/          # UK Charity Commission (England & Wales) client -- needs UK_CHARITY_API_KEY_PRIMARY
+internal/usaspending/        # USAspending.gov (federal contract/grant) client -- no API key needed
 testdata/                    # fixtures used by the offline test suite
 ```
 
@@ -1397,6 +1509,11 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://api.business.govt.nz/gateway/companies-office/companies-register/entity-roles/v3/` (New Zealand's Companies Entity Role Search API -- director/shareholder name search, same subscription account, requires its own approved product subscription)
 - `https://crt.sh/` (Certificate Transparency log search, operated by Sectigo -- indexes every certificate any publicly-trusted CA has issued since ~2018, no API key required)
 - `https://www.courtlistener.com/api/rest/v4/search/` (CourtListener's RECAP Archive search, run by the nonprofit Free Law Project -- federal PACER court dockets by party name, no API key required, but rate-limited to 5 requests/minute even for a registered free account)
+- `https://littlesis.org/api/` (LittleSis's free, crowdsourced who-knows-who database -- entity search and relationships, no API key required)
+- `https://api.open.fec.gov/v1/schedules/schedule_a/` (FEC's OpenFEC API -- itemized Schedule A individual campaign contributions, works with no registration via a public shared `DEMO_KEY`, or a free registered key for a higher rate limit)
+- `https://api.usaspending.gov/api/v2/search/spending_by_award/` (USAspending.gov -- federal contract/grant awards by recipient name, no API key required)
+- `https://www.thegazette.co.uk/insolvency/notice/data.json` (The Gazette -- the UK's official statutory publication of record, insolvency notice search, no API key required)
+- `https://api.gleif.org/api/v1/` (GLEIF's Legal Entity Identifier database -- worldwide legal-entity search, ownership relationships, and reporting-exception records, no API key required)
 
 `ukcharity`, `sanctions`, `companieshouse`, and `nzbn` are the exceptions to this project's no-key model.
 

@@ -364,6 +364,10 @@ type submissionsResponse struct {
 			ReportDate      []string `json:"reportDate"`
 			Form            []string `json:"form"`
 			PrimaryDocument []string `json:"primaryDocument"`
+			// Items is a comma-separated list of 8-K item codes (e.g.
+			// "2.02,7.01,9.01"), empty for every non-8-K form -- confirmed
+			// live against SEC's own submissions JSON.
+			Items []string `json:"items"`
 		} `json:"recent"`
 	} `json:"filings"`
 }
@@ -625,6 +629,9 @@ func (c *Client) GetFilings(cik string, form string, limit int) ([]Filing, error
 		}
 		if i < len(recent.PrimaryDocument) {
 			f.PrimaryDocument = recent.PrimaryDocument[i]
+		}
+		if i < len(recent.Items) {
+			f.Items = recent.Items[i]
 		}
 		filings = append(filings, f)
 		if len(filings) >= limit {

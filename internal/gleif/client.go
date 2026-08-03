@@ -272,6 +272,74 @@ func (c *Client) UltimateParent(lei string) (*Record, error) {
 	return c.fetchRelationship(lei, "ultimate-parent")
 }
 
+// ReportingException is GLEIF's own explanation for why an entity has
+// no reported parent at a given level -- distinct from simply getting
+// (nil, nil) back from DirectParent/UltimateParent, which only says a
+// parent wasn't found, not why. GLEIF requires every LEI registrant to
+// either report a parent or explicitly report one of a fixed set of
+// exception reasons (e.g. "NATURAL_PERSONS" -- the entity's owners are
+// people, not a consolidating corporate parent -- or "NON_CONSOLIDATING",
+// "NO_KNOWN_PERSON").
+type ReportingException struct {
+	LEI      string `json:"lei"`
+	Category string `json:"category"` // e.g. "ULTIMATE_ACCOUNTING_CONSOLIDATION_PARENT"
+	Reason   string `json:"reason"`   // GLEIF's fixed reason code, e.g. "NATURAL_PERSONS", "NON_CONSOLIDATING", "NO_KNOWN_PERSON"
+}
+
+type reportingExceptionAttributes struct {
+	LEI      string `json:"lei"`
+	Category string `json:"category"`
+	Reason   string `json:"reason"`
+}
+
+type reportingExceptionData struct {
+	Attributes reportingExceptionAttributes `json:"attributes"`
+}
+
+type reportingExceptionResponse struct {
+	Data reportingExceptionData `json:"data"`
+}
+
+// UltimateParentReportingException fetches GLEIF's own stated reason
+// why lei has no reported ultimate parent, or (nil, nil) if no
+// exception is on file either (an entity can simply have neither a
+// parent nor an exception reported, e.g. a registration still in
+// progress). Only meaningful to call after UltimateParent has already
+// returned (nil, nil) -- an entity with a real reported parent has no
+// exception to fetch.
+func (c *Client) UltimateParentReportingException(lei string) (*ReportingException, error) {
+	return c.fetchReportingException(lei, "ultimate-parent-reporting-exception")
+}
+
+// DirectParentReportingException is UltimateParentReportingException's
+// direct-parent-level counterpart.
+func (c *Client) DirectParentReportingException(lei string) (*ReportingException, error) {
+	return c.fetchReportingException(lei, "direct-parent-reporting-exception")
+}
+
+func (c *Client) fetchReportingException(lei, relationship string) (*ReportingException, error) {
+	status, body, err := c.get(c.BaseURL + "/lei-records/" + url.PathEscape(lei) + "/" + relationship)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("GLEIF API returned HTTP %d fetching %s for %s", status, relationship, lei)
+	}
+
+	var resp reportingExceptionResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing GLEIF %s response: %v", relationship, err)
+	}
+	return &ReportingException{
+		LEI:      resp.Data.Attributes.LEI,
+		Category: resp.Data.Attributes.Category,
+		Reason:   resp.Data.Attributes.Reason,
+	}, nil
+}
+
 func (c *Client) fetchRelationship(lei, relationship string) (*Record, error) {
 	status, body, err := c.get(c.BaseURL + "/lei-records/" + url.PathEscape(lei) + "/" + relationship)
 	if err != nil {

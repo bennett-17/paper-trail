@@ -59,6 +59,24 @@ type Filing struct {
 	ReportDate      string `json:"reportDate,omitempty"`
 	PrimaryDocument string `json:"primaryDocument,omitempty"`
 	CIK             string `json:"cik"`
+	// Items is the comma-separated 8-K item codes disclosed in this
+	// filing (e.g. "2.02,7.01,9.01"), empty for every non-8-K form.
+	Items string `json:"items,omitempty"`
+}
+
+// HasItem reports whether an 8-K filing discloses the given item code
+// (e.g. "4.02", the Item 4.02 non-reliance-on-previously-issued-
+// financial-statements disclosure -- a company's own admission that
+// prior financials can no longer be relied on, i.e. a restatement).
+// Always false for a non-8-K filing, since Items is only ever
+// populated for that form.
+func (f Filing) HasItem(code string) bool {
+	for _, item := range strings.Split(f.Items, ",") {
+		if strings.TrimSpace(item) == code {
+			return true
+		}
+	}
+	return false
 }
 
 // IndexURL returns the human-readable EDGAR filing index page for this filing.

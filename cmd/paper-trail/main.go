@@ -52,6 +52,14 @@ func main() {
 		runCrtsh(os.Args[2:])
 	case "courtlistener":
 		runCourtListener(os.Args[2:])
+	case "littlesis":
+		runLittleSis(os.Args[2:])
+	case "openfec":
+		runOpenFEC(os.Args[2:])
+	case "usaspending":
+		runUSASpending(os.Args[2:])
+	case "gazette":
+		runGazette(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "completion":
@@ -95,6 +103,10 @@ Usage:
   paper-trail nzbn --number <nzbn> [--json]
   paper-trail crtsh <domain> [--json]
   paper-trail courtlistener <party name> [--limit <n>] [--json]
+  paper-trail littlesis <name> [--limit <n>] [--json]
+  paper-trail openfec <contributor name> [--limit <n>] [--json]
+  paper-trail usaspending <recipient name> [--limit <n>] [--json]
+  paper-trail gazette <name> [--limit <n>] [--json]
   paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
@@ -659,7 +671,16 @@ registered address, so the existing corroborated-pairs rollup picked
 up both signals on the same pair automatically, no extra code needed.
 Same framing as the cross-border check: common ownership within a
 large, legitimate corporate group is itself routine, so a lead to
-investigate, not proof of anything improper. Officer/trustee names sourced from Companies House and
+investigate, not proof of anything improper. When GLEIF reports no
+ultimate parent at all, the entity's own reporting-exception record
+(GLEIF requires every registrant to either report a real parent or
+explicitly report why not) is checked too -- a
+gleif_no_beneficial_owner_reported indicator fires when GLEIF has an
+exception reason on file (e.g. "NATURAL_PERSONS" -- the entity's
+owners are individuals, not a consolidating corporate parent), turning
+a silent gap into an explained one. Scored lowest, since most reasons
+are entirely routine, but still worth a second look alongside other
+indicators. Officer/trustee names sourced from Companies House and
 the UK Charity Commission are also checked against Companies House's
 disqualified-directors register (a disqualified_director indicator) --
 unlike every other indicator here this is an already-adjudicated
@@ -730,6 +751,45 @@ can surface (confirmed live: 44 in one real scan) would take most of
 ten minutes on this source alone. Confirmed live that party_name is a
 real, precise filter, and that an outright request timeout is a real
 occasional failure mode alongside the documented 429, both retried.
+Each query term is also searched against LittleSis (littlesis.org), a
+free, keyless, crowdsourced "who-knows-who" database of connections
+among powerful people and organizations -- unlike every registry
+source here, entries are community-curated from news reporting and
+public records, not an official filing, so a match is a documented
+connection worth checking against its cited sources. Organization hits
+become entities in their own right; each one's documented
+relationships are checked and only board members/executives (not plain
+employees) populate that entity's People, letting a LittleSis-sourced
+board membership feed the shared_person cross-reference check exactly
+like a Companies House director does. Every distinct person name this
+project finds is also checked against the FEC's OpenFEC API
+(api.open.fec.gov) for itemized Schedule A federal campaign
+contributions -- a political_contribution indicator, scored lowest:
+federal contribution records span millions of common American names
+with no curated pre-filter the way Wikidata's PEP screen has, so a
+name-only match here is more likely to be an unrelated namesake than
+almost any other check in this tool, a lead to verify against the
+contribution's own employer/occupation fields, not a confirmed
+identity. Works with no registration at all via FEC's public shared
+DEMO_KEY; set OPENFEC_API_KEY for a higher rate limit. Each query term
+is also checked against USAspending.gov's federal contract/grant/loan
+recipient search (free, keyless, official US government spending data)
+-- a federal_award_recipient indicator, context rather than a red flag,
+since most federal contractors and grantees are exactly what they
+claim to be; surfaced because this project otherwise has no way to
+corroborate a claimed government relationship or flag a
+nonprofit/shell-looking entity as a significant federal recipient.
+Each query term and distinct person name is also checked against The
+Gazette (thegazette.co.uk), the UK's official statutory publication of
+record, specifically its insolvency notice category -- liquidation,
+administration, company voluntary arrangements, and personal
+bankruptcy under the Insolvency Act 1986 -- for a gazette_insolvency_notice
+indicator. Unlike insolvency_history (Companies House's own downstream
+status field), a Gazette hit is the original statutory publication;
+person names are screened here (unlike LittleSis/USAspending above)
+since this category covers individual bankruptcy notices too, exactly
+the kind of connection this project's officer fan-out exists to
+surface. Free and keyless, same as USAspending.gov.
 Each primary resolved EDGAR company is also checked
 against SEC's XBRL "company concept" API for its most recently
 reported total assets -- a shell_company_assets indicator flags
@@ -739,7 +799,17 @@ self-disclosed shell ran $63k-$72k, a real pre-revenue clinical-stage
 biotech ran $4.5M-$7.8M, comfortably above). This only catches
 nominal-assets shells -- a pre-merger SPAC sitting on a large trust
 account is a textbook shell with substantial reported assets, a
-different pattern entirely this doesn't try to catch.
+different pattern entirely this doesn't try to catch. That same
+primary company's 8-K filing history is also checked for an Item 4.02
+disclosure -- a restatement_disclosed indicator, scored higher than
+shell_company_assets since this is the filer's own direct, self-
+reported determination (by the company or its auditor) that previously
+issued financial statements should no longer be relied on, not an
+inference from a financial pattern. A restatement can range from a
+minor technical correction to a serious accounting failure, and this
+alone doesn't say which -- but unlike almost everything else in this
+tool, it can't be explained away as a name collision or routine
+correlation.
 UK, AU, and US nonprofit entities also carry a formation/
 registration/tax-exemption-ruling date where the source exposes one
 (EDGAR doesn't); a formation_cluster indicator flags two or more
@@ -1050,7 +1120,9 @@ Environment:
   CSL_API_KEY_PRIMARY          required for the sanctions command only (see above)
   CSL_API_KEY_SECONDARY        optional rotation fallback for sanctions (see above)
   COMPANIES_HOUSE_API_KEY      required for the companieshouse and person commands (see above)
-  SAM_GOV_API_KEY              required for risk's SAM.gov Exclusions screen only (see above) -- risk works without it, that one screen is just skipped`)
+  SAM_GOV_API_KEY               required for risk's SAM.gov Exclusions screen only (see above) -- risk works without it, that one screen is just skipped
+  OPENFEC_API_KEY               optional for risk's OpenFEC screen and the openfec command (see above)
+                                (works with no key at all via FEC's public shared DEMO_KEY, this just raises the rate limit)`)
 }
 
 // versionString builds paper-trail's --version output from Go's own

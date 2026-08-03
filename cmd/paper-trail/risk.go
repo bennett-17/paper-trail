@@ -917,13 +917,13 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	clClient := courtlistener.NewClient()
 
 	// Registered once, before any Phase 1/2 goroutine starts, so
-	// percent-complete is exact rather than guessed: 6 Phase-1 sources
+	// percent-complete is exact rather than guessed: 7 Phase-1 sources
 	// always run, plus EDGAR only if edgarClient is configured, plus
-	// the 12 Phase-2 screens (all unconditional -- each already
+	// the 15 Phase-2 screens (all unconditional -- each already
 	// handles a nil optional client internally the same way the
 	// gatherers above do). See progressReporter's own doc comment for
 	// why this is source-level granularity, not per-item.
-	totalUnits := 6 + 12
+	totalUnits := 7 + 15
 	if edgarClient != nil {
 		totalUnits++
 	}
@@ -941,9 +941,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// mutex -- they're merged in a fixed order below, after every
 	// goroutine finishes, so output stays deterministic regardless of
 	// which source happens to finish first.
-	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, chDirectEntities, nzEntities []risk.Entity
+	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, chDirectEntities, nzEntities, lsEntities []risk.Entity
 	var edgarExtra, npExtra, gleifExtra, ukExtra, chDirectExtra, nzExtra []risk.Indicator
-	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, chDirectNotes, nzNotes []string
+	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, chDirectNotes, nzNotes, lsNotes []string
 	var wg sync.WaitGroup
 
 	if edgarClient != nil {
@@ -990,6 +990,12 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer progress.completeUnit()
 		nzEntities, nzExtra, nzNotes = gatherNZBNEntities(nzClient, queries, limit, cache, cacheTTL, progress)
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer progress.completeUnit()
+		lsEntities, lsNotes = gatherLittleSisEntities(queries, limit, cache, cacheTTL, progress)
+	}()
 	wg.Wait()
 
 	entities = append(entities, edgarEntities...)
@@ -999,6 +1005,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	entities = append(entities, ukEntities...)
 	entities = append(entities, chDirectEntities...)
 	entities = append(entities, nzEntities...)
+	entities = append(entities, lsEntities...)
 	extra = append(extra, edgarExtra...)
 	extra = append(extra, npExtra...)
 	extra = append(extra, gleifExtra...)
@@ -1012,6 +1019,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, ukNotes...)
 	notes = append(notes, chDirectNotes...)
 	notes = append(notes, nzNotes...)
+	notes = append(notes, lsNotes...)
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these
@@ -1026,8 +1034,8 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// organization; the RDAP domain-age screen checks every entity's
 	// own website, not a name at all. Merged in the same fixed order as
 	// before so output stays deterministic.
-	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra, ctExtra, clExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes, ctNotes, clNotes []string
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra, ctExtra, clExtra, fecExtra, usaExtra, gzExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes, ctNotes, clNotes, fecNotes, usaNotes, gzNotes []string
 	var wg2 sync.WaitGroup
 
 	wg2.Add(1)
@@ -1102,6 +1110,24 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		defer progress.completeUnit()
 		clExtra, clNotes = screenCourtListener(clClient, queries, limit, progress)
 	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		defer progress.completeUnit()
+		fecExtra, fecNotes = screenOpenFECContributions(entities, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		defer progress.completeUnit()
+		usaExtra, usaNotes = screenUSASpendingAwards(queries, limit, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		defer progress.completeUnit()
+		gzExtra, gzNotes = screenGazetteInsolvencyNotices(queries, entities, limit, progress)
+	}()
 	wg2.Wait()
 
 	extra = append(extra, usExtra...)
@@ -1116,6 +1142,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	extra = append(extra, domainExtra...)
 	extra = append(extra, ctExtra...)
 	extra = append(extra, clExtra...)
+	extra = append(extra, fecExtra...)
+	extra = append(extra, usaExtra...)
+	extra = append(extra, gzExtra...)
 	notes = append(notes, usNotes...)
 	notes = append(notes, ukSanctionsNotes...)
 	notes = append(notes, unNotes...)
@@ -1128,6 +1157,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, domainNotes...)
 	notes = append(notes, ctNotes...)
 	notes = append(notes, clNotes...)
+	notes = append(notes, fecNotes...)
+	notes = append(notes, usaNotes...)
+	notes = append(notes, gzNotes...)
 
 	// Cross-referencing runs once over the combined pool from every
 	// query term -- this is the whole point of taking multiple terms:
