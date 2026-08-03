@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
+	"github.com/bennett-17/paper-trail/internal/courtlistener"
 	"github.com/bennett-17/paper-trail/internal/crtsh"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/graph"
@@ -400,33 +401,185 @@ func diffRiskReports(previous riskReportJSON, entities []risk.Entity, score risk
 	}
 }
 
-// progressReporter writes short "[+12.3s] source: message" progress
-// lines to stderr as a long risk scan runs -- never to stdout/
-// --output, so it can never corrupt a --json report or a file being
-// written. Safe for concurrent use across every phase 1/2 goroutine
-// (mutex-protected, since multiple sources report at once once
-// runRisk's queries are parallelized). A nil *progressReporter is a
-// deliberate no-op (see report below), so every call site can call
-// progress.report(...) unconditionally -- no "if progress != nil"
-// scattered through every gather/screen function -- and --quiet is
-// implemented simply by never constructing one.
+// progressUpdate is one snapshot of scan progress -- passed to a
+// progressReporter's sink (see newSSEProgressReporter) each time
+// either report() or completeUnit() is called, so a consumer outside
+// this package (the --serve SSE handler) doesn't need to know
+// progressReporter's internal locking to read a consistent snapshot.
+type progressUpdate struct {
+	Percent int
+	Elapsed time.Duration
+	Source  string
+	Message string
+}
+
+// progressReporter writes progress to stderr as a long risk scan
+// runs -- never to stdout/--output, so it can never corrupt a --json
+// report or a file being written. Safe for concurrent use across every
+// phase 1/2 goroutine (mutex-protected, since multiple sources report
+// at once once runRisk's queries are parallelized). A nil
+// *progressReporter is a deliberate no-op (see report/completeUnit
+// below), so every call site can call progress.report(...)
+// unconditionally -- no "if progress != nil" scattered through every
+// gather/screen function -- and --quiet is implemented simply by never
+// constructing one.
+//
+// Percent-complete is tracked at source/screen granularity, not
+// per-item: totalUnits is the fixed number of Phase-1 gatherers plus
+// Phase-2 screens gatherAndScore actually dispatches for a given scan
+// (set once via setTotalUnits before any goroutine starts), and
+// doneUnits increments by one each time a single source/screen's
+// goroutine finishes, regardless of how many entities or indicators it
+// produced internally. This is deliberately coarse rather than a true
+// items-completed/items-total ratio: a query term can resolve to one
+// entity or twenty, and an officer fan-out is unbounded until fetched,
+// so no per-item total is knowable before a scan runs the way the
+// number of independent sources is. Documented here so this isn't
+// mistaken for a finer-grained measurement than it is.
+//
+// Three rendering modes, chosen once at construction and never mixed:
+// a live, single-line, carriage-return-redrawn bar when w is a real
+// interactive terminal (newProgressReporter, isInteractiveWriter);
+// the original scrolling "[+12.3s] source: message" lines when it
+// isn't (redirected to a file, piped, or --quiet's io.Discard, where a
+// redrawn bar would just leave a mess of \r characters); or an
+// arbitrary sink callback instead of either, for a consumer that isn't
+// a terminal or a file at all (newSSEProgressReporter, used by
+// --serve's browser progress bar).
 type progressReporter struct {
-	mu    sync.Mutex
-	w     io.Writer
-	start time.Time
+	mu          sync.Mutex
+	w           io.Writer
+	interactive bool
+	sink        func(progressUpdate)
+	start       time.Time
+	totalUnits  int
+	doneUnits   int
+	barWidth    int
+	lastSource  string
+	lastMessage string
+	lastLineLen int
 }
 
 func newProgressReporter(w io.Writer) *progressReporter {
-	return &progressReporter{w: w, start: time.Now()}
+	return &progressReporter{
+		w:           w,
+		start:       time.Now(),
+		interactive: isInteractiveWriter(w),
+		barWidth:    24,
+	}
+}
+
+// newSSEProgressReporter builds a progressReporter whose every update
+// -- both report() messages and completeUnit() percent ticks -- goes
+// to sink instead of being rendered as terminal text. Used by
+// --serve's /scan handler to turn scan progress into Server-Sent
+// Events; sink is responsible for its own I/O (writing and flushing
+// the HTTP response), not this package.
+func newSSEProgressReporter(sink func(progressUpdate)) *progressReporter {
+	return &progressReporter{start: time.Now(), sink: sink}
+}
+
+// setTotalUnits registers how many independent Phase-1/Phase-2
+// goroutines this scan will dispatch, computed once in gatherAndScore
+// before any of them start (it already knows which optional clients
+// are nil at that point, so the count reflects exactly what will run,
+// not a guess). Also resets doneUnits to 0, since --batch reuses one
+// progressReporter across several independent gatherAndScore calls in
+// sequence (one per batch entry) -- without a reset, the second
+// entry's scan would start already "ahead" from the first entry's
+// completed units. A percent of zero total is defined as 0%, not a
+// division-by-zero panic or 100%, so a caller that forgets to set this
+// just sees a bar stuck at 0 rather than a crash.
+func (p *progressReporter) setTotalUnits(n int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.totalUnits = n
+	p.doneUnits = 0
+	p.mu.Unlock()
+}
+
+// completeUnit marks one gather/screen source as fully finished.
+// Called via defer as the first deferred statement in each Phase-1/
+// Phase-2 goroutine, so it fires exactly once per dispatched goroutine
+// regardless of whether that source's own function returned early on
+// an error.
+func (p *progressReporter) completeUnit() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.doneUnits++
+	source, message := p.lastSource, p.lastMessage
+	p.mu.Unlock()
+	p.emit(source, message)
+}
+
+// percentLocked computes the current percent-complete. Caller must
+// hold p.mu.
+func (p *progressReporter) percentLocked() int {
+	if p.totalUnits <= 0 {
+		return 0
+	}
+	pct := 100 * p.doneUnits / p.totalUnits
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
 }
 
 func (p *progressReporter) report(source, format string, a ...any) {
 	if p == nil {
 		return
 	}
+	message := fmt.Sprintf(format, a...)
+	p.mu.Lock()
+	p.lastSource, p.lastMessage = source, message
+	p.mu.Unlock()
+	p.emit(source, message)
+}
+
+// emit renders one progress update through whichever of the three
+// modes this reporter was constructed with. Holds p.mu for the whole
+// call, same as the original single-writer implementation this
+// replaced -- a progress write is cheap enough, and every source
+// throttles its own real API calls far more aggressively than
+// contention on this lock could ever matter.
+func (p *progressReporter) emit(source, message string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	fmt.Fprintf(p.w, "[+%5.1fs] %s: %s\n", time.Since(p.start).Seconds(), source, fmt.Sprintf(format, a...))
+	percent := p.percentLocked()
+	elapsed := time.Since(p.start)
+
+	if p.sink != nil {
+		p.sink(progressUpdate{Percent: percent, Elapsed: elapsed, Source: source, Message: message})
+		return
+	}
+	if !p.interactive {
+		fmt.Fprintf(p.w, "[+%5.1fs] %s: %s\n", elapsed.Seconds(), source, message)
+		return
+	}
+
+	filled := percent * p.barWidth / 100
+	bar := strings.Repeat("#", filled) + strings.Repeat("-", p.barWidth-filled)
+	line := fmt.Sprintf("[%s] %3d%%  +%5.1fs  %s: %s", bar, percent, elapsed.Seconds(), source, message)
+	pad := ""
+	if len(line) < p.lastLineLen {
+		pad = strings.Repeat(" ", p.lastLineLen-len(line))
+	}
+	p.lastLineLen = len(line)
+	fmt.Fprintf(p.w, "\r%s%s", line, pad)
+}
+
+// finish moves the terminal cursor to a fresh line after a live bar
+// finishes redrawing in place -- a no-op for the scrolling-lines and
+// sink modes, which never left the cursor mid-line to begin with.
+func (p *progressReporter) finish() {
+	if p == nil || !p.interactive || p.sink != nil {
+		return
+	}
+	fmt.Fprintln(p.w)
 }
 
 // riskSummaryJSON is --summary --json's compact alternative to the
@@ -579,6 +732,16 @@ func colorEnabled(w io.Writer, noColorFlag bool) bool {
 	if colorDisabledByFlagOrEnv(noColorFlag) {
 		return false
 	}
+	return isInteractiveWriter(w)
+}
+
+// isInteractiveWriter reports whether w is a real terminal (not a file,
+// pipe, or other program's input) -- shared by colorEnabled above and
+// progressReporter's live-redrawing bar below, since both need the
+// same answer for the same reason: escape codes and carriage-return
+// redraws are noise, not information, in a redirected/piped/file
+// destination.
+func isInteractiveWriter(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
 		return false
@@ -746,6 +909,26 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// credential to check for, unlike every client constructed above.
 	ctClient := crtsh.NewClient()
 
+	// CourtListener RECAP search -- also free and keyless, but rate-
+	// limited far more tightly than any other source here (see
+	// screenCourtListener's own doc comment), which is why its client
+	// carries its own conservative throttle rather than needing a
+	// credential check.
+	clClient := courtlistener.NewClient()
+
+	// Registered once, before any Phase 1/2 goroutine starts, so
+	// percent-complete is exact rather than guessed: 6 Phase-1 sources
+	// always run, plus EDGAR only if edgarClient is configured, plus
+	// the 12 Phase-2 screens (all unconditional -- each already
+	// handles a nil optional client internally the same way the
+	// gatherers above do). See progressReporter's own doc comment for
+	// why this is source-level granularity, not per-item.
+	totalUnits := 6 + 12
+	if edgarClient != nil {
+		totalUnits++
+	}
+	progress.setTotalUnits(totalUnits)
+
 	// Phase 1: every source below resolves query terms into entities
 	// independently of the others -- EDGAR, IRS Form 990, ACNC, GLEIF,
 	// and UK Charity Commission (with its nested Companies House
@@ -767,37 +950,44 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer progress.completeUnit()
 			edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, limit, cache, cacheTTL, progress)
 		}()
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer progress.completeUnit()
 		npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer progress.completeUnit()
 		acncEntities, acncNotes = gatherACNCEntities(queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer progress.completeUnit()
 		gleifEntities, gleifExtra, gleifNotes = gatherGLEIFEntities(queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer progress.completeUnit()
 		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer progress.completeUnit()
 		chDirectEntities, chDirectExtra, chDirectNotes = gatherCompaniesHouseEntities(chClient, queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer progress.completeUnit()
 		nzEntities, nzExtra, nzNotes = gatherNZBNEntities(nzClient, queries, limit, cache, cacheTTL, progress)
 	}()
 	wg.Wait()
@@ -836,64 +1026,81 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// organization; the RDAP domain-age screen checks every entity's
 	// own website, not a name at all. Merged in the same fixed order as
 	// before so output stays deterministic.
-	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra, ctExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes, ctNotes []string
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra, ctExtra, clExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes, ctNotes, clNotes []string
 	var wg2 sync.WaitGroup
 
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		usExtra, usNotes = screenUSSanctions(queries, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		unExtra, unNotes = screenUNSanctions(queries, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, limit, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		gdeltExtra, gdeltNotes = screenGDELTMentions(queries, limit, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		samExtra, samNotes = screenSAMExclusions(queries, entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		pepExtra, pepNotes = screenPoliticallyExposedPersons(entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		domainExtra, domainNotes = screenDomainAge(entities, progress)
 	}()
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
+		defer progress.completeUnit()
 		ctExtra, ctNotes = screenCertificateTransparency(ctClient, entities, progress)
+	}()
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		defer progress.completeUnit()
+		clExtra, clNotes = screenCourtListener(clClient, queries, limit, progress)
 	}()
 	wg2.Wait()
 
@@ -908,6 +1115,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	extra = append(extra, pepExtra...)
 	extra = append(extra, domainExtra...)
 	extra = append(extra, ctExtra...)
+	extra = append(extra, clExtra...)
 	notes = append(notes, usNotes...)
 	notes = append(notes, ukSanctionsNotes...)
 	notes = append(notes, unNotes...)
@@ -919,6 +1127,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, pepNotes...)
 	notes = append(notes, domainNotes...)
 	notes = append(notes, ctNotes...)
+	notes = append(notes, clNotes...)
 
 	// Cross-referencing runs once over the combined pool from every
 	// query term -- this is the whole point of taking multiple terms:
@@ -966,6 +1175,7 @@ func runRiskBatch(queries []string, limit int, cache *riskcache.Cache, cacheTTL 
 			progress.report("batch", "entity %d/%d: %q", i+1, len(queries), query)
 		}
 		entities, _, score := gatherAndScore([]string{query}, limit, cache, cacheTTL, progress)
+		progress.finish()
 		score, _ = excludeIndicators(score, excludeTerms)
 		top := ""
 		if len(score.Indicators) > 0 {
@@ -1183,6 +1393,7 @@ func runRisk(args []string) {
 		}
 
 		entities, notes, score := gatherAndScore(queries, *limit, cache, cacheTTL, progress)
+		progress.finish()
 
 		// --exclude/--exclude-file apply before everything else below,
 		// including --diff: unlike --top/--min-weight/--indicator, which

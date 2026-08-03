@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
+	"github.com/bennett-17/paper-trail/internal/courtlistener"
 	"github.com/bennett-17/paper-trail/internal/crtsh"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/gdelt"
@@ -932,6 +933,54 @@ func screenGDELTMentions(queries []string, limit int, progress *progressReporter
 				Weight:      3,
 				Entities:    []string{fmt.Sprintf("search query: %q", query)},
 				Evidence:    fmt.Sprintf("%s -- %s (%s, %s)", a.Title, a.Domain, a.SourceCountry, a.SeenDate),
+			})
+		}
+	}
+	return extra, notes
+}
+
+// screenCourtListener checks each query term against CourtListener's
+// free, keyless RECAP Archive search (courtlistener above) for federal
+// court litigation naming that party -- civil suits, bankruptcies, and
+// any other PACER docket CourtListener has archived. Scoped to query
+// terms only, not every distinct person/officer name this project
+// finds, for two reasons at once: the same noise concern
+// screenEDGARFullTextMentions and screenGDELTMentions are already
+// scoped this way for (a name can be a party to litigation for reasons
+// that have nothing to do with any real connection -- routine debt
+// collection, a garnishee, a contract dispute), and, more forcing here
+// than for any other source in this project, CourtListener's own
+// documented rate limit: confirmed live at 5 requests/minute even for
+// an authenticated free account -- tighter than GDELT's previous
+// 12/minute, the strictest limit anywhere else in this project.
+// Screening the dozens of distinct officer/trustee names a real
+// multi-entity scan can surface (confirmed live: 44 in one real scan)
+// would take the better part of ten minutes on this source alone.
+func screenCourtListener(clClient *courtlistener.Client, queries []string, limit int, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "CourtListener: "+fmt.Sprintf(format, a...))
+	}
+
+	screened := map[string]bool{}
+	for _, query := range queries {
+		key := strings.ToLower(strings.TrimSpace(query))
+		if key == "" || screened[key] {
+			continue
+		}
+		screened[key] = true
+		progress.report("CourtListener", "checking %q (%d so far)", query, len(screened))
+		result, err := clClient.SearchParties(query, limit)
+		if err != nil {
+			note("%q: %v", query, err)
+			continue
+		}
+		for _, d := range result.Dockets {
+			extra = append(extra, risk.Indicator{
+				Code:        "litigation_mention",
+				Description: "Name is a party (plaintiff, defendant, or otherwise) to federal litigation archived in CourtListener's RECAP Archive -- scored lowest, the same as edgar_fulltext_mention and gdelt_news_mention, since being named in a lawsuit is not an admission or a finding of anything: most federal litigation is routine commercial, contract, or debt-collection activity, and a defendant in a civil suit has not been found liable of anything by virtue of being sued. A lead to read the actual docket over, not proof on its own",
+				Weight:      1,
+				Entities:    []string{fmt.Sprintf("search query: %q", query)},
+				Evidence:    fmt.Sprintf("%s -- %s, filed %s (docket %s): %s", d.CaseName, d.Court, orDash(d.DateFiled), orDash(d.DocketNumber), d.DocketURL),
 			})
 		}
 	}

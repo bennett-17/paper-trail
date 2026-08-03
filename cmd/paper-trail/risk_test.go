@@ -493,6 +493,116 @@ func TestProgressReporterWritesToItsWriter(t *testing.T) {
 func TestNilProgressReporterIsANoOp(t *testing.T) {
 	var p *progressReporter
 	p.report("source", "message") // must not panic
+	p.completeUnit()              // must not panic
+	p.setTotalUnits(5)            // must not panic
+	p.finish()                    // must not panic
+}
+
+// TestProgressReporterPercentTracksCompleteUnits confirms the
+// source-level percent math: 5 registered units, each completeUnit
+// call should advance percent by exactly 1/5 of 100, reaching exactly
+// 100% once every unit is done -- not 99% or 101% from integer
+// division rounding.
+func TestProgressReporterPercentTracksCompleteUnits(t *testing.T) {
+	var percents []int
+	p := newSSEProgressReporter(func(u progressUpdate) {
+		percents = append(percents, u.Percent)
+	})
+	p.setTotalUnits(5)
+	for i := 0; i < 5; i++ {
+		p.completeUnit()
+	}
+	want := []int{20, 40, 60, 80, 100}
+	if len(percents) != len(want) {
+		t.Fatalf("got %v, want %v", percents, want)
+	}
+	for i, w := range want {
+		if percents[i] != w {
+			t.Errorf("percents[%d] = %d, want %d", i, percents[i], w)
+		}
+	}
+}
+
+// TestProgressReporterPercentZeroTotalIsZeroNotPanic guards the
+// division-by-zero case: a caller that never calls setTotalUnits (or
+// passes 0) should see 0%, not a crash.
+func TestProgressReporterPercentZeroTotalIsZeroNotPanic(t *testing.T) {
+	var got int
+	p := newSSEProgressReporter(func(u progressUpdate) { got = u.Percent })
+	p.completeUnit()
+	if got != 0 {
+		t.Errorf("percent with zero total = %d, want 0", got)
+	}
+}
+
+// TestProgressReporterSetTotalUnitsResetsDoneUnits guards the exact
+// reason setTotalUnits resets doneUnits to 0: --batch reuses one
+// progressReporter across several independent gatherAndScore calls in
+// sequence, and each entry's scan must start its own percent from 0%,
+// not "ahead" from the previous entry's completed units.
+func TestProgressReporterSetTotalUnitsResetsDoneUnits(t *testing.T) {
+	var last int
+	p := newSSEProgressReporter(func(u progressUpdate) { last = u.Percent })
+	p.setTotalUnits(2)
+	p.completeUnit()
+	p.completeUnit()
+	if last != 100 {
+		t.Fatalf("first entry: percent = %d, want 100", last)
+	}
+	p.setTotalUnits(4) // second batch entry, a different unit count
+	p.completeUnit()
+	if last != 25 {
+		t.Errorf("second entry after reset: percent = %d, want 25 (1/4), got stale/carried-over value", last)
+	}
+}
+
+// TestProgressReporterReportDoesNotAdvancePercent confirms report()
+// calls (the per-item "checking X" messages) only update the shown
+// message, never doneUnits -- only completeUnit does that. Otherwise a
+// source that reports many times per run would race ahead of what it
+// actually completed.
+func TestProgressReporterReportDoesNotAdvancePercent(t *testing.T) {
+	var last int
+	p := newSSEProgressReporter(func(u progressUpdate) { last = u.Percent })
+	p.setTotalUnits(4)
+	p.report("SourceA", "checking %q", "term one")
+	p.report("SourceA", "checking %q", "term two")
+	p.report("SourceA", "checking %q", "term three")
+	if last != 0 {
+		t.Errorf("percent after report() calls with no completeUnit = %d, want 0", last)
+	}
+}
+
+// TestProgressReporterSinkReceivesSourceAndMessage confirms the SSE
+// sink path (used by --serve) gets the actual source/message text
+// report() was called with, not just a bare percent tick.
+func TestProgressReporterSinkReceivesSourceAndMessage(t *testing.T) {
+	var got progressUpdate
+	p := newSSEProgressReporter(func(u progressUpdate) { got = u })
+	p.setTotalUnits(1)
+	p.report("CourtListener", "checking %q (%d so far)", "Example Corp", 1)
+	if got.Source != "CourtListener" {
+		t.Errorf("Source = %q, want CourtListener", got.Source)
+	}
+	if got.Message != `checking "Example Corp" (1 so far)` {
+		t.Errorf("Message = %q", got.Message)
+	}
+}
+
+// TestProgressReporterCompleteUnitReusesLastMessage confirms a bare
+// completeUnit() tick (no message of its own) redraws using whatever
+// report() last said, rather than blanking the displayed status --
+// otherwise the terminal bar/SSE feed would flicker to an empty
+// message every time a source finished.
+func TestProgressReporterCompleteUnitReusesLastMessage(t *testing.T) {
+	var got progressUpdate
+	p := newSSEProgressReporter(func(u progressUpdate) { got = u })
+	p.setTotalUnits(2)
+	p.report("SourceA", "checking %q", "term one")
+	p.completeUnit()
+	if got.Source != "SourceA" || got.Message != `checking "term one"` {
+		t.Errorf("completeUnit's update = %+v, want it to reuse the last reported source/message", got)
+	}
 }
 
 func TestWriteSummaryTextMode(t *testing.T) {

@@ -50,6 +50,8 @@ func main() {
 		runNZBN(os.Args[2:])
 	case "crtsh":
 		runCrtsh(os.Args[2:])
+	case "courtlistener":
+		runCourtListener(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "completion":
@@ -92,6 +94,7 @@ Usage:
   paper-trail nzbn <query> [--limit <n>] [--json]
   paper-trail nzbn --number <nzbn> [--json]
   paper-trail crtsh <domain> [--json]
+  paper-trail courtlistener <party name> [--limit <n>] [--json]
   paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
@@ -711,7 +714,23 @@ given GDELT's rate limit) against the real Wirecard example: returns
 genuinely theme-relevant coverage distinct from that same query's
 unfiltered results. Coverage under one of these themes doesn't mean
 the name itself is implicated, so a lead to read the actual coverage
-over, not proof on its own. Each primary resolved EDGAR company is also checked
+over, not proof on its own. Each query term is also checked against
+CourtListener's free, keyless RECAP Archive search (federal PACER
+court dockets, run by the nonprofit Free Law Project) for litigation
+naming that party -- litigation_mention, scored the same lowest weight
+as edgar_fulltext_mention/gdelt_news_mention, since being a party to
+litigation isn't an admission of anything and most federal litigation
+is routine commercial or debt-collection activity. Scoped to query
+terms only, more forcing here than for edgar_fulltext_mention/
+gdelt_news_mention: CourtListener's own documented rate limit is 5
+requests/minute even for a registered free account (confirmed live),
+tighter than GDELT's 12/minute, the previous strictest limit in this
+project -- screening the dozens of officer/trustee names a real scan
+can surface (confirmed live: 44 in one real scan) would take most of
+ten minutes on this source alone. Confirmed live that party_name is a
+real, precise filter, and that an outright request timeout is a real
+occasional failure mode alongside the documented 429, both retried.
+Each primary resolved EDGAR company is also checked
 against SEC's XBRL "company concept" API for its most recently
 reported total assets -- a shell_company_assets indicator flags
 anything under $150,000 despite being an active filer, SEC's own
@@ -851,12 +870,18 @@ third of the wall-clock time). Within each source, up to 4 query terms
 are also processed concurrently rather than one at a time (confirmed
 live under the race detector against a real multi-term scan, with a
 results-merge that keeps output ordering identical to running them one
-at a time). While a scan runs, progress lines
-("[+12.3s] SEC EDGAR: term 4/25: ...") stream to stderr as each source
-processes each query term (and, for UK charities, each individual
-charity, since that step's own Companies House cascade is the slowest
-part of a scan) -- never to stdout or a --output file, so it can never
-corrupt a --json report. --quiet suppresses these lines entirely.
+at a time). While a scan runs, progress streams to stderr -- never to
+stdout or a --output file, so it can never corrupt a --json report.
+--quiet suppresses it entirely. Percent-complete tracks source/screen
+completion (roughly 18-19 independent gatherers/screens per scan, not
+per-item, since a query term's item count isn't knowable upfront): a
+real interactive terminal gets a single live-redrawing
+"[#######-----] 38% +12.3s SourceName: message" bar; redirected/piped
+output falls back to the original scrolling
+"[+12.3s] SEC EDGAR: term 4/25: ..." lines, since a redrawn bar would
+just leave carriage-return garbage in a log file; --serve's browser UI
+gets neither -- it drives the same percent-tracking over a live HTML
+progress bar via Server-Sent Events instead (see --serve below).
 --cache-ttl <duration> (e.g. "24h") caches the entities resolved
 per source/query/limit on disk and reuses them within that window
 instead of re-fetching -- useful when checking overlapping lists of
@@ -908,13 +933,16 @@ mode, since none of them apply to a one-row-per-entity scorecard.
 (always loopback-only, regardless of what's passed -- there's no
 legitimate reason for this local investigation tool to be reachable
 from the network) with a search form instead of running one scan.
-Type one name per line and submit to get the same HTML report
---report-html writes to a file, rendered in the browser instead --
-each search is its own independent scan through the same live-query
-pipeline the CLI itself uses, not a background job or a database, so
-it takes as long as the same query would from the command line. Runs
-until interrupted (Ctrl+C). Takes no <query>/--input-file/--batch, and
-is mutually exclusive with --diff/--watch/--fail-on/--webhook (none of
+Type one name per line and submit to see a live progress bar (a
+Server-Sent Events connection to a /scan endpoint, sharing the exact
+same percent-tracking the CLI's own terminal bar uses) followed by the
+same HTML report --report-html writes to a file, swapped in once the
+scan finishes, no page reload -- each search is its own
+independent scan through the same live-query pipeline the CLI itself
+uses, not a background job or a database, so it takes as long as the
+same query would from the command line. Runs until interrupted
+(Ctrl+C). Takes no <query>/--input-file/--batch, and is mutually
+exclusive with --diff/--watch/--fail-on/--webhook (none of
 which make sense when there's no single run to diff/watch/gate on);
 --limit/--cache-ttl/--exclude/--exclude-file still apply to every
 search submitted through the form.

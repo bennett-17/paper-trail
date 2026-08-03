@@ -9,7 +9,7 @@ import (
 // completionCommands and completionFlags are the single source of truth for
 // what the completion scripts below offer -- keep both in sync with the
 // subcommands registered in main() and their flag sets in printUsage().
-const completionCommands = "lookup filings graph fulltext nonprofit aucharity ukcharity sanctions uksanctions companieshouse person nzbn crtsh risk completion version help"
+const completionCommands = "lookup filings graph fulltext nonprofit aucharity ukcharity sanctions uksanctions companieshouse person nzbn crtsh courtlistener risk completion version help"
 
 var completionFlags = map[string]string{
 	"lookup":         "--cik --json",
@@ -25,6 +25,7 @@ var completionFlags = map[string]string{
 	"person":         "--limit --json",
 	"nzbn":           "--number --limit --json",
 	"crtsh":          "--json",
+	"courtlistener":  "--limit --json",
 	"risk":           "--input-file --batch --serve --limit --output --graph --html --report-html --graph-csv --entities-csv --graph-graphml --cache-ttl --diff --watch --top --min-weight --indicator --min-corroboration --exclude --exclude-file --fail-on --webhook --summary --no-color --quiet --json",
 }
 

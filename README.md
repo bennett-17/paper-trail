@@ -40,9 +40,10 @@ registered-agent/address-based relationship mapping).
 | `person` | UK Companies House officer search | start from a person's name, not a company | `COMPANIES_HOUSE_API_KEY` |
 | `nzbn` | New Zealand Business Number (NZBN) register | NZ company entities + director/shareholder roles | `NZBN_API_KEY` |
 | `crtsh` | crt.sh (Certificate Transparency logs) | TLS certificates issued for a domain, worldwide | none |
+| `courtlistener` | CourtListener (RECAP Archive) | federal PACER litigation a name is party to | none |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Nine independent public-data sources across four countries, unified
+Ten independent public-data sources across four countries, unified
 under one CLI and one `--json` output convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
@@ -175,9 +176,29 @@ a real multi-term scan (which also caught and fixed a latent race in
 EDGAR's ticker-map lazy-load, unreachable before query terms could run
 concurrently against the same client).
 
-Progress lines stream to stderr as a scan runs (never to stdout or a
+Progress streams to stderr as a scan runs (never to stdout or a
 `--output` file, so a `--json` report is never at risk) -- `--quiet`
-suppresses them.
+suppresses it entirely. Percent-complete is tracked at source/screen
+granularity, not per-item: gatherAndScore registers the exact number of
+Phase-1 gatherers and Phase-2 screens it's about to dispatch before any
+of them start (roughly 18-19, depending on whether `EDGAR_USER_AGENT`
+is configured), and each one ticks the percentage forward by an equal
+share when its own goroutine finishes, regardless of how many entities
+or indicators it produced internally -- deliberately coarse rather than
+a true items-completed/items-total ratio, since a query term can
+resolve to one entity or twenty and an officer fan-out is unbounded
+until fetched, so no per-item total is knowable before a scan runs the
+way the number of independent sources is. What's actually shown depends
+on where progress is going: a real interactive terminal gets a single,
+live-redrawing `[#######-----] 38% +12.3s SourceName: message` bar
+(the same isatty check `--no-color` auto-detection already uses,
+reused rather than reimplemented); output redirected to a file, piped,
+or `--quiet`'s discard target falls back to the original scrolling
+`[+12.3s] source: message` lines, since a redrawn bar would just leave
+a mess of carriage-return characters in a log file; `--serve`'s browser
+UI (below) gets neither -- it drives a live HTML progress bar over
+Server-Sent Events instead, sharing the exact same percent-tracking
+code, just a different final render target.
 
 <details>
 <summary><strong>Indicators and mechanics, by area</strong> (click to expand -- this is the detailed reference; skip to <a href="#setup">Setup</a>/<a href="#usage">Usage</a> if you just want to run the tool)</summary>
@@ -784,6 +805,27 @@ suppresses them.
   passing mention, a cited source, or unrelated context in the same
   article -- so a lead to read the actual coverage over, not proof on
   its own.
+- **litigation_mention**: each query term is also checked against
+  CourtListener's free, keyless RECAP Archive search -- the largest
+  free index of federal PACER court dockets in existence, run by the
+  nonprofit Free Law Project -- for federal litigation naming that
+  party. Scored the same lowest weight as edgar_fulltext_mention and
+  gdelt_news_mention: being a party (plaintiff or defendant) to
+  litigation is not an admission of anything, and most federal
+  litigation is routine commercial, contract, or debt-collection
+  activity. Scoped to query terms only, not every distinct officer/
+  trustee name this project finds -- the same noise concern as the
+  other two mention checks, but more forcing here than for any other
+  source in this project: CourtListener's own documented rate limit is
+  5 requests/minute even for an authenticated free account (confirmed
+  live), tighter than GDELT's 12/minute, the previous strictest limit
+  anywhere else here. Screening the dozens of distinct names a real
+  multi-entity scan can surface (confirmed live: 44 in one real scan)
+  would take the better part of ten minutes on this source alone.
+  Confirmed live that party_name is a real, precise filter field, not
+  a fuzzy full-text match against case captions, and that an outright
+  request timeout is a real, if occasional, failure mode alongside the
+  documented 429 -- both retried with backoff.
 
 #### Financial red flags
 
@@ -907,15 +949,22 @@ It's a lead-generation report, not a finding.
   `http://127.0.0.1:<port>` (always loopback-only, never reachable
   from the network) with a search form instead of running one scan --
   type one name per line and get the same HTML report `--report-html`
-  writes to a file, rendered in the browser instead. Each search is
-  its own independent scan through the same live-query pipeline the
-  CLI itself uses, not a background job or a database, so it takes as
-  long as the equivalent command-line query would. Runs until
-  interrupted (Ctrl+C); takes no `<query>`/`--input-file`/`--batch`
-  and is mutually exclusive with `--diff`/`--watch`/`--fail-on`/
-  `--webhook`, though `--limit`/`--cache-ttl`/`--exclude`/
-  `--exclude-file` still apply to every search submitted through the
-  form.
+  writes to a file, rendered in the browser instead. Submitting the
+  form doesn't run the scan in that same request: the page immediately
+  shows a live progress bar that opens a Server-Sent Events connection
+  to a second endpoint (`/scan`), which is where gatherAndScore
+  actually runs -- the same percent-tracking described above, just
+  streamed to the browser instead of redrawn in a terminal, so a slow
+  multi-source scan doesn't leave the browser tab looking hung with no
+  feedback for however long it takes. The report itself arrives as the
+  connection's final event and replaces the progress bar in place, no
+  page reload. Each search is its own independent scan through the
+  same live-query pipeline the CLI itself uses, not a background job or
+  a database. Runs until interrupted (Ctrl+C); takes no
+  `<query>`/`--input-file`/`--batch` and is mutually exclusive with
+  `--diff`/`--watch`/`--fail-on`/`--webhook`, though
+  `--limit`/`--cache-ttl`/`--exclude`/`--exclude-file` still apply to
+  every search submitted through the form.
 
 #### Filtering & output flags
 
@@ -1169,6 +1218,10 @@ go run ./cmd/paper-trail nzbn --number 9429041782718
 # Transparency logs (crt.sh) -- free, keyless, no registration
 go run ./cmd/paper-trail crtsh example.com
 
+# Search federal PACER litigation a party name appears in via
+# CourtListener's RECAP Archive -- free, keyless, no registration
+go run ./cmd/paper-trail courtlistener "Example Name"
+
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
 go run ./cmd/paper-trail risk "Example Name"
@@ -1308,10 +1361,11 @@ source <(paper-trail completion zsh)
 
 ```
 .github/workflows/ci.yml     # gofmt/vet/build/test -race on every push and PR to main
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, crtsh, risk, completion, version subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, crtsh, courtlistener, risk, completion, version subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
+internal/courtlistener/      # CourtListener/RECAP federal litigation search client -- no API key needed
 internal/crtsh/              # crt.sh Certificate Transparency log client -- no API key needed
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
@@ -1342,6 +1396,7 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://api.business.govt.nz/gateway/nzbn/v5/` (New Zealand's NZBN API -- entity search and detail, requires a free but manually-approved subscription key)
 - `https://api.business.govt.nz/gateway/companies-office/companies-register/entity-roles/v3/` (New Zealand's Companies Entity Role Search API -- director/shareholder name search, same subscription account, requires its own approved product subscription)
 - `https://crt.sh/` (Certificate Transparency log search, operated by Sectigo -- indexes every certificate any publicly-trusted CA has issued since ~2018, no API key required)
+- `https://www.courtlistener.com/api/rest/v4/search/` (CourtListener's RECAP Archive search, run by the nonprofit Free Law Project -- federal PACER court dockets by party name, no API key required, but rate-limited to 5 requests/minute even for a registered free account)
 
 `ukcharity`, `sanctions`, `companieshouse`, and `nzbn` are the exceptions to this project's no-key model.
 
