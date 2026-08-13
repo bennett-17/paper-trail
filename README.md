@@ -311,7 +311,15 @@ code, just a different final render target.
   control changes timed close to one are themselves worth a second look.
   90 days is this project's own first calibration, not a value
   confirmed live the way the burst windows above are -- OFAC's guidance
-  names the pattern without giving a specific window.
+  names the pattern without giving a specific window. Every persons-
+  with-significant-control (PSC) record is separately screened the same
+  way, comparing their own notified/ceased dates instead of an
+  officer's appointment/resignation dates -- arguably the more direct
+  signal of the two per OFAC's guidance, which is specifically about
+  ownership/control changes. Unlike the officer version, this never
+  fans out across companies (Companies House has no cross-company PSC
+  history API the way it does for officers), so a PSC is only ever
+  compared against the one company whose PSC record it appears on.
 - **sequential_registration_numbers**: every Companies-House-sourced
   entity in a scan (including ones found only via the officer fan-out
   above) is also cross-referenced by registration number -- fires when
@@ -1027,6 +1035,15 @@ does.
   "this one entity converges on 3+ independent signal types." Common
   for a large, legitimately multi-subsidiary organization as well as a
   shell-company network, so it's a map to investigate, not a verdict.
+  Each cluster also names a "hub" -- the member with the most distinct
+  direct connections within the network (degree centrality), the
+  cheapest useful answer to "which entity does this network actually
+  hinge on." Meaningful for a chain- or star-shaped network; for a
+  fully-connected clique (every member named together in one
+  shared_person indicator, confirmed live as the more common real
+  shape) every member ties at the same degree, so the named hub is
+  just the alphabetically-first tied member -- worth knowing before
+  reading too much into which name gets picked.
 - Every report also carries a plain LOW/MEDIUM/HIGH confidence read
   next to the numeric score -- deliberately not a pure function of the
   total, since summing many weak signals shouldn't outrank one strong

@@ -1017,7 +1017,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		go func() {
 			defer wg.Done()
 			defer progress.completeUnit()
-			ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress)
+			ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress, filter)
 		}()
 	} else {
 		progress.completeUnit()
@@ -1027,7 +1027,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 		go func() {
 			defer wg.Done()
 			defer progress.completeUnit()
-			chDirectEntities, chDirectExtra, chDirectNotes = gatherCompaniesHouseEntities(chClient, queries, limit, cache, cacheTTL, progress)
+			chDirectEntities, chDirectExtra, chDirectNotes = gatherCompaniesHouseEntities(chClient, queries, limit, cache, cacheTTL, progress, filter)
 		}()
 	} else {
 		progress.completeUnit()

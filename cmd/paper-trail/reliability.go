@@ -180,15 +180,20 @@ func (f *sourceFilter) allows(source string) bool {
 	return true
 }
 
-// fastModeSkipSources are the three sources confirmed live, repeatedly,
-// to dominate a multi-term scan's wall-clock time: GDELT (a hard
-// 5-second per-request rate limit), CourtListener (5 requests/minute
-// even authenticated), and OpenFEC (a shared, easily-exhausted DEMO_KEY
-// pool absent a personal key). --fast skips exactly these three,
+// fastModeSkipSources are the sources confirmed to meaningfully slow
+// down a multi-term scan: GDELT (a hard 5-second per-request rate
+// limit), CourtListener (5 requests/minute even authenticated), OpenFEC
+// (a shared, easily-exhausted DEMO_KEY pool absent a personal key), and
+// the two OFSI sub-screens officerFanOut/pscSanctionsAdjacentChange add
+// on top of the entity-level UK sanctions screen -- each one call per
+// officer/PSC discovered, which can add up fast on a company with many
+// current or historical appointments. --fast skips exactly these,
 // nothing else -- every other source in this project responds in at
 // most a few seconds per query.
 var fastModeSkipSources = map[string]bool{
-	"GDELT":         true,
-	"CourtListener": true,
-	"OpenFEC":       true,
+	"GDELT":                                 true,
+	"CourtListener":                         true,
+	"OpenFEC":                               true,
+	"UK sanctions screen (officer fan-out)": true,
+	"UK sanctions screen (PSC)":             true,
 }

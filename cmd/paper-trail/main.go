@@ -303,7 +303,24 @@ its long-standing "50% Rule" (an entity 50%+ owned by a blocked person
 is itself blocked) is "a floor, not a ceiling" -- a designated person's
 corporate footprint often doesn't simply vanish the day they're
 designated. 90 days is this project's own first calibration, not a
-value confirmed live the way the burst windows above are.
+value confirmed live the way the burst windows above are. Every PSC
+(person with significant control) record is separately screened the
+same way, comparing their own notified/ceased dates instead of an
+officer's appointment/resignation ones -- arguably the more direct
+signal per OFAC's guidance, which is specifically about ownership/
+control changes. Unlike the officer version this never fans out across
+companies (no cross-company PSC history API exists the way it does for
+officers), so a PSC is only ever compared against the one company its
+own record is on. Both OFSI sub-screens -- the officer-fan-out one and
+the PSC one -- are covered by --fast (skipped along with GDELT/
+CourtListener/OpenFEC, since each is one extra network call per
+officer/PSC discovered and can add up on a company with a long
+history) and share an in-memory cache scoped to one gatherer call, so
+the same officer/PSC recurring across multiple root companies within
+one scan (a real, repeated pattern in this project's own live scans --
+the same nominee director showing up as a current officer of several
+independently-discovered companies) only pays the appointment-history/
+OFSI round-trip once, not once per company.
 Every Companies-House-sourced
 entity in a scan, including ones found only via the officer fan-out
 above, is also cross-referenced by registration number
@@ -898,7 +915,15 @@ network of 4 or more entities, naming every member, at a flat weight
 of 2 (below convergent_risk's minimum single-entity payout, since
 "these entities are linked" is weaker per-entity evidence); --exclude
 recomputes this one too, for the same stale-hit reason as
-convergent_risk. Every
+convergent_risk. Each cluster also names a "hub" -- the member with
+the most distinct direct connections within the network (degree
+centrality), the cheapest useful answer to "which entity does this
+network actually hinge on." Meaningful for a chain- or star-shaped
+network; for a fully-connected clique (every member named together in
+one shared_person indicator, confirmed live as the more common real
+shape) every member ties at the same degree, so the named hub is just
+whichever tied member sorts first alphabetically -- worth knowing
+before reading too much into which name gets picked. Every
 report also carries a plain LOW/MEDIUM/HIGH confidence read next to
 the numeric score, so the headline number comes with an at-a-glance
 signal before digging into individual indicators -- deliberately not a

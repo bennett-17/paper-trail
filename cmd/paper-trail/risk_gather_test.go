@@ -58,6 +58,19 @@ func corporatePSCJSON(name, country, regNumber string) string {
 
 const emptyPSCJSON = `{"items_per_page": 25, "items": [], "start_index": 0, "total_results": 0, "active_count": 0, "ceased_count": 0}`
 
+// skipOFSISubScreens disables officerFanOut's and
+// pscSanctionsAdjacentChange's own OFSI screens -- neither has a fake
+// server to point at (ofsi.NewClient always dials the real, live OFSI
+// endpoint, unlike companieshouse.Client's injectable BaseURL), so
+// every test exercising a fixture with named officers/PSCs needs this
+// passed in place of a nil filter to stay offline. See
+// TestOfficerFanOutOFSIScreenSkippedUnderFastMode for the dedicated
+// test of the skip mechanism itself.
+var skipOFSISubScreens = &sourceFilter{skip: map[string]bool{
+	"UK sanctions screen (officer fan-out)": true,
+	"UK sanctions screen (PSC)":             true,
+}}
+
 func newChainTestClient(t *testing.T, srv *httptest.Server) *companieshouse.Client {
 	t.Helper()
 	c, err := companieshouse.NewClient("test-api-key")
@@ -92,7 +105,7 @@ func TestOfficerFanOutDiscoversHop1AndHop2Companies(t *testing.T) {
 	c := newChainTestClient(t, srv)
 
 	root := []companieshouse.Officer{{Name: "Jane Smith", OfficerID: "off1"}}
-	fanned, extra := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", func(string, ...any) {})
+	fanned, extra := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", skipOFSISubScreens, newOfficerLookupCache(), func(string, ...any) {})
 
 	if len(fanned) != 2 {
 		t.Fatalf("got %d fanned-out entities, want 2 (hop 1 and hop 2): %+v", len(fanned), fanned)
@@ -119,7 +132,7 @@ func TestOfficerFanOutExcludesRootCompanyItself(t *testing.T) {
 	c := newChainTestClient(t, srv)
 
 	root := []companieshouse.Officer{{Name: "Jane Smith", OfficerID: "off1"}}
-	fanned, _ := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", func(string, ...any) {})
+	fanned, _ := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", skipOFSISubScreens, newOfficerLookupCache(), func(string, ...any) {})
 	if len(fanned) != 0 {
 		t.Errorf("got %d fanned-out entities, want 0 (the only appointment is the root company itself)", len(fanned))
 	}
@@ -135,9 +148,100 @@ func TestOfficerFanOutIgnoresResignedAppointments(t *testing.T) {
 	c := newChainTestClient(t, srv)
 
 	root := []companieshouse.Officer{{Name: "Jane Smith", OfficerID: "off1"}}
-	fanned, _ := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", func(string, ...any) {})
+	fanned, _ := officerFanOut(c, "00000010", root, 0, "companieshouse: Root Ltd (00000010)", skipOFSISubScreens, newOfficerLookupCache(), func(string, ...any) {})
 	if len(fanned) != 0 {
 		t.Errorf("got %d fanned-out entities, want 0 (a resigned/former appointment shouldn't fan out)", len(fanned))
+	}
+}
+
+// TestOfficerLookupCacheGetAppointmentsOnlyFetchesOnce is the direct
+// test of the redundancy officerLookupCache exists to avoid: the same
+// OfficerID requested twice (simulating the same nominee recurring as
+// a current officer of two different root companies within one
+// gatherer call) must hit the fixture server's appointments endpoint
+// once, not twice.
+func TestOfficerLookupCacheGetAppointmentsOnlyFetchesOnce(t *testing.T) {
+	var requestCount int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/off1/appointments", func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2020-01-01","appointed_to":{"company_name":"A LTD","company_number":"1"}}],"total_results":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newChainTestClient(t, srv)
+
+	cache := newOfficerLookupCache()
+	first, firstTotal, err := cache.getAppointments(c, "off1", 0)
+	if err != nil {
+		t.Fatalf("first getAppointments: %v", err)
+	}
+	second, secondTotal, err := cache.getAppointments(c, "off1", 0)
+	if err != nil {
+		t.Fatalf("second getAppointments: %v", err)
+	}
+
+	if requestCount != 1 {
+		t.Errorf("requestCount = %d, want 1 (second call should be served from cache)", requestCount)
+	}
+	if len(first) != 1 || len(second) != 1 || first[0].CompanyNumber != second[0].CompanyNumber {
+		t.Errorf("first = %+v, second = %+v, want identical cached results", first, second)
+	}
+	if firstTotal != 1 || secondTotal != 1 {
+		t.Errorf("firstTotal = %d, secondTotal = %d, want 1 both times", firstTotal, secondTotal)
+	}
+}
+
+// TestOfficerLookupCacheGetAppointmentsCachesErrorsToo confirms a
+// failed lookup isn't retried on a second request for the same
+// OfficerID -- once we know it fails this scan, asking again wastes
+// another round-trip for the same answer.
+func TestOfficerLookupCacheGetAppointmentsCachesErrorsToo(t *testing.T) {
+	var requestCount int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/broken/appointments", func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newChainTestClient(t, srv)
+
+	cache := newOfficerLookupCache()
+	if _, _, err := cache.getAppointments(c, "broken", 0); err == nil {
+		t.Fatal("first getAppointments: got nil error, want one from the 500 response")
+	}
+	if _, _, err := cache.getAppointments(c, "broken", 0); err == nil {
+		t.Fatal("second getAppointments: got nil error, want the cached error")
+	}
+	if requestCount != 1 {
+		t.Errorf("requestCount = %d, want 1 (the cached error shouldn't be retried)", requestCount)
+	}
+}
+
+// TestOfficerLookupCacheGetAppointmentsKeepsDistinctOfficersSeparate
+// guards against a cache keyed incorrectly (e.g. by limit or by
+// nothing at all) silently returning one officer's data for another.
+func TestOfficerLookupCacheGetAppointmentsKeepsDistinctOfficersSeparate(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/off1/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2020-01-01","appointed_to":{"company_name":"A LTD","company_number":"1"}}],"total_results":1}`)
+	})
+	mux.HandleFunc("/officers/off2/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[{"officer_role":"director","appointed_on":"2021-01-01","appointed_to":{"company_name":"B LTD","company_number":"2"}}],"total_results":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newChainTestClient(t, srv)
+
+	cache := newOfficerLookupCache()
+	a, _, _ := cache.getAppointments(c, "off1", 0)
+	b, _, _ := cache.getAppointments(c, "off2", 0)
+	if len(a) != 1 || a[0].CompanyNumber != "1" {
+		t.Errorf("off1's cached appointments = %+v, want company 1", a)
+	}
+	if len(b) != 1 || b[0].CompanyNumber != "2" {
+		t.Errorf("off2's cached appointments = %+v, want company 2", b)
 	}
 }
 
@@ -366,13 +470,13 @@ func TestMassNomineeOfficerIgnoresOrdinaryFewDirectorships(t *testing.T) {
 	}
 }
 
-func TestSanctionsAdjacentOfficerChangeFlagsAppointmentNearDesignation(t *testing.T) {
+func TestSanctionsAdjacentChangeFlagsAppointmentNearDesignation(t *testing.T) {
 	appointments := []companieshouse.Appointment{
 		{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2019-01-01"},
 		{CompanyNumber: "2", CompanyName: "B LTD", AppointedOn: "2022-05-01"}, // 25 days after designation
 	}
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	desc := sanctionsAdjacentOfficerChange(appointments, hit)
+	desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit)
 	if desc == "" {
 		t.Fatal("got no flag, want one: an appointment fell 25 days after the designation date")
 	}
@@ -381,12 +485,12 @@ func TestSanctionsAdjacentOfficerChangeFlagsAppointmentNearDesignation(t *testin
 	}
 }
 
-func TestSanctionsAdjacentOfficerChangeFlagsResignationBeforeDesignation(t *testing.T) {
+func TestSanctionsAdjacentChangeFlagsResignationBeforeDesignation(t *testing.T) {
 	appointments := []companieshouse.Appointment{
 		{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2018-01-01", ResignedOn: "2022-03-01"}, // 36 days before designation
 	}
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	desc := sanctionsAdjacentOfficerChange(appointments, hit)
+	desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit)
 	if desc == "" {
 		t.Fatal("got no flag, want one: a resignation fell 36 days before the designation date")
 	}
@@ -395,35 +499,61 @@ func TestSanctionsAdjacentOfficerChangeFlagsResignationBeforeDesignation(t *test
 	}
 }
 
-func TestSanctionsAdjacentOfficerChangeIgnoresDatesOutsideWindow(t *testing.T) {
+func TestSanctionsAdjacentChangeIgnoresDatesOutsideWindow(t *testing.T) {
 	appointments := []companieshouse.Appointment{
 		{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2015-01-01"},
 		{CompanyNumber: "2", CompanyName: "B LTD", AppointedOn: "2022-12-01", ResignedOn: "2023-06-01"},
 	}
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	if desc := sanctionsAdjacentOfficerChange(appointments, hit); desc != "" {
+	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
 		t.Errorf("got %q, want no flag: nothing falls within 90 days of the designation date", desc)
 	}
 }
 
-func TestSanctionsAdjacentOfficerChangeExactBoundary(t *testing.T) {
+func TestSanctionsAdjacentChangeExactBoundary(t *testing.T) {
 	// Exactly 90 days after should still count (<=, not <); 91 should not.
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-01-01"}
 	within := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-01"}} // exactly 90 days
-	if desc := sanctionsAdjacentOfficerChange(within, hit); desc == "" {
+	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(within), hit); desc == "" {
 		t.Error("got no flag at exactly 90 days, want one (boundary is inclusive)")
 	}
 	outside := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-02"}} // 91 days
-	if desc := sanctionsAdjacentOfficerChange(outside, hit); desc != "" {
+	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(outside), hit); desc != "" {
 		t.Errorf("got %q at 91 days, want no flag", desc)
 	}
 }
 
-func TestSanctionsAdjacentOfficerChangeSkipsUnparseableDesignationDate(t *testing.T) {
+func TestSanctionsAdjacentChangeSkipsUnparseableDesignationDate(t *testing.T) {
 	appointments := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-01"}}
 	hit := ofsi.Hit{Name: "Jane Doe", DateDesignated: "not-a-date"}
-	if desc := sanctionsAdjacentOfficerChange(appointments, hit); desc != "" {
+	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
 		t.Errorf("got %q, want no flag for an unparseable designation date", desc)
+	}
+}
+
+func TestSanctionsAdjacentChangeFlagsPSCNotifiedNearDesignation(t *testing.T) {
+	// The PSC (beneficial-ownership) case: a single company's own PSC
+	// record, notified 12 days before their OFSI designation.
+	records := []datedRecord{{CompanyName: "SHELL LTD", StartOn: "2022-03-25", StartVerb: "notified as a PSC of", EndOn: "", EndVerb: "ceased being a PSC of"}}
+	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
+	desc := sanctionsAdjacentChange(records, hit)
+	if desc == "" {
+		t.Fatal("got no flag, want one: notified 12 days before the designation date")
+	}
+	if !strings.Contains(desc, "notified as a PSC of SHELL LTD") || !strings.Contains(desc, "days before") {
+		t.Errorf("desc = %q, want PSC-specific wording", desc)
+	}
+}
+
+func TestSanctionsAdjacentChangeFlagsPSCCeasedNearDesignation(t *testing.T) {
+	records := []datedRecord{{CompanyName: "SHELL LTD", StartOn: "2010-01-01", StartVerb: "notified as a PSC of", EndOn: "2022-04-20", EndVerb: "ceased being a PSC of"}} // 14 days after
+	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
+	desc := sanctionsAdjacentChange(records, hit)
+	if desc == "" {
+		t.Fatal("got no flag, want one: ceased 14 days after the designation date")
+	}
+	if !strings.Contains(desc, "ceased being a PSC of SHELL LTD") || !strings.Contains(desc, "days after") {
+		t.Errorf("desc = %q, want PSC-specific ceased wording", desc)
 	}
 }
 
@@ -954,7 +1084,7 @@ func TestGatherCompaniesHouseEntitiesProcessesEveryCompanyType(t *testing.T) {
 	defer srv.Close()
 	chClient := newChainTestClient(t, srv)
 
-	entities, extra, _ := gatherCompaniesHouseEntities(chClient, []string{"Overseas Holdco"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+	entities, extra, _ := gatherCompaniesHouseEntities(chClient, []string{"Overseas Holdco"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard), skipOFSISubScreens)
 
 	if len(entities) != 2 {
 		t.Fatalf("got %d entities, want 2 (both the ordinary and the ROE hit should be processed): %+v", len(entities), entities)
@@ -1026,7 +1156,7 @@ func TestGatherCompaniesHouseEntitiesFansOutSharedDirector(t *testing.T) {
 	defer srv.Close()
 	chClient := newChainTestClient(t, srv)
 
-	entities, _, _ := gatherCompaniesHouseEntities(chClient, []string{"Found Ltd"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+	entities, _, _ := gatherCompaniesHouseEntities(chClient, []string{"Found Ltd"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard), skipOFSISubScreens)
 
 	var foundFannedOut bool
 	for _, e := range entities {
@@ -1040,7 +1170,7 @@ func TestGatherCompaniesHouseEntitiesFansOutSharedDirector(t *testing.T) {
 }
 
 func TestGatherCompaniesHouseEntitiesNilClientReturnsNothing(t *testing.T) {
-	entities, extra, notes := gatherCompaniesHouseEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
+	entities, extra, notes := gatherCompaniesHouseEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard), nil)
 	if entities != nil || extra != nil || notes != nil {
 		t.Errorf("got (%v, %v, %v), want all nil when chClient is nil", entities, extra, notes)
 	}

@@ -1,6 +1,9 @@
 package risk
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestEntityClusterFiresAtThresholdViaChainedIndicators(t *testing.T) {
 	// A-B via one indicator, B-C via a different indicator, C-D via a
@@ -71,9 +74,54 @@ func TestEntityClusterEvidenceListsDistinctCodesOnce(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("got %d indicators, want 1: %+v", len(out), out)
 	}
-	want := "4 entities connected via shared_address, shared_person"
-	if out[0].Evidence != want {
-		t.Errorf("Evidence = %q, want %q", out[0].Evidence, want)
+	if !strings.HasPrefix(out[0].Evidence, "4 entities connected via shared_address, shared_person; hub:") {
+		t.Errorf("Evidence = %q, want it to start with the code list then a hub callout", out[0].Evidence)
+	}
+}
+
+func TestEntityClusterHubPicksHighestDegreeNodeInStarShape(t *testing.T) {
+	// One hub (h) paired individually with 4 spokes -- true pairwise
+	// degree for h is 4, each spoke is 1. A naive reuse of the
+	// union-find's own star-pattern edges would get this right by
+	// construction (since union-find already stars on participants[0]),
+	// so this alone doesn't prove correctness -- see the chain-shape
+	// test below for that.
+	indicators := []Indicator{
+		indicatorNaming("shared_person", "h", "s1"),
+		indicatorNaming("shared_person", "h", "s2"),
+		indicatorNaming("shared_person", "h", "s3"),
+		indicatorNaming("shared_person", "h", "s4"),
+	}
+	out := EntityCluster(indicators)
+	if len(out) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(out), out)
+	}
+	if !strings.Contains(out[0].Evidence, "hub: h (degree 4)") {
+		t.Errorf("Evidence = %q, want it to name h as the degree-4 hub", out[0].Evidence)
+	}
+}
+
+func TestEntityClusterHubUsesTruePairwiseDegreeNotUnionFindStarBias(t *testing.T) {
+	// One indicator names all 4 entities in the SAME record (a, b, c,
+	// d together) -- the true pairwise graph gives every one of them
+	// degree 3 (each connected to the other 3). Union-find's own
+	// internal edges only star from participants[0] ("a"), which would
+	// wrongly make "a" look like degree 3 while b/c/d look like degree
+	// 1 if degree were computed from union-find's edges instead of the
+	// dedicated pairwise pass -- this is exactly the bug the separate
+	// `neighbors` pass exists to avoid. All four are tied at true
+	// degree 3, so the hub must be "a" only because it's
+	// lexicographically first among an honest tie, not because it was
+	// structurally favored.
+	indicators := []Indicator{
+		indicatorNaming("shared_person", "a", "b", "c", "d"),
+	}
+	out := EntityCluster(indicators)
+	if len(out) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(out), out)
+	}
+	if !strings.Contains(out[0].Evidence, "hub: a (degree 3)") {
+		t.Errorf("Evidence = %q, want every member tied at true degree 3, hub \"a\" only by tie-break order", out[0].Evidence)
 	}
 }
 

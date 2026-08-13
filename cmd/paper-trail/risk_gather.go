@@ -582,10 +582,16 @@ func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, ca
 // documented tradeoff for the real connections it surfaces. chClient
 // may be nil (Companies House client creation failed), matching every
 // other use of it in this file.
-func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter, filter *sourceFilter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
 	if chClient == nil {
 		return nil, nil, nil
 	}
+	// Shared across every query term's goroutine below (and every root
+	// company each one processes) -- see officerLookupCache's own doc
+	// comment for why this scope catches the dominant redundancy (the
+	// same officer recurring across root companies) without needing a
+	// scan-wide cache.
+	officerCache := newOfficerLookupCache()
 	results := runConcurrentQueries(queries, func(qi int, query string) queryResult {
 		progress.report("Companies House", "term %d/%d: %q", qi+1, len(queries), query)
 		var r queryResult
@@ -832,6 +838,9 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 			for _, p := range activePSCs {
 				flagPersonJurisdiction(p.Name, p.Nationality, p.CountryOfResidence)
 			}
+			if filter.allows("UK sanctions screen (PSC)") {
+				r.extra = append(r.extra, pscSanctionsAdjacentChange(activePSCs, hit.Name, entityLabel, officerCache, note)...)
+			}
 
 			termEntities = append(termEntities, risk.NewEntity("companieshouse", hit.CompanyNumber, hit.Name, addrs, people))
 
@@ -839,7 +848,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 			// surfaces a shared director connecting this company to
 			// others no search term named. See officerFanOut's own
 			// doc comment.
-			fanned, fanExtra := officerFanOut(chClient, hit.CompanyNumber, currentOfficers, limit, entityLabel, note)
+			fanned, fanExtra := officerFanOut(chClient, hit.CompanyNumber, currentOfficers, limit, entityLabel, filter, officerCache, note)
 			termEntities = append(termEntities, fanned...)
 			r.extra = append(r.extra, fanExtra...)
 		}
@@ -863,12 +872,15 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 // be nil (Companies House client creation failed) -- every use below
 // already guards for that, matching the pre-refactor behavior of
 // simply skipping that data rather than erroring.
-func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
+func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter, filter *sourceFilter) (entities []risk.Entity, extra []risk.Indicator, notes []string) {
 	ukClient, err := ukcharity.NewClient("", "")
 	if err != nil {
 		return nil, nil, []string{fmt.Sprintf("UK Charity Commission: skipped (%v)", err)}
 	}
 
+	// See gatherCompaniesHouseEntities's own officerCache for why this
+	// is scoped to one gatherer call, shared across every query term.
+	officerCache := newOfficerLookupCache()
 	results := runConcurrentQueries(queries, func(qi int, query string) queryResult {
 		progress.report("UK Charity Commission", "term %d/%d: %q", qi+1, len(queries), query)
 		var r queryResult
@@ -1330,6 +1342,9 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			for _, p := range activePSCs {
 				flagPersonJurisdiction(p.Name, p.Nationality, p.CountryOfResidence)
 			}
+			if filter.allows("UK sanctions screen (PSC)") {
+				r.extra = append(r.extra, pscSanctionsAdjacentChange(activePSCs, detail.Name, e.Label(), officerCache, chNote)...)
+			}
 
 			termEntities = append(termEntities, e)
 
@@ -1342,7 +1357,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			// results otherwise. Shared with gatherCompaniesHouseEntities
 			// (reached by searching Companies House directly by name,
 			// not via a charity link) -- see officerFanOut.
-			fanned, fanExtra := officerFanOut(chClient, detail.CompaniesHouseNumber, currentOfficers, limit, e.Label(), chNote)
+			fanned, fanExtra := officerFanOut(chClient, detail.CompaniesHouseNumber, currentOfficers, limit, e.Label(), filter, officerCache, chNote)
 			termEntities = append(termEntities, fanned...)
 			r.extra = append(r.extra, fanExtra...)
 		}
@@ -1351,6 +1366,112 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 		return r
 	})
 	return flattenQueryResults(results)
+}
+
+// officerAppointmentsResult is one memoized GetOfficerAppointments
+// outcome (success or error, both cached -- see officerLookupCache)
+// keyed by OfficerID.
+type officerAppointmentsResult struct {
+	appointments []companieshouse.Appointment
+	total        int
+	err          error
+}
+
+// officerLookupCache memoizes GetOfficerAppointments and OFSI
+// SearchDesignations results within one gatherCompaniesHouseEntities/
+// gatherUKCharityEntities call. Confirmed real and worth avoiding: the
+// same officer (most often a nominee director) frequently recurs as a
+// current officer of MULTIPLE root companies one gatherer call
+// independently discovers -- this session's own live scans turned up
+// nominee-director networks of 5-6 companies sharing one officer --
+// and officerFanOut/pscSanctionsAdjacentChange re-fetch that officer's
+// full appointment history and OFSI screen from scratch every single
+// time they're called for a different root company, even though the
+// underlying data can't have changed within one scan.
+//
+// Deliberately NOT internal/riskcache.Cache: that type is disk-backed,
+// opt-in via --cache-ttl, and hardcoded to []risk.Entity -- wrong shape
+// entirely for memoizing a cheap in-memory lookup scoped to one
+// gatherer call, never persisted across runs.
+//
+// Scope: one instance per gatherCompaniesHouseEntities/
+// gatherUKCharityEntities call, NOT shared between the two gatherers or
+// across a whole scan -- catches the dominant redundancy (the same
+// officer recurring across root companies within one gatherer's own
+// query-term loop) without the extra coordination a scan-wide cache
+// would need. A rarer cross-gatherer overlap (the same officer found
+// via both a direct company search and a UK charity's linked company)
+// isn't caught by this scope; not worth the added surface for how
+// infrequently that specific case comes up.
+//
+// Mutex-protected: both gatherers process query terms concurrently via
+// runConcurrentQueries, so multiple goroutines can hit this cache at
+// once -- same reasoning LittleSis's shared circuit breaker
+// (reliability.go) already documents for the same kind of sharing.
+// Errors are cached too, deliberately: once an officer's lookup has
+// failed once this scan, retrying it for a second root company
+// wouldn't produce a different answer, only waste another round-trip.
+type officerLookupCache struct {
+	mu           sync.Mutex
+	appointments map[string]officerAppointmentsResult // keyed by OfficerID
+	ofsiHits     map[string]ofsiLookupResult          // keyed by normalized name (risk.NormalizeNameFuzzy)
+}
+
+type ofsiLookupResult struct {
+	result ofsi.SearchResult
+	err    error
+}
+
+func newOfficerLookupCache() *officerLookupCache {
+	return &officerLookupCache{
+		appointments: map[string]officerAppointmentsResult{},
+		ofsiHits:     map[string]ofsiLookupResult{},
+	}
+}
+
+// getAppointments returns officerID's cached appointment history if
+// already fetched this scan (including a cached error, returned as-is
+// rather than retried), else fetches via chClient, caches the outcome,
+// and returns it.
+func (c *officerLookupCache) getAppointments(chClient *companieshouse.Client, officerID string, limit int) ([]companieshouse.Appointment, int, error) {
+	c.mu.Lock()
+	if cached, ok := c.appointments[officerID]; ok {
+		c.mu.Unlock()
+		return cached.appointments, cached.total, cached.err
+	}
+	c.mu.Unlock()
+
+	appointments, total, err := chClient.GetOfficerAppointments(officerID, limit)
+
+	c.mu.Lock()
+	c.appointments[officerID] = officerAppointmentsResult{appointments: appointments, total: total, err: err}
+	c.mu.Unlock()
+	return appointments, total, err
+}
+
+// getOFSIHits returns name's cached OFSI designation search if already
+// screened this scan (by any caller -- an officer and a PSC sharing a
+// name benefit from the same cache entry), else screens via
+// ofsiClient, caches the outcome, and returns it. Keyed by
+// risk.NormalizeNameFuzzy(name) rather than the raw name, so
+// differently-formatted variants of the same person ("Jane Doe" vs
+// "DOE, Jane") share one cache entry instead of each paying their own
+// round-trip.
+func (c *officerLookupCache) getOFSIHits(ofsiClient *ofsi.Client, name string) (ofsi.SearchResult, error) {
+	key := risk.NormalizeNameFuzzy(name)
+	c.mu.Lock()
+	if cached, ok := c.ofsiHits[key]; ok {
+		c.mu.Unlock()
+		return cached.result, cached.err
+	}
+	c.mu.Unlock()
+
+	result, err := ofsiClient.SearchDesignations(name, 5)
+
+	c.mu.Lock()
+	c.ofsiHits[key] = ofsiLookupResult{result: result, err: err}
+	c.mu.Unlock()
+	return result, err
 }
 
 // officerFanOut performs the two-hop Companies House officer
@@ -1370,7 +1491,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 // company via its current officers, regardless of how that company was
 // found (a charity's own linked company, or a direct Companies House
 // name search), so this logic lives in exactly one place.
-func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, currentOfficers []companieshouse.Officer, limit int, entityLabel string, note func(format string, a ...any)) (fannedOutEntities []risk.Entity, extra []risk.Indicator) {
+func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, currentOfficers []companieshouse.Officer, limit int, entityLabel string, filter *sourceFilter, officerCache *officerLookupCache, note func(format string, a ...any)) (fannedOutEntities []risk.Entity, extra []risk.Indicator) {
 	fannedOut := map[string]bool{}
 	var hop1Companies []companieshouse.Appointment
 
@@ -1389,7 +1510,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 		if o.OfficerID == "" {
 			continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
 		}
-		appointments, totalAppointments, err := chClient.GetOfficerAppointments(o.OfficerID, limit)
+		appointments, totalAppointments, err := officerCache.getAppointments(chClient, o.OfficerID, limit)
 		if err != nil {
 			note("%s appointments: %v", o.Name, err)
 			continue
@@ -1424,8 +1545,8 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 				Evidence:    fmt.Sprintf("%s: %d appointments register-wide", o.Name, count),
 			})
 		}
-		if !ofsiBreaker.Skip() {
-			if result, err := ofsiClient.SearchDesignations(o.Name, 5); err != nil {
+		if filter.allows("UK sanctions screen (officer fan-out)") && !ofsiBreaker.Skip() {
+			if result, err := officerCache.getOFSIHits(ofsiClient, o.Name); err != nil {
 				// Deliberately not routed through tripNote/parseSourceHealth
 				// on trip: note (here, chNote) always prepends its own
 				// "Companies House: " prefix, which would make
@@ -1443,7 +1564,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 					if wantName != "" && risk.NormalizeNameFuzzy(hit.Name) != wantName {
 						continue
 					}
-					if desc := sanctionsAdjacentOfficerChange(appointments, hit); desc != "" {
+					if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
 						extra = append(extra, risk.Indicator{
 							Code:        "sanctions_adjacent_officer_change",
 							Description: "An officer of this entity, separately matched against the UK Sanctions List (OFSI), had an appointment or resignation at another company within a few months of their own OFSI designation date -- OFAC's own 2026 guidance treats ownership/control changes timed close to a sanctions designation as worth extra scrutiny beyond a simple current-ownership check, since a designated person's corporate footprint often doesn't simply vanish on the designation date. Not proof of anything by itself: a lot of ordinary corporate activity happens to fall within any few-month window",
@@ -1484,7 +1605,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 				continue
 			}
 			hop2Officers[o2.OfficerID] = true
-			appointments2, _, err := chClient.GetOfficerAppointments(o2.OfficerID, limit)
+			appointments2, _, err := officerCache.getAppointments(chClient, o2.OfficerID, limit)
 			if err != nil {
 				note("%s appointments (hop 2) for %s: %v", o2.Name, hop1.CompanyName, err)
 				continue
@@ -1962,8 +2083,9 @@ func massNomineeOfficer(totalAppointments int) int {
 }
 
 // sanctionsAdjacentWindow is how close an officer's own
-// appointment/resignation date must fall to their OFSI designation
-// date before sanctionsAdjacentOfficerChange flags it -- wider than
+// appointment/resignation date (or a PSC's own notified/ceased date)
+// must fall to their OFSI designation date before
+// sanctionsAdjacentChange flags it -- wider than
 // appointmentBurstWindow (7 days) since this asks a different
 // question ("did this person's corporate footprint change around the
 // time they were designated," not "did several companies change in
@@ -1975,35 +2097,114 @@ func massNomineeOfficer(totalAppointments int) int {
 // specific window, so this is this project's own first approximation.
 const sanctionsAdjacentWindow = 90 * 24 * time.Hour
 
-// sanctionsAdjacentOfficerChange checks every one of one officer's own
-// appointments for an AppointedOn or ResignedOn date falling within
-// sanctionsAdjacentWindow of hit's OFSI DateDesignated, returning a
-// human-readable description of the first such match found, or "" if
-// none. Unparseable dates (on either side) are silently skipped rather
-// than erroring -- same defensive posture as appointmentBurst/
-// resignationBurst -- since a malformed date shouldn't take down the
-// whole check for every other appointment.
-func sanctionsAdjacentOfficerChange(appointments []companieshouse.Appointment, hit ofsi.Hit) string {
+// datedRecord is the common shape sanctionsAdjacentChange compares
+// against an OFSI hit's DateDesignated -- one company relationship
+// with a start date/verb and an optional end date/verb. Built from a
+// companieshouse.Appointment (AppointedOn/"appointed to",
+// ResignedOn/"resigned from") for the officer-fan-out case, or from a
+// single companieshouse.PSC (NotifiedOn/"notified as a PSC of",
+// CeasedOn/"ceased being a PSC of") for the beneficial-ownership case
+// -- structurally the same check (a relationship starting or ending
+// near a designation date), different underlying event, so the verbs
+// travel with the record rather than being hardcoded in the comparison
+// logic.
+type datedRecord struct {
+	CompanyName string
+	StartOn     string
+	StartVerb   string
+	EndOn       string // empty if the relationship is still active
+	EndVerb     string
+}
+
+// appointmentsToDatedRecords adapts officerFanOut's own appointment
+// history to datedRecord's shape.
+func appointmentsToDatedRecords(appointments []companieshouse.Appointment) []datedRecord {
+	records := make([]datedRecord, len(appointments))
+	for i, a := range appointments {
+		records[i] = datedRecord{CompanyName: a.CompanyName, StartOn: a.AppointedOn, StartVerb: "appointed to", EndOn: a.ResignedOn, EndVerb: "resigned from"}
+	}
+	return records
+}
+
+// sanctionsAdjacentChange checks every one of records for a StartOn or
+// EndOn date falling within sanctionsAdjacentWindow of hit's OFSI
+// DateDesignated, returning a human-readable description of the first
+// such match found, or "" if none. Unparseable dates (on either side)
+// are silently skipped rather than erroring -- same defensive posture
+// as appointmentBurst/resignationBurst -- since a malformed date
+// shouldn't take down the whole check for every other record.
+func sanctionsAdjacentChange(records []datedRecord, hit ofsi.Hit) string {
 	designated, err := time.Parse("2006-01-02", hit.DateDesignated)
 	if err != nil {
 		return ""
 	}
-	for _, a := range appointments {
-		if t, err := time.Parse("2006-01-02", a.AppointedOn); err == nil {
+	for _, r := range records {
+		if t, err := time.Parse("2006-01-02", r.StartOn); err == nil {
 			if d := t.Sub(designated); d.Abs() <= sanctionsAdjacentWindow {
-				return fmt.Sprintf("%s: appointed to %s on %s, %s OFSI-designated on %s", hit.Name, a.CompanyName, a.AppointedOn, daysRelative(d), hit.DateDesignated)
+				return fmt.Sprintf("%s: %s %s on %s, %s OFSI-designated on %s", hit.Name, r.StartVerb, r.CompanyName, r.StartOn, daysRelative(d), hit.DateDesignated)
 			}
 		}
-		if a.ResignedOn == "" {
+		if r.EndOn == "" {
 			continue
 		}
-		if t, err := time.Parse("2006-01-02", a.ResignedOn); err == nil {
+		if t, err := time.Parse("2006-01-02", r.EndOn); err == nil {
 			if d := t.Sub(designated); d.Abs() <= sanctionsAdjacentWindow {
-				return fmt.Sprintf("%s: resigned from %s on %s, %s OFSI-designated on %s", hit.Name, a.CompanyName, a.ResignedOn, daysRelative(d), hit.DateDesignated)
+				return fmt.Sprintf("%s: %s %s on %s, %s OFSI-designated on %s", hit.Name, r.EndVerb, r.CompanyName, r.EndOn, daysRelative(d), hit.DateDesignated)
 			}
 		}
 	}
 	return ""
+}
+
+// pscSanctionsAdjacentChange screens each of a company's PSCs (persons
+// with significant control -- individual or corporate) against the UK
+// Sanctions List (OFSI) and flags one whose own NotifiedOn or CeasedOn
+// falls within sanctionsAdjacentWindow of their OFSI designation date
+// -- the beneficial-ownership analogue of officerFanOut's own
+// sanctions_adjacent_officer_change check, arguably the more direct
+// signal of the two per OFAC's 2026 "sham transactions" guidance,
+// which is specifically about ownership/control changes, not officer
+// appointments. Unlike the officer-fan-out version, this never fans
+// out across companies -- Companies House has no cross-company PSC
+// history API the way GetOfficerAppointments gives officers (PSCs
+// aren't indexed by a stable person ID the way officers are via
+// OfficerID), so each PSC is only ever compared against this one
+// company's own notified/ceased dates. Shared by
+// gatherCompaniesHouseEntities and gatherUKCharityEntities, same
+// reasoning officerFanOut is shared between them.
+func pscSanctionsAdjacentChange(pscs []companieshouse.PSC, companyName, entityLabel string, officerCache *officerLookupCache, note func(format string, a ...any)) []risk.Indicator {
+	var extra []risk.Indicator
+	ofsiClient := ofsi.NewClient()
+	var breaker circuitBreaker
+	for _, p := range pscs {
+		if breaker.Skip() {
+			break
+		}
+		result, err := officerCache.getOFSIHits(ofsiClient, p.Name)
+		if err != nil {
+			note("%s OFSI screen: %v", p.Name, err)
+			breaker.Record(err)
+			continue
+		}
+		breaker.Record(nil)
+		wantName := risk.NormalizeNameFuzzy(p.Name)
+		for _, hit := range result.Hits {
+			if wantName != "" && risk.NormalizeNameFuzzy(hit.Name) != wantName {
+				continue
+			}
+			records := []datedRecord{{CompanyName: companyName, StartOn: p.NotifiedOn, StartVerb: "notified as a PSC of", EndOn: p.CeasedOn, EndVerb: "ceased being a PSC of"}}
+			if desc := sanctionsAdjacentChange(records, hit); desc != "" {
+				extra = append(extra, risk.Indicator{
+					Code:        "sanctions_adjacent_officer_change",
+					Description: "A person with significant control (PSC) of this entity, separately matched against the UK Sanctions List (OFSI), was notified as a PSC or ceased being one within a few months of their own OFSI designation date -- OFAC's own 2026 guidance treats ownership/control changes timed close to a sanctions designation as worth extra scrutiny beyond a simple current-ownership check, since a designated person's control over an entity often doesn't simply vanish on the designation date. Not proof of anything by itself: a lot of ordinary corporate activity happens to fall within any few-month window",
+					Weight:      4,
+					Entities:    []string{entityLabel},
+					Evidence:    fmt.Sprintf("%s -- %s", desc, hit.Regime),
+				})
+			}
+		}
+	}
+	return extra
 }
 
 // daysRelative renders a signed time.Duration as e.g. "12 days after"

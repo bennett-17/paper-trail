@@ -148,3 +148,25 @@ func TestSourceFilterOnlyAndSkipCombine(t *testing.T) {
 		t.Error("GLEIF is in only and not in skip -- should be allowed")
 	}
 }
+
+// TestFastModeSkipsBothOFSISubScreens guards --fast covering the two
+// per-officer/per-PSC OFSI screens officerFanOut and
+// pscSanctionsAdjacentChange add on top of the entity-level UK
+// sanctions screen -- easy to forget to add here, since neither is a
+// top-level gatherer/screen function the way every other
+// fastModeSkipSources entry is (both are nested sub-calls inside an
+// already-allowed gatherer). Can't verify network calls are actually
+// skipped in a unit test (ofsi.NewClient always dials the real OFSI
+// endpoint, unlike companieshouse.Client's injectable BaseURL), but
+// this at least guards the skip *list* itself, and
+// TestOfficerFanOutDiscoversHop1AndHop2Companies etc. (risk_gather_test.go)
+// confirm the rest of officerFanOut's own indicators still fire when
+// these two are skipped -- i.e. the skip is scoped to just the OFSI
+// sub-block, not the whole function.
+func TestFastModeSkipsBothOFSISubScreens(t *testing.T) {
+	for _, source := range []string{"UK sanctions screen (officer fan-out)", "UK sanctions screen (PSC)"} {
+		if !fastModeSkipSources[source] {
+			t.Errorf("fastModeSkipSources missing %q", source)
+		}
+	}
+}

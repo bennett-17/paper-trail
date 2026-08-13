@@ -47,6 +47,17 @@ const entityClusterWeight = 2
 // again here would be noise.
 func EntityCluster(indicators []Indicator) []Indicator {
 	uf := newUnionFind()
+	// neighbors is the TRUE pairwise adjacency graph, built separately
+	// from the union-find edges below -- union-find only needs a
+	// spanning structure to find components (it links participants[0]
+	// to each other participant, a star pattern, not every pair), which
+	// would systematically undercount every non-participants[0] node's
+	// degree if reused for degree centrality. This mirrors
+	// computeCorroborations' own full pairwise walk (corroboration.go)
+	// for exactly that reason: degree needs every edge an indicator
+	// actually implies, not just enough of them to union entities
+	// together.
+	neighbors := map[string]map[string]bool{}
 	for _, ind := range indicators {
 		participants := dedupeStrings(ind.Entities)
 		if len(participants) < 2 {
@@ -57,6 +68,19 @@ func EntityCluster(indicators []Indicator) []Indicator {
 		}
 		for i := 1; i < len(participants); i++ {
 			uf.union(participants[0], participants[i])
+		}
+		for i := 0; i < len(participants); i++ {
+			for j := i + 1; j < len(participants); j++ {
+				a, b := participants[i], participants[j]
+				if neighbors[a] == nil {
+					neighbors[a] = map[string]bool{}
+				}
+				if neighbors[b] == nil {
+					neighbors[b] = map[string]bool{}
+				}
+				neighbors[a][b] = true
+				neighbors[b][a] = true
+			}
 		}
 	}
 
@@ -101,12 +125,27 @@ func EntityCluster(indicators []Indicator) []Indicator {
 		}
 		sort.Strings(codes)
 
+		// Hub: the member with the most distinct direct neighbors
+		// (degree centrality) -- a cheap, first-cut answer to "which
+		// entity does this network actually hinge on," exactly right
+		// for a star-shaped network (one nominee, many companies, each
+		// only ever paired with the nominee) and still meaningful,
+		// just less pointed, for a chain-shaped one. entities is
+		// already sorted, so ties go to the lexicographically first
+		// member -- deterministic, not otherwise significant.
+		hub, hubDegree := "", -1
+		for _, e := range entities {
+			if d := len(neighbors[e]); d > hubDegree {
+				hub, hubDegree = e, d
+			}
+		}
+
 		out = append(out, Indicator{
 			Code:        "entity_cluster",
-			Description: "These entities are all transitively connected -- directly or through a chain of intermediate entities -- by the structural indicators listed elsewhere in this report. A pairwise view (a single shared_person hit, a single Corroborated pair) can miss that several such links chain together into one larger network; this calls out the network itself as its own finding, on top of -- not instead of -- every indicator that produced it. Common for a large, legitimately multi-subsidiary organization as well as a shell-company network, so this is a map to investigate, not a verdict",
+			Description: "These entities are all transitively connected -- directly or through a chain of intermediate entities -- by the structural indicators listed elsewhere in this report. A pairwise view (a single shared_person hit, a single Corroborated pair) can miss that several such links chain together into one larger network; this calls out the network itself as its own finding, on top of -- not instead of -- every indicator that produced it. The named hub is whichever member has the most distinct direct connections within the network (degree centrality) -- for a nominee-director-shaped network this is usually the nominee themselves, but it's a structural observation, not an accusation. Common for a large, legitimately multi-subsidiary organization as well as a shell-company network, so this is a map to investigate, not a verdict",
 			Weight:      entityClusterWeight,
 			Entities:    entities,
-			Evidence:    fmt.Sprintf("%d entities connected via %s", len(entities), strings.Join(codes, ", ")),
+			Evidence:    fmt.Sprintf("%d entities connected via %s; hub: %s (degree %d)", len(entities), strings.Join(codes, ", "), hub, hubDegree),
 		})
 	}
 	return out
