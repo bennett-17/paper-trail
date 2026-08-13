@@ -100,6 +100,34 @@ func TestServeRiskRequestRealQueryShowsProgressBarNotReport(t *testing.T) {
 	}
 }
 
+// TestServeRiskRequestDefinesFilterEntityCardsInInitialPageLoad guards
+// a real bug caught by live browser testing: --serve's "result" SSE
+// handler injects the finished report body via target.innerHTML =
+// atob(e.data) (see servePageTemplate's <script>), and a <script> tag
+// inserted that way is parsed into the DOM but never executed -- so a
+// filterEntityCards definition living inside reportBodyTemplate (as it
+// once did) silently never runs, leaving the entity-filter input's
+// oninput handler calling an undefined function the moment a reader
+// types into it. filterEntityCards must instead be defined by the
+// *initial* page load (this handler, serveRiskRequest, not the SSE
+// result), which the browser always executes normally -- verified here
+// even before any query is submitted, since the search box is present
+// from the very first page load and must already work.
+func TestServeRiskRequestDefinesFilterEntityCardsInInitialPageLoad(t *testing.T) {
+	tmpl, err := reportTemplate("serve", servePageTemplate)
+	if err != nil {
+		t.Fatalf("reportTemplate: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	serveRiskRequest(rec, req, tmpl)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "function filterEntityCards(") {
+		t.Error("expected filterEntityCards to be defined in the initial page load's own <script>, not only inside the SSE-injected report body")
+	}
+}
+
 func TestServeTemplateEscapesFormQuery(t *testing.T) {
 	tmpl, err := reportTemplate("serve", servePageTemplate)
 	if err != nil {

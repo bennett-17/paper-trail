@@ -265,6 +265,65 @@ func TestWriteReportHTMLRendersEntityCards(t *testing.T) {
 	}
 }
 
+func TestWriteReportHTMLRendersTieredSectionsDuplicatesAndPersonPanel(t *testing.T) {
+	report := riskReportJSON{
+		Queries: []string{"Wells Fargo"},
+		Entities: []risk.Entity{
+			risk.NewEntity("edgar", "0000072971", "WELLS FARGO & COMPANY/MN", nil, []string{"Jane Doe"}),
+			risk.NewEntity("companieshouse", "14630695", "WELLS FARGO LTD", []string{"Mail Drop Suite 4"}, []string{"Jane Doe"}),
+			risk.NewEntity("gleif", "1", "Unrelated Widget Society", nil, nil),
+		},
+		Score: risk.Score{
+			Total:      12,
+			Confidence: "HIGH",
+			Indicators: []risk.Indicator{
+				{Code: "sanctions_match", Description: "Name matched a US restricted-party list", Weight: 6, Entities: []string{"edgar: WELLS FARGO & COMPANY/MN (0000072971)"}, Evidence: "OFAC SDN"},
+				{Code: "mail_drop_address", Description: "Registered address is a known mail-drop provider", Weight: 2, Entities: []string{"companieshouse: WELLS FARGO LTD (14630695)"}, Evidence: "Mail Drop Suite 4"},
+				{Code: "shared_person", Description: "Same officer at two entities", Weight: 2, Entities: []string{"edgar: WELLS FARGO & COMPANY/MN (0000072971)", "companieshouse: WELLS FARGO LTD (14630695)"}, Evidence: "Jane Doe"},
+				{Code: "gdelt_news_mention", Description: "Named in a news article", Weight: 1, Entities: []string{"gleif: Unrelated Widget Society (1)"}, Evidence: "some unrelated article"},
+			},
+		},
+	}
+
+	path := filepath.Join(t.TempDir(), "report.html")
+	if err := writeReportHTML(report, nil, "", path); err != nil {
+		t.Fatalf("writeReportHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	html := string(data)
+
+	if !strings.Contains(html, "Confirmed facts") {
+		t.Error("expected a Confirmed facts tier section (sanctions_match at weight 6)")
+	}
+	if !strings.Contains(html, "Single weak signals") {
+		t.Error("expected a Single weak signals tier section (the lone gdelt_news_mention card)")
+	}
+	if !strings.Contains(html, "Possibly the same entity as: companieshouse: WELLS FARGO LTD (14630695)") {
+		t.Error("expected a cross-reference note linking the two same-named Wells Fargo cards, without merging them")
+	}
+	if !strings.Contains(html, "WELLS FARGO &amp; COMPANY/MN (0000072971)") || !strings.Contains(html, "companieshouse: WELLS FARGO LTD (14630695)") {
+		t.Error("both distinct Wells Fargo cards must still be rendered separately -- a cross-reference is not a merge")
+	}
+	if !strings.Contains(html, "possibly unrelated to search") {
+		t.Error("expected the Unrelated Widget Society card to carry the relevance flag (no shared distinctive word with \"Wells Fargo\")")
+	}
+	if strings.Count(html, "possibly unrelated to search") != 1 {
+		t.Errorf("expected the relevance flag on exactly the one irrelevant card, got %d occurrences", strings.Count(html, "possibly unrelated to search"))
+	}
+	if !strings.Contains(html, "Findings by person") || !strings.Contains(html, "Jane Doe") {
+		t.Error("expected a person panel entry for Jane Doe, who is named on 2 entities")
+	}
+	if !strings.Contains(html, `id="entity-filter"`) && !strings.Contains(html, `class="entity-filter"`) {
+		t.Error("expected the client-side entity filter input to be rendered")
+	}
+	if !strings.Contains(html, "filterEntityCards") {
+		t.Error("expected the client-side filter script to be embedded")
+	}
+}
+
 func TestWeightClassThresholds(t *testing.T) {
 	cases := []struct {
 		weight int

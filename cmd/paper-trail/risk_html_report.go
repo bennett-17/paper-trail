@@ -16,15 +16,20 @@ import (
 // the template itself doesn't need to know about JSON tags or
 // pointer-vs-value diff handling.
 type reportHTMLView struct {
-	Queries       []string
-	Entities      []risk.Entity
-	Notes         []string
-	Score         risk.Score
-	EntityCards   []entityCard
-	ExcludedCount int
-	Diff          *riskReportDiff
-	DiffSource    string
-	GeneratedAt   string
+	Queries        []string
+	Entities       []risk.Entity
+	Notes          []string
+	Score          risk.Score
+	EntityCards    []entityCard
+	CardGroups     []entityCardGroup
+	Duplicates     map[string][]string
+	IrrelevantCard map[string]bool
+	People         []personEntry
+	ExcludedCount  int
+	SourceHealth   sourceHealth
+	Diff           *riskReportDiff
+	DiffSource     string
+	GeneratedAt    string
 }
 
 // entityCard groups every indicator naming one entity label, so the
@@ -127,16 +132,30 @@ func confidenceClass(band string) string {
 // output) and --serve's per-request handler, so both go through the
 // exact same report rendering.
 func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource string) reportHTMLView {
+	cards := groupIndicatorsByEntity(report.Score.Indicators)
+
+	irrelevant := make(map[string]bool, len(cards))
+	for _, c := range cards {
+		if !cardSharesWordWithQueries(c.Label, report.Queries) {
+			irrelevant[c.Label] = true
+		}
+	}
+
 	return reportHTMLView{
-		Queries:       report.Queries,
-		Entities:      report.Entities,
-		Notes:         report.Notes,
-		Score:         report.Score,
-		EntityCards:   groupIndicatorsByEntity(report.Score.Indicators),
-		ExcludedCount: report.ExcludedIndicators,
-		Diff:          diff,
-		DiffSource:    diffSource,
-		GeneratedAt:   time.Now().Format("2006-01-02 15:04:05 MST"),
+		Queries:        report.Queries,
+		Entities:       report.Entities,
+		Notes:          report.Notes,
+		Score:          report.Score,
+		EntityCards:    cards,
+		CardGroups:     groupCardsByTier(cards),
+		Duplicates:     possibleDuplicates(cards),
+		IrrelevantCard: irrelevant,
+		People:         buildPersonPanel(report.Entities),
+		ExcludedCount:  report.ExcludedIndicators,
+		SourceHealth:   report.SourceHealth,
+		Diff:           diff,
+		DiffSource:     diffSource,
+		GeneratedAt:    time.Now().Format("2006-01-02 15:04:05 MST"),
 	}
 }
 
@@ -278,6 +297,58 @@ const reportStyle = `<style>
   }
   .entity-card-name { font-weight: 700; font-size: 1.02em; }
   .entity-card .indicator { margin-bottom: 10px; }
+  .source-health {
+    border: 1px solid var(--med);
+    border-radius: 4px;
+    padding: 8px 14px;
+    margin: 10px 0;
+    font-size: 0.9em;
+  }
+  .source-health .field { margin: 2px 0; }
+  .entity-filter {
+    display: block;
+    width: 100%;
+    max-width: 420px;
+    margin: 10px 0 16px;
+    padding: 7px 10px;
+    font-size: 0.95em;
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    background: var(--panel-bg);
+    color: var(--fg);
+  }
+  .tier-group { margin-bottom: 18px; }
+  .tier-group > summary {
+    cursor: pointer;
+    font-weight: 700;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--panel-border);
+    margin-bottom: 10px;
+  }
+  .tier-count { font-weight: 400; color: var(--muted); }
+  .flag {
+    font-size: 0.78em;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .flag-irrelevant { background: var(--med); color: #1a1a1a; }
+  .dup-note {
+    font-size: 0.88em;
+    color: var(--muted);
+    border-top: 1px dashed var(--panel-border);
+    padding-top: 6px;
+    margin: 6px 0 10px;
+  }
+  .person-card {
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 8px 14px;
+    margin-bottom: 8px;
+    background: var(--panel-bg);
+  }
+  .person-name { font-weight: 700; }
   ul.plain { list-style: none; padding-left: 0; }
   ul.plain li { padding: 3px 0; }
   .corroboration {
@@ -298,6 +369,48 @@ const reportStyle = `<style>
   .diff-score { font-weight: 600; }
 </style>`
 
+// reportFilterScript defines filterEntityCards (see the entity-filter
+// input in reportBodyTemplate) and MUST live in each page shell
+// (reportPageTemplate/servePageTemplate) rather than inside
+// reportBodyTemplate itself -- --serve's browser page swaps the report
+// body into the DOM via innerHTML once a scan finishes (see
+// servePageTemplate's "result" SSE handler), and a <script> tag
+// inserted that way is parsed but never executed, silently leaving
+// filterEntityCards undefined the moment the reader tries to use the
+// search box (caught live: the box accepted input but nothing
+// filtered). Defining the function in the page shell instead means
+// it's already in scope by the time the report body -- which only
+// ever contains the input element and its oninput reference, not the
+// function itself -- gets injected, in --serve as well as
+// --report-html's ordinary, unproblematic full-page load.
+const reportFilterScript = `<script>
+// Client-side only -- filters the already-rendered entity cards by
+// substring match against each card's own text (name + evidence), no
+// server round-trip. A card's tier-group auto-opens while it has a
+// match and hides entirely once none of its cards do, so a search
+// term can surface a match buried in the collapsed weak-signal tier
+// without the reader having to expand it by hand first.
+function filterEntityCards(query) {
+  var q = query.trim().toLowerCase();
+  var groups = document.querySelectorAll('.tier-group');
+  var totalVisible = 0;
+  groups.forEach(function (group) {
+    var cards = group.querySelectorAll('.entity-card');
+    var visibleInGroup = 0;
+    cards.forEach(function (card) {
+      var match = q === '' || card.textContent.toLowerCase().indexOf(q) !== -1;
+      card.style.display = match ? '' : 'none';
+      if (match) visibleInGroup++;
+    });
+    group.style.display = visibleInGroup > 0 ? '' : 'none';
+    if (q !== '' && visibleInGroup > 0) group.open = true;
+    totalVisible += visibleInGroup;
+  });
+  var empty = document.getElementById('entity-filter-empty');
+  if (empty) empty.style.display = (q !== '' && totalVisible === 0) ? '' : 'none';
+}
+</script>`
+
 // reportPageTemplate is the full HTML document --report-html writes
 // to a file: a normal page wrapping reportBodyTemplate's "reportBody"
 // block.
@@ -308,6 +421,7 @@ const reportPageTemplate = `<!DOCTYPE html>
 <title>paper-trail risk report</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 ` + reportStyle + `
+` + reportFilterScript + `
 </head>
 <body>
 {{template "reportBody" .}}
@@ -321,6 +435,13 @@ const reportPageTemplate = `<!DOCTYPE html>
 const reportBodyTemplate = `{{define "reportBody"}}
 <h1>Risk assessment for {{range $i, $q := .Queries}}{{if $i}}, {{end}}&#34;{{$q}}&#34;{{end}}</h1>
 <div class="meta">Generated {{.GeneratedAt}} &middot; {{len .Entities}} entit{{if ne (len .Entities) 1}}ies{{else}}y{{end}} found</div>
+
+{{if or .SourceHealth.Degraded .SourceHealth.Skipped}}
+<div class="source-health">
+  {{if .SourceHealth.Degraded}}<div class="field"><strong>Degraded</strong> (repeatedly failed mid-scan -- likely a live outage or rate limit; whatever this source didn't find is a real gap, not a confirmed absence): {{range $i, $s := .SourceHealth.Degraded}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
+  {{if .SourceHealth.Skipped}}<div class="field"><strong>Skipped</strong> (no API key configured -- routine, not an error): {{range $i, $s := .SourceHealth.Skipped}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
+</div>
+{{end}}
 
 <h2>Entities</h2>
 {{if .Entities}}
@@ -352,27 +473,48 @@ const reportBodyTemplate = `{{define "reportBody"}}
 
 <h2>Findings by entity</h2>
 {{if .EntityCards}}
-<p class="meta">Every entity named by at least one indicator, grouped together and sorted by that entity's own total weight -- so everything found about one entity reads as a single card instead of being scattered across a weight-sorted list.</p>
-{{range .EntityCards}}
-{{$label := .Label}}
-<div class="entity-card {{weightClass .TotalWeight}}">
-  <div class="entity-card-head">
-    <span class="entity-card-name">{{$label}}</span>
-    <span class="weight-tag {{weightClass .TotalWeight}}">+{{.TotalWeight}}</span>
-  </div>
-  {{range .Indicators}}
-  <div class="indicator {{weightClass .Weight}}">
-    <span class="weight-tag {{weightClass .Weight}}">+{{.Weight}}</span>
-    <div class="desc">{{.Description}}</div>
-    {{$others := otherEntities . $label}}
-    {{if $others}}<div class="field">Also linked to: {{range $i, $e := $others}}{{if $i}}; {{end}}{{$e}}{{end}}</div>{{end}}
-    <div class="field">Evidence: {{.Evidence}}</div>
+<p class="meta">Every entity named by at least one indicator, grouped by severity tier and, within each tier, sorted by that entity's own total weight -- so everything found about one entity reads as a single card, and the tail of single-signal noise stays out of the way until you go looking for it.</p>
+<input type="search" class="entity-filter" placeholder="Filter by name or evidence&hellip;" oninput="filterEntityCards(this.value)" aria-label="Filter entity cards">
+{{range .CardGroups}}
+<details class="tier-group"{{if not .Collapsed}} open{{end}}>
+  <summary>{{.Label}} <span class="tier-count">({{len .Cards}})</span></summary>
+  {{range .Cards}}
+  {{$label := .Label}}
+  {{$dups := index $.Duplicates $label}}
+  <div class="entity-card {{weightClass .TotalWeight}}">
+    <div class="entity-card-head">
+      <span class="entity-card-name">{{$label}}</span>
+      {{if index $.IrrelevantCard $label}}<span class="flag flag-irrelevant" title="This entity's own name doesn't share a distinctive word with any search term -- it may have surfaced via a generic keyword collision rather than a genuine connection to what was searched for. Not a verdict, just worth a second look.">possibly unrelated to search</span>{{end}}
+      <span class="weight-tag {{weightClass .TotalWeight}}">+{{.TotalWeight}}</span>
+    </div>
+    {{if $dups}}<div class="field dup-note">Possibly the same entity as: {{range $i, $d := $dups}}{{if $i}}, {{end}}{{$d}}{{end}} &mdash; verify before treating as one; sources are shown separately on purpose.</div>{{end}}
+    {{range .Indicators}}
+    <div class="indicator {{weightClass .Weight}}">
+      <span class="weight-tag {{weightClass .Weight}}">+{{.Weight}}</span>
+      <div class="desc">{{.Description}}</div>
+      {{$others := otherEntities . $label}}
+      {{if $others}}<div class="field">Also linked to: {{range $i, $e := $others}}{{if $i}}; {{end}}{{$e}}{{end}}</div>{{end}}
+      <div class="field">Evidence: {{.Evidence}}</div>
+    </div>
+    {{end}}
   </div>
   {{end}}
-</div>
+</details>
 {{end}}
+<p class="meta entity-filter-empty" id="entity-filter-empty" style="display:none">No entities match that filter.</p>
 {{else}}
 <p class="meta">No structural indicators found among the entities located.</p>
+{{end}}
+
+{{if .People}}
+<h2>Findings by person</h2>
+<p class="meta">Officers, directors, or trustees named on 2 or more entities -- the same cross-entity trace this report's shared_person indicator already flags, laid out per person instead of per pair.</p>
+{{range .People}}
+<div class="person-card">
+  <div class="person-name">{{.Name}}</div>
+  <div class="field">Linked to {{len .Entities}} entities: {{range $i, $e := .Entities}}{{if $i}}; {{end}}{{$e}}{{end}}</div>
+</div>
+{{end}}
 {{end}}
 
 {{if .Score.Corroborations}}

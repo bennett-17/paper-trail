@@ -38,9 +38,10 @@ func screenUSSanctions(queries []string, entities []risk.Entity, progress *progr
 	}
 
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			return
 		}
 		screened[key] = true
@@ -48,8 +49,12 @@ func screenUSSanctions(queries []string, entities []risk.Entity, progress *progr
 		result, err := sanctionsClient.SearchEntities(name, false, 0, 5)
 		if err != nil {
 			note("%q: %v", name, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("Sanctions screen"))
+			}
 			return
 		}
+		breaker.Record(nil)
 		for _, hit := range result.Hits {
 			extra = append(extra, risk.Indicator{
 				Code:        "sanctions_match",
@@ -109,9 +114,10 @@ func screenUKSanctions(queries []string, entities []risk.Entity, progress *progr
 	}
 	ofsiClient := ofsi.NewClient()
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			return
 		}
 		screened[key] = true
@@ -119,8 +125,12 @@ func screenUKSanctions(queries []string, entities []risk.Entity, progress *progr
 		result, err := ofsiClient.SearchDesignations(name, 5)
 		if err != nil {
 			note("%q: %v", name, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("UK sanctions screen"))
+			}
 			return
 		}
+		breaker.Record(nil)
 		wantName := risk.NormalizeNameFuzzy(name)
 		for _, hit := range result.Hits {
 			// Confirmed live: this search matches on individual
@@ -192,9 +202,10 @@ func screenICIJOffshoreLeaks(queries []string, entities []risk.Entity, progress 
 	}
 	icijClient := icij.NewClient()
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			return
 		}
 		screened[key] = true
@@ -202,8 +213,12 @@ func screenICIJOffshoreLeaks(queries []string, entities []risk.Entity, progress 
 		matches, err := icijClient.Search(name, 10)
 		if err != nil {
 			note("%q: %v", name, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("ICIJ Offshore Leaks Database"))
+			}
 			return
 		}
+		breaker.Record(nil)
 		for _, m := range matches {
 			if !m.Match {
 				continue
@@ -332,9 +347,10 @@ func screenSAMExclusions(queries []string, entities []risk.Entity, progress *pro
 	}
 
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			return
 		}
 		screened[key] = true
@@ -342,8 +358,12 @@ func screenSAMExclusions(queries []string, entities []risk.Entity, progress *pro
 		exclusions, err := samClient.SearchByName(name, 0)
 		if err != nil {
 			note("%q: %v", name, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("SAM.gov Exclusions"))
+			}
 			return
 		}
+		breaker.Record(nil)
 		for _, ex := range exclusions {
 			extra = append(extra, risk.Indicator{
 				Code:        "sam_exclusion",
@@ -379,13 +399,14 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 	}
 	note := func(format string, a ...any) { notes = append(notes, "Companies House: "+fmt.Sprintf(format, a...)) }
 	checked := map[string]bool{}
+	var breaker circuitBreaker
 	for _, e := range entities {
 		if e.Source != "companieshouse" && e.Source != "ukcharity" {
 			continue
 		}
 		for _, p := range e.People {
 			key := strings.ToLower(strings.TrimSpace(p))
-			if key == "" || checked[key] {
+			if key == "" || checked[key] || breaker.Skip() {
 				continue
 			}
 			checked[key] = true
@@ -393,8 +414,12 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 			hits, err := chClient.SearchDisqualifiedOfficers(p, 5)
 			if err != nil {
 				note("disqualified officer check for %q: %v", p, err)
+				if breaker.Record(err) {
+					notes = append(notes, tripNote("Companies House"))
+				}
 				continue
 			}
+			breaker.Record(nil)
 			wantName := risk.NormalizeNameFuzzy(p)
 			for _, hit := range hits {
 				// Confirmed live: this search endpoint matches on
@@ -448,10 +473,11 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 	wdClient := wikidata.NewClient()
 
 	checked := map[string]bool{}
+	var breaker circuitBreaker
 	for _, e := range entities {
 		for _, p := range e.People {
 			key := strings.ToLower(strings.TrimSpace(p))
-			if key == "" || checked[key] {
+			if key == "" || checked[key] || breaker.Skip() {
 				continue
 			}
 			checked[key] = true
@@ -460,8 +486,12 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 			candidates, err := wdClient.SearchPeople(p, 5)
 			if err != nil {
 				note("%q: %v", p, err)
+				if breaker.Record(err) {
+					notes = append(notes, tripNote("Wikidata"))
+				}
 				continue
 			}
+			breaker.Record(nil)
 			wantName := risk.NormalizeNameFuzzy(p)
 			var matched []wikidata.PersonCandidate
 			var qids []string
@@ -581,10 +611,11 @@ func screenDomainAge(entities []risk.Entity, progress *progressReporter) (extra 
 	waybackClient := wayback.NewClient()
 
 	checked := map[string]bool{}
+	var rdapBreaker, waybackBreaker circuitBreaker
 	for _, e := range entities {
 		for _, w := range e.Websites {
 			host := websiteHost(w)
-			if host == "" || checked[host] {
+			if host == "" || checked[host] || rdapBreaker.Skip() {
 				continue
 			}
 			checked[host] = true
@@ -593,8 +624,12 @@ func screenDomainAge(entities []risk.Entity, progress *progressReporter) (extra 
 			registered, err := rdapClient.RegistrationDate(host)
 			if err != nil {
 				note("%q: %v", host, err)
+				if rdapBreaker.Record(err) {
+					notes = append(notes, tripNote("RDAP"))
+				}
 				continue
 			}
+			rdapBreaker.Record(nil)
 			age := time.Since(registered)
 			if age < domainAgeThreshold {
 				extra = append(extra, risk.Indicator{
@@ -607,12 +642,19 @@ func screenDomainAge(entities []risk.Entity, progress *progressReporter) (extra 
 				continue
 			}
 
+			if waybackBreaker.Skip() {
+				continue
+			}
 			progress.report("Wayback earliest snapshot", "checking %q (%d so far)", host, len(checked))
 			snapshot, found, err := waybackClient.EarliestSnapshot(host)
 			if err != nil {
 				note("%q wayback: %v", host, err)
+				if waybackBreaker.Record(err) {
+					notes = append(notes, tripNote("Wayback earliest snapshot"))
+				}
 				continue
 			}
+			waybackBreaker.Record(nil)
 			if !found {
 				continue
 			}
@@ -699,13 +741,21 @@ func screenCertificateTransparency(client *crtsh.Client, entities []risk.Entity,
 	sort.Strings(hosts) // deterministic query/progress order, not a scoring input
 
 	fired := map[string]bool{} // dedupe key: sorted "labelA|labelB|certificateKey"
+	var breaker circuitBreaker
 	for i, host := range hosts {
+		if breaker.Skip() {
+			continue
+		}
 		progress.report("Certificate Transparency", "checking %q (%d/%d)", host, i+1, len(hosts))
 		certs, err := client.Certificates(host)
 		if err != nil {
 			note("%q: %v", host, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("Certificate Transparency"))
+			}
 			continue
 		}
+		breaker.Record(nil)
 		for _, cert := range certs {
 			for _, san := range cert.SANs {
 				other := normalizeCertName(san)
@@ -767,9 +817,10 @@ func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, en
 
 	mentioned := map[string]bool{}
 	seenFilers := map[string]bool{}
+	var breaker circuitBreaker
 	mention := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" || mentioned[key] {
+		if key == "" || mentioned[key] || breaker.Skip() {
 			return
 		}
 		mentioned[key] = true
@@ -777,8 +828,12 @@ func screenEDGARFullTextMentions(edgarClient *edgar.Client, queries []string, en
 		hits, _, err := edgarClient.SearchFullText(fmt.Sprintf("%q", name), "", "", "", "", 0, limit)
 		if err != nil {
 			note("%q: %v", name, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("SEC EDGAR full-text"))
+			}
 			return
 		}
+		breaker.Record(nil)
 		for _, hit := range hits {
 			isKnownFiler := false
 			for _, cik := range hit.CIKs {
@@ -882,9 +937,10 @@ func screenGDELTMentions(queries []string, limit int, progress *progressReporter
 	gdeltClient := gdelt.NewClient()
 
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	for _, query := range queries {
 		key := strings.ToLower(strings.TrimSpace(query))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			continue
 		}
 		screened[key] = true
@@ -892,8 +948,12 @@ func screenGDELTMentions(queries []string, limit int, progress *progressReporter
 		articles, err := gdeltClient.SearchArticles(query, limit)
 		if err != nil {
 			note("%q: %v", query, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("GDELT"))
+			}
 			continue
 		}
+		breaker.Record(nil)
 		for _, a := range articles {
 			extra = append(extra, risk.Indicator{
 				Code:        "gdelt_news_mention",
@@ -965,9 +1025,10 @@ func screenCourtListener(clClient *courtlistener.Client, queries []string, limit
 	}
 
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	for _, query := range queries {
 		key := strings.ToLower(strings.TrimSpace(query))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			continue
 		}
 		screened[key] = true
@@ -975,8 +1036,12 @@ func screenCourtListener(clClient *courtlistener.Client, queries []string, limit
 		result, err := clClient.SearchParties(query, limit)
 		if err != nil {
 			note("%q: %v", query, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("CourtListener"))
+			}
 			continue
 		}
+		breaker.Record(nil)
 		for _, d := range result.Dockets {
 			extra = append(extra, risk.Indicator{
 				Code:        "litigation_mention",
@@ -1015,10 +1080,11 @@ func screenOpenFECContributions(entities []risk.Entity, progress *progressReport
 	fecClient := openfec.NewClient("")
 
 	checked := map[string]bool{}
+	var breaker circuitBreaker
 	for _, e := range entities {
 		for _, p := range e.People {
 			key := strings.ToLower(strings.TrimSpace(p))
-			if key == "" || checked[key] {
+			if key == "" || checked[key] || breaker.Skip() {
 				continue
 			}
 			checked[key] = true
@@ -1027,8 +1093,12 @@ func screenOpenFECContributions(entities []risk.Entity, progress *progressReport
 			contributions, err := fecClient.SearchContributions(p, 3)
 			if err != nil {
 				note("%q: %v", p, err)
+				if breaker.Record(err) {
+					notes = append(notes, tripNote("OpenFEC"))
+				}
 				continue
 			}
+			breaker.Record(nil)
 			for _, c := range contributions {
 				extra = append(extra, risk.Indicator{
 					Code:        "political_contribution",
@@ -1063,9 +1133,10 @@ func screenUSASpendingAwards(queries []string, limit int, progress *progressRepo
 	usaClient := usaspending.NewClient()
 
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	for _, query := range queries {
 		key := strings.ToLower(strings.TrimSpace(query))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			continue
 		}
 		screened[key] = true
@@ -1074,8 +1145,12 @@ func screenUSASpendingAwards(queries []string, limit int, progress *progressRepo
 		awards, err := usaClient.SearchAwards(query, limit)
 		if err != nil {
 			note("%q: %v", query, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("USAspending.gov"))
+			}
 			continue
 		}
+		breaker.Record(nil)
 		var total float64
 		var largest usaspending.Award
 		for _, a := range awards {
@@ -1117,9 +1192,10 @@ func screenGazetteInsolvencyNotices(queries []string, entities []risk.Entity, li
 	gzClient := gazette.NewClient()
 
 	screened := map[string]bool{}
+	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" || screened[key] {
+		if key == "" || screened[key] || breaker.Skip() {
 			return
 		}
 		screened[key] = true
@@ -1128,8 +1204,12 @@ func screenGazetteInsolvencyNotices(queries []string, entities []risk.Entity, li
 		notices, err := gzClient.SearchInsolvencyNotices(name, limit)
 		if err != nil {
 			note("%q: %v", name, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("The Gazette"))
+			}
 			return
 		}
+		breaker.Record(nil)
 		for _, n := range notices {
 			extra = append(extra, risk.Indicator{
 				Code:        "gazette_insolvency_notice",

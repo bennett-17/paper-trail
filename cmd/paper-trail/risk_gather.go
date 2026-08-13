@@ -353,6 +353,12 @@ func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cac
 // shared-address check.
 func gatherLittleSisEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string) {
 	lsClient := littlesis.NewClient()
+	// Shared across every goroutine runConcurrentQueries fans out below
+	// (confirmed live: LittleSis's server returns HTTP 503 on a real
+	// fraction of back-to-back queries under sustained load -- 19 of 31
+	// in one real scan) -- circuitBreaker is safe for concurrent use for
+	// exactly this reason.
+	var breaker circuitBreaker
 	results := runConcurrentQueries(queries, func(i int, query string) queryResult {
 		progress.report("LittleSis", "term %d/%d: %q", i+1, len(queries), query)
 		var r queryResult
@@ -365,12 +371,19 @@ func gatherLittleSisEntities(queries []string, limit int, cache *riskcache.Cache
 			r.entities = cached
 			return r
 		}
+		if breaker.Skip() {
+			return r
+		}
 
 		candidates, err := lsClient.SearchByName(query, limit)
 		if err != nil {
 			note("%v", err)
+			if breaker.Record(err) {
+				r.notes = append(r.notes, tripNote("LittleSis"))
+			}
 			return r
 		}
+		breaker.Record(nil)
 		var termEntities []risk.Entity
 		for _, cand := range candidates {
 			if !cand.IsOrg() {

@@ -995,6 +995,98 @@ does.
 
 It's a lead-generation report, not a finding.
 
+#### HTML report: entity cards, severity tiers, and cross-references
+
+Both `--report-html` (file output) and `--serve` (the browser UI) share
+one report layout, built around finding one entity's whole picture in
+one place instead of piecing it back together from a flat,
+weight-sorted indicator list:
+
+- **Entity cards**: every indicator naming an entity is grouped onto
+  that entity's own card, summed to a total weight, and sorted
+  highest-total first. An indicator naming more than one entity (e.g.
+  shared_person) appears on every one of those entities' cards, each
+  showing which *other* entities it also names -- the same
+  "duplicated intentionally" reasoning Corroborated pairs already
+  applies to entity pairs.
+- **Severity tiers**: cards are grouped into four sections --
+  Confirmed facts (an already-adjudicated weight-5+ hit: a sanctions
+  match, a disqualified-director match), Strong leads (a
+  convergent_risk entity), Corroborated pairs (2+ distinct indicator
+  codes), and Single weak signals (everything else) -- so a scan
+  dominated by dozens of single-signal, low-priority cards doesn't
+  bury the few genuinely strong leads underneath them. The weak-signal
+  tier renders collapsed by default; the other three stay open.
+- **Relevance flag**: a card carries a "possibly unrelated to search"
+  flag when its own entity name shares no distinctive word with any
+  of the original search terms -- a cheap, purely textual check for
+  "did this surface because it's actually connected, or only via a
+  generic keyword collision" (a real, repeated pattern in this
+  project's own use: unrelated entities sharing only a common word
+  like "Society" or a shared officer's other, unrelated companies).
+  Common words (Ltd, Foundation, Society, and, of, ...) don't count on
+  their own.
+- **Possible-duplicate cross-reference**: when two or more cards'
+  entity names normalize to the same bare company name (legal
+  suffixes and trailing state-code suffixes like "/MN" stripped), each
+  gets a "Possibly the same entity as: ..." note pointing at the
+  others. This is deliberately a note, not a merge -- a live scan
+  during this project's own development flagged a UK "WELLS FARGO
+  LTD" shell company (mail-drop address, nominee director) alongside
+  the real Wells Fargo & Company; silently merging same-named cards
+  together would have hidden that brand-impersonation finding inside
+  the real company's card instead of surfacing it. Every card, and
+  every indicator on it, stays exactly where it was found.
+- **Findings by person**: officers/directors/trustees named on 2 or
+  more entities get their own panel entry listing every entity they're
+  linked to -- the same cross-entity trace shared_person already
+  flags, laid out per person instead of per pair, for following one
+  person's whole footprint at a glance.
+- **Client-side filter**: a search box above the entity cards filters
+  by substring match against each card's own text (name and evidence)
+  with no server round-trip -- a match inside the collapsed
+  weak-signal tier auto-opens that section instead of staying hidden.
+
+#### Reliability: circuit breakers, source health, and partial re-scans
+
+- Every per-name-scoped screen (sanctions, ICIJ, SAM.gov, disqualified
+  directors, PEP, domain age, Certificate Transparency, EDGAR
+  full-text, GDELT, CourtListener, OpenFEC, USAspending, The Gazette)
+  and LittleSis's gatherer carry their own circuit breaker: after 3
+  consecutive failures against that source in one scan, the breaker
+  trips and every remaining check against it is skipped instead of
+  separately paying the full retry-with-backoff cost on each one --
+  calibrated against two real, live-observed failure modes (OpenFEC's
+  shared `DEMO_KEY` pool exhausting mid-scan, ICIJ 500ing on every
+  query during a live outage).
+- Every report carries a **source health** summary distinguishing two
+  different reasons a source came back empty: **Degraded** (the
+  circuit breaker tripped -- likely a live outage or rate limit,
+  meaning whatever it didn't find is a real gap, not a confirmed
+  absence) versus **Skipped** (no API key configured -- routine, not
+  an error, for any of this project's several credential-gated
+  sources). Shown in the terminal report, `--summary`/`--json`
+  (`sourceHealth.degraded`/`.skipped`), and the HTML report alike.
+- `--fast` skips the three sources confirmed live, repeatedly, to
+  dominate a multi-term scan's wall-clock time (GDELT's 5-second
+  per-request rate limit, CourtListener's 5-requests-a-minute cap even
+  authenticated, and OpenFEC's easily-exhausted shared `DEMO_KEY`
+  pool) for a quicker first pass -- cut a real Wells Fargo scan from
+  200+ seconds to about 34.
+- `--retry-failed-sources <path>` re-runs *only* the sources whose
+  source health showed degraded (see above) in a previous `--output
+  --json` report, and merges the fresh results into it -- instead of
+  re-running every source, including the ones that already succeeded.
+  Uses that report's own queries (no `<query>`/`--input-file` needed);
+  mutually exclusive with `--batch`/`--serve`/`--watch`/`--diff`. The
+  merge is careful about what it replaces: only that source's own
+  indicators are dropped and rebuilt from the fresh run, every
+  structural indicator (shared_person, shared_address,
+  convergent_risk, and the rest of risk.Assess's own output) is
+  recomputed from the merged entity set rather than carried over
+  stale, and entities are merged by their same `source: name (id)`
+  label so nothing already found is lost.
+
 #### Watchlist automation & report management
 
 - `--diff <path>` compares a run against a previously saved
@@ -1543,16 +1635,24 @@ every push as a regression smoke test; run one for longer yourself with:
 go test ./internal/risk/... -run=^$ -fuzz=FuzzFoldDiacritics -fuzztime=60s
 ```
 
-`cmd/smoketest` is a separate, manually-run tool for validating against
-the *live* API once you have a working `EDGAR_USER_AGENT` set:
+`cmd/smoketest` is a separate, manually-run tool for validating five of
+`risk`'s live-API clients directly against their *real* endpoints, not
+the recorded fixtures the offline test suite runs against:
 
 ```bash
-go run ./cmd/smoketest AAPL
+export EDGAR_USER_AGENT="Your Name your.email@example.com"
+go run ./cmd/smoketest edgar AAPL
+go run ./cmd/smoketest littlesis "Wells Fargo"
+go run ./cmd/smoketest openfec "Jane Doe"
+go run ./cmd/smoketest usaspending "Wells Fargo"
+go run ./cmd/smoketest gazette "Wells Fargo"
 ```
 
-Run this yourself when you want to confirm nothing on SEC's end has
-drifted (field names, Atom feed title format, etc.) — it's deliberately
-kept out of `go test` and shouldn't be wired into CI on a schedule.
+Run this yourself when you want to confirm nothing on a source's end has
+drifted (field names, response shapes, SEC's Atom feed title format,
+etc.) — it's deliberately kept out of `go test` and shouldn't be wired
+into CI on a schedule; several of these APIs ask that automated tools
+stay well under their rate limits.
 
 ## Data license note
 

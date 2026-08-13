@@ -201,7 +201,7 @@ func serveScanSSE(w http.ResponseWriter, r *http.Request, tmpl *template.Templat
 		writeSSEEvent(w, flusher, "progress", sseProgressPayload{Percent: u.Percent, Source: u.Source, Message: u.Message})
 	})
 
-	entities, notes, score := gatherAndScore(queries, limit, cache, cacheTTL, progress)
+	entities, notes, score := gatherAndScore(queries, limit, cache, cacheTTL, progress, nil)
 	score, excludedCount := excludeIndicators(score, excludeTerms)
 	report := newReportHTMLView(riskReportJSON{
 		Queries:            queries,
@@ -209,6 +209,7 @@ func serveScanSSE(w http.ResponseWriter, r *http.Request, tmpl *template.Templat
 		Notes:              notes,
 		Score:              score,
 		ExcludedIndicators: excludedCount,
+		SourceHealth:       parseSourceHealth(notes),
 	}, nil, "")
 
 	var buf bytes.Buffer
@@ -294,6 +295,7 @@ const servePageTemplate = `<!DOCTYPE html>
   }
   .progress-label { margin-top: 6px; font-size: 0.9em; color: var(--muted); }
 </style>
+` + reportFilterScript + `
 </head>
 <body>
 

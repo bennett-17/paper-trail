@@ -107,7 +107,7 @@ Usage:
   paper-trail openfec <contributor name> [--limit <n>] [--json]
   paper-trail usaspending <recipient name> [--limit <n>] [--json]
   paper-trail gazette <name> [--limit <n>] [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
 
@@ -914,7 +914,31 @@ a raw JSON file. Same no-server/no-CDN/fully-offline approach as
 --html, built with Go's html/template so live entity/evidence text
 from external APIs is safely escaped rather than risking broken markup
 or a script-tag injection from a company name or evidence string this
-program doesn't control.
+program doesn't control. Both --report-html's file output and --serve's
+browser page share the same entity-centric report layout: every
+indicator naming an entity is grouped onto that entity's own card
+(summed to a total weight, highest first), and cards are further split
+into four severity-tiered sections -- Confirmed facts (a weight-5+
+already-adjudicated hit, e.g. a sanctions match), Strong leads (a
+convergent_risk entity), Corroborated pairs, and Single weak signals,
+which renders collapsed by default so a scan dominated by dozens of
+low-priority cards doesn't bury the few strong leads underneath them.
+A card whose own entity name shares no distinctive word with any of
+the original search terms carries a "possibly unrelated to search"
+flag -- catching the real, repeated pattern of an entity surfacing
+only via a generic keyword collision, not an actual connection. Cards
+whose entity names normalize to the same bare company name (legal
+suffixes and trailing state-code suffixes stripped) cross-reference
+each other with a "Possibly the same entity as: ..." note instead of
+being merged -- deliberately just a note: a live scan during this
+project's own development flagged a UK "WELLS FARGO LTD" shell company
+(mail-drop address, nominee director) alongside the real Wells Fargo &
+Company, and silently merging same-named cards would have hidden that
+brand-impersonation finding inside the real company's card. A
+"Findings by person" panel lists every officer/director/trustee named
+on 2+ entities alongside every entity they're linked to, and a
+client-side filter box above the cards narrows by substring match
+against each card's name and evidence with no server round-trip.
 --graph-csv writes the same nodes/edges as a single denormalized
 edge-list CSV (each endpoint's label/type included directly on the
 row), readable in a spreadsheet or importable into a dedicated
@@ -1016,6 +1040,42 @@ exclusive with --diff/--watch/--fail-on/--webhook (none of
 which make sense when there's no single run to diff/watch/gate on);
 --limit/--cache-ttl/--exclude/--exclude-file still apply to every
 search submitted through the form.
+Every per-name-scoped screen (sanctions, ICIJ, SAM.gov, disqualified
+directors, PEP, domain age, Certificate Transparency, EDGAR full-text,
+GDELT, CourtListener, OpenFEC, USAspending, The Gazette) and LittleSis's
+gatherer carry their own circuit breaker: after 3 consecutive failures
+against that source in one scan, it trips and every remaining check
+against it is skipped instead of separately paying the full
+retry-with-backoff cost on each one -- calibrated against two real,
+live-observed failure modes (OpenFEC's shared DEMO_KEY pool exhausting
+mid-scan, ICIJ 500ing on every query during a live outage). Every
+report then carries a source-health summary distinguishing two
+different reasons a source came back empty: Degraded (the circuit
+breaker tripped -- likely a live outage or rate limit, so whatever it
+didn't find is a real gap, not a confirmed absence) versus Skipped (no
+API key configured -- routine, not an error). Shown in the terminal
+report, --summary/--json (sourceHealth.degraded/.skipped), and the HTML
+report alike.
+--fast skips the three sources confirmed live, repeatedly, to dominate
+a multi-term scan's wall-clock time -- GDELT's 5-second per-request
+rate limit, CourtListener's 5-requests-a-minute cap even authenticated,
+and OpenFEC's easily-exhausted shared DEMO_KEY pool -- for a quicker
+first pass; run again later without --fast to fill in the rest
+(--cache-ttl lets every other source's already-fetched results be
+reused instead of re-fetched). Cut a real Wells Fargo scan from 200+
+seconds to about 34.
+--retry-failed-sources <path> re-runs only the sources whose source
+health showed degraded (see above) in a previous --output --json report
+at that path, and merges the fresh results into it -- instead of a full
+re-scan of every source, including the ones that already succeeded.
+Ignores any <query>/--input-file given, using that report's own
+queries instead; mutually exclusive with --batch/--serve/--watch/
+--diff. The merge only drops and rebuilds that source's own indicators;
+every structural indicator (shared_person, shared_address,
+convergent_risk, and the rest of risk.Assess's own output) is
+recomputed from the merged entity set rather than carried over stale,
+and entities are merged by their same "source: name (id)" label so
+nothing already found is lost.
 --top <n> shows only the <n> highest-weight indicators (already sorted
 highest-first) instead of the full list, noting how many were hidden --
 useful when a large scan turns up dozens of low-weight indicators and

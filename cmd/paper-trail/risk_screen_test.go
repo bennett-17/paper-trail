@@ -141,6 +141,50 @@ func TestScreenCertificateTransparencyNoWebsitesReturnsNothing(t *testing.T) {
 	}
 }
 
+// TestScreenCertificateTransparencyCircuitBreakerStopsAfterThreshold
+// is the wiring-level proof for the circuit breaker pattern applied
+// identically across every per-item screen in this file: once a source
+// fails circuitBreakerThreshold times in a row, the screen stops
+// calling it for the rest of the run (no more requests reach the
+// server) and emits exactly one trip note, not one per skipped item.
+func TestScreenCertificateTransparencyCircuitBreakerStopsAfterThreshold(t *testing.T) {
+	var requests int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	client := newTestCrtshClient(t, srv)
+
+	// 5 distinct entities/domains -- well more than circuitBreakerThreshold
+	// (3), so the breaker has room to trip partway through and this test
+	// can confirm the remaining domains are genuinely skipped, not just
+	// that the first few fail.
+	var entities []risk.Entity
+	for i := 1; i <= 5; i++ {
+		e := risk.NewEntity("edgar", fmt.Sprintf("%d", i), fmt.Sprintf("Entity %d", i), nil, nil)
+		e.Websites = []string{fmt.Sprintf("https://entity-%d.com", i)}
+		entities = append(entities, e)
+	}
+
+	_, notes := screenCertificateTransparency(client, entities, newProgressReporter(io.Discard))
+
+	if requests != circuitBreakerThreshold {
+		t.Errorf("server received %d requests, want exactly %d (breaker should stop further calls once tripped)", requests, circuitBreakerThreshold)
+	}
+	tripCount := 0
+	for _, n := range notes {
+		if strings.Contains(n, circuitBreakerNoteSuffix) {
+			tripCount++
+		}
+	}
+	if tripCount != 1 {
+		t.Errorf("got %d trip notes in %v, want exactly 1", tripCount, notes)
+	}
+}
+
 func TestWebsiteHostStripsSchemeAndWWW(t *testing.T) {
 	cases := map[string]string{
 		"https://www.example.org/": "example.org",

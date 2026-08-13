@@ -1,91 +1,61 @@
-// Command smoketest validates internal/edgar against the LIVE SEC EDGAR
-// API. It's intentionally kept out of `go test`: automated tests run
-// offline against recorded fixtures (see internal/edgar/*_test.go), while
-// this hits real SEC endpoints to confirm nothing has drifted (field
-// names, Atom feed title format, etc.) since the client was written.
+// Command smoketest validates paper-trail's live-API clients against
+// their real, live third-party APIs -- not the recorded fixtures
+// internal/*/​*_test.go run offline against. It's intentionally kept
+// out of `go test`: this hits real endpoints (SEC EDGAR, LittleSis,
+// OpenFEC, USAspending.gov, The Gazette) to confirm nothing has drifted
+// (field names, response shapes, etc.) since each client was written.
 //
-// Run it yourself, don't wire it into CI on a schedule — SEC asks that
-// automated tools stay well under their rate limits, and this is meant
-// for occasional manual verification, not a heartbeat check.
+// Run it yourself, don't wire it into CI on a schedule -- several of
+// these APIs (SEC in particular) ask that automated tools stay well
+// under their rate limits, and this is meant for occasional manual
+// verification, not a heartbeat check.
 //
 // Usage:
 //
+//	go run ./cmd/smoketest <source> <query>
+//
+// where <source> is one of: edgar, littlesis, openfec, usaspending, gazette
+//
 //	export EDGAR_USER_AGENT="Your Name your.email@example.com"
-//	go run ./cmd/smoketest AAPL
+//	go run ./cmd/smoketest edgar AAPL
+//	go run ./cmd/smoketest littlesis "Wells Fargo"
+//	go run ./cmd/smoketest openfec "Jane Doe"
+//	go run ./cmd/smoketest usaspending "Wells Fargo"
+//	go run ./cmd/smoketest gazette "Wells Fargo"
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/envfile"
 )
+
+// sources maps each supported <source> argument to the function that
+// runs its live smoketest. A plain map keeps main() itself a thin
+// dispatcher -- each source's own file (edgar.go, littlesis.go, ...)
+// owns its client calls, output, and drift checks independently.
+var sources = map[string]func(query string) error{
+	"edgar":       runEDGAR,
+	"littlesis":   runLittleSis,
+	"openfec":     runOpenFEC,
+	"usaspending": runUSASpending,
+	"gazette":     runGazette,
+}
 
 func main() {
 	_ = envfile.Load(".env")
 
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: go run ./cmd/smoketest <ticker-or-company-name>")
+	if len(os.Args) != 3 || sources[os.Args[1]] == nil {
+		fmt.Println("Usage: go run ./cmd/smoketest <source> <query>")
+		fmt.Println("  <source> is one of: edgar, littlesis, openfec, usaspending, gazette")
 		os.Exit(1)
 	}
-	query := os.Args[1]
+	source, query := os.Args[1], os.Args[2]
 
-	client, err := edgar.NewClient("")
-	if err != nil {
+	if err := sources[source](query); err != nil {
 		fmt.Println("ERROR:", err)
 		os.Exit(1)
 	}
-
-	fmt.Printf("Resolving %q...\n", query)
-	cik, err := client.ResolveCIK(query)
-	if err != nil {
-		fmt.Println("ERROR:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("  -> CIK %s\n", cik)
-
-	fmt.Println("Fetching company profile...")
-	company, err := client.GetCompany(cik)
-	if err != nil {
-		fmt.Println("ERROR:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("  -> %s (%s)\n", company.Name, company.SICDescription)
-	names := make([]string, 0, len(company.FormerNames))
-	for _, fn := range company.FormerNames {
-		names = append(names, fn.Name)
-	}
-	fmt.Printf("  -> Former names: %v\n", names)
-
-	fmt.Println("Fetching recent 10-K filings...")
-	filings, err := client.GetFilings(cik, "10-K", 3)
-	if err != nil {
-		fmt.Println("ERROR:", err)
-		os.Exit(1)
-	}
-	for _, f := range filings {
-		fmt.Printf("  -> %s filed %s: %s\n", f.Form, f.FilingDate, f.IndexURL())
-	}
-
-	fmt.Println("Fetching insider (Form 4) relationships...")
-	rels, err := client.GetInsiderRelationships(cik, company.Name, 50)
-	if err != nil {
-		fmt.Println("ERROR:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("  -> Found %d insider-filer relationships\n", len(rels))
-	for i, r := range rels {
-		if i >= 5 {
-			break
-		}
-		fmt.Printf("     - %s (CIK %s)\n", r.TargetName, r.TargetCIK)
-	}
-	if len(rels) == 0 {
-		fmt.Println("  !! No relationships parsed. This likely means SEC's " +
-			"Atom title format has changed — check edgar.titleRE against " +
-			"the raw feed.")
-	}
-
 	fmt.Println("\nSmoketest completed without errors.")
 }

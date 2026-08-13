@@ -120,6 +120,16 @@ type riskReportJSON struct {
 	// collection. Zero (the default, omitted) unless --min-corroboration
 	// was set and actually filtered something out.
 	HiddenCorroborations int `json:"hiddenCorroborations,omitempty"`
+	// SourceHealth is parsed from Notes at report-construction time
+	// (see parseSourceHealth) -- not a separate signal gathered
+	// alongside everything else, just a plain-language summary of the
+	// same notes every report already carries, split into "degraded"
+	// (a circuit breaker tripped -- likely a live outage or rate limit,
+	// a real gap worth re-running later) versus "skipped" (no
+	// credential configured, routine and expected). Always present in
+	// JSON output (a struct's own omitempty is a no-op in
+	// encoding/json), just with both lists empty on a clean run.
+	SourceHealth sourceHealth `json:"sourceHealth"`
 }
 
 // riskReportDiff summarizes what changed between a previous risk
@@ -595,6 +605,7 @@ type riskSummaryJSON struct {
 	IndicatorCount     int             `json:"indicatorCount"`
 	HiddenIndicators   int             `json:"hiddenIndicators,omitempty"`
 	ExcludedIndicators int             `json:"excludedIndicators,omitempty"`
+	SourceHealth       sourceHealth    `json:"sourceHealth"`
 	Diff               *riskReportDiff `json:"diff,omitempty"`
 }
 
@@ -613,6 +624,7 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 			IndicatorCount:     len(report.Score.Indicators),
 			HiddenIndicators:   report.HiddenIndicators,
 			ExcludedIndicators: report.ExcludedIndicators,
+			SourceHealth:       report.SourceHealth,
 			Diff:               diff,
 		})
 		return
@@ -626,6 +638,9 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 	}
 	if report.ExcludedIndicators > 0 {
 		extras = append(extras, fmt.Sprintf("%d excluded", report.ExcludedIndicators))
+	}
+	if len(report.SourceHealth.Degraded) > 0 {
+		extras = append(extras, fmt.Sprintf("%d source(s) degraded: %s", len(report.SourceHealth.Degraded), strings.Join(report.SourceHealth.Degraded, ", ")))
 	}
 	if diff != nil {
 		extras = append(extras, fmt.Sprintf("vs baseline: %d->%d, %d new indicator(s)", diff.ScoreBefore, diff.ScoreAfter, len(diff.NewIndicators)))
@@ -866,7 +881,15 @@ func applyConfigFileDefaults(fs *flag.FlagSet, explicitlySet map[string]bool, pa
 // independent, un-cross-referenced score). Every source is
 // best-effort: a missing credential or a failed/empty lookup is
 // recorded as a note and skipped, never fatal.
-func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string, score risk.Score) {
+// gatherAndScore's filter parameter restricts which sources actually
+// run -- nil (the zero value every existing caller passes) runs
+// everything, unchanged from before this parameter existed. See
+// sourceFilter's own doc comment for the two features built on this:
+// --fast (a fixed skip-list) and --retry-failed-sources (a computed
+// only-list). A source excluded by filter still counts toward
+// progress's total units and completes instantly, so percent-complete
+// still reaches 100% consistently whether or not a filter is active.
+func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter, filter *sourceFilter) (entities []risk.Entity, notes []string, score risk.Score) {
 	var extra []risk.Indicator
 	note := func(source, format string, a ...any) {
 		notes = append(notes, fmt.Sprintf("%s: %s", source, fmt.Sprintf(format, a...)))
@@ -947,55 +970,87 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	var wg sync.WaitGroup
 
 	if edgarClient != nil {
+		if filter.allows("SEC EDGAR") {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer progress.completeUnit()
+				edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, limit, cache, cacheTTL, progress)
+			}()
+		} else {
+			progress.completeUnit()
+		}
+	}
+	if filter.allows("IRS Form 990") {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer progress.completeUnit()
-			edgarEntities, edgarExtra, edgarNotes = gatherEDGAREntities(edgarClient, queries, limit, cache, cacheTTL, progress)
+			npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, limit, cache, cacheTTL, progress)
 		}()
+	} else {
+		progress.completeUnit()
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer progress.completeUnit()
-		npEntities, npExtra, npNotes = gatherNonprofitEntities(queries, limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer progress.completeUnit()
-		acncEntities, acncNotes = gatherACNCEntities(queries, limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer progress.completeUnit()
-		gleifEntities, gleifExtra, gleifNotes = gatherGLEIFEntities(queries, limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer progress.completeUnit()
-		ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer progress.completeUnit()
-		chDirectEntities, chDirectExtra, chDirectNotes = gatherCompaniesHouseEntities(chClient, queries, limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer progress.completeUnit()
-		nzEntities, nzExtra, nzNotes = gatherNZBNEntities(nzClient, queries, limit, cache, cacheTTL, progress)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer progress.completeUnit()
-		lsEntities, lsNotes = gatherLittleSisEntities(queries, limit, cache, cacheTTL, progress)
-	}()
+	if filter.allows("ACNC (Australia)") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer progress.completeUnit()
+			acncEntities, acncNotes = gatherACNCEntities(queries, limit, cache, cacheTTL, progress)
+		}()
+	} else {
+		progress.completeUnit()
+	}
+	if filter.allows("GLEIF") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer progress.completeUnit()
+			gleifEntities, gleifExtra, gleifNotes = gatherGLEIFEntities(queries, limit, cache, cacheTTL, progress)
+		}()
+	} else {
+		progress.completeUnit()
+	}
+	if filter.allows("UK Charity Commission") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer progress.completeUnit()
+			ukEntities, ukExtra, ukNotes = gatherUKCharityEntities(chClient, queries, limit, cache, cacheTTL, progress)
+		}()
+	} else {
+		progress.completeUnit()
+	}
+	if filter.allows("Companies House") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer progress.completeUnit()
+			chDirectEntities, chDirectExtra, chDirectNotes = gatherCompaniesHouseEntities(chClient, queries, limit, cache, cacheTTL, progress)
+		}()
+	} else {
+		progress.completeUnit()
+	}
+	if filter.allows("NZBN") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer progress.completeUnit()
+			nzEntities, nzExtra, nzNotes = gatherNZBNEntities(nzClient, queries, limit, cache, cacheTTL, progress)
+		}()
+	} else {
+		progress.completeUnit()
+	}
+	if filter.allows("LittleSis") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer progress.completeUnit()
+			lsEntities, lsNotes = gatherLittleSisEntities(queries, limit, cache, cacheTTL, progress)
+		}()
+	} else {
+		progress.completeUnit()
+	}
 	wg.Wait()
 
 	entities = append(entities, edgarEntities...)
@@ -1038,96 +1093,68 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes, ctNotes, clNotes, fecNotes, usaNotes, gzNotes []string
 	var wg2 sync.WaitGroup
 
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	// phase2 registers one Phase-2 screen, gated by filter under its own
+	// canonical source name (matching that screen's own note prefix, so
+	// filtering, source-health parsing, and progress output all agree
+	// on one name per source). A source filter excludes still counts
+	// toward progress's total units and completes instantly.
+	phase2 := func(source string, fn func()) {
+		if !filter.allows(source) {
+			progress.completeUnit()
+			return
+		}
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			defer progress.completeUnit()
+			fn()
+		}()
+	}
+	phase2("Sanctions screen", func() {
 		usExtra, usNotes = screenUSSanctions(queries, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("UK sanctions screen", func() {
 		ukSanctionsExtra, ukSanctionsNotes = screenUKSanctions(queries, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("UN sanctions screen", func() {
 		unExtra, unNotes = screenUNSanctions(queries, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("Companies House", func() {
 		dqExtra, dqNotes = screenDisqualifiedDirectors(chClient, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("SEC EDGAR full-text", func() {
 		ftExtra, ftNotes = screenEDGARFullTextMentions(edgarClient, queries, entities, limit, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("ICIJ Offshore Leaks Database", func() {
 		icijExtra, icijNotes = screenICIJOffshoreLeaks(queries, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("GDELT", func() {
 		gdeltExtra, gdeltNotes = screenGDELTMentions(queries, limit, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("SAM.gov Exclusions", func() {
 		samExtra, samNotes = screenSAMExclusions(queries, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("Wikidata", func() {
 		pepExtra, pepNotes = screenPoliticallyExposedPersons(entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("RDAP", func() {
 		domainExtra, domainNotes = screenDomainAge(entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("Certificate Transparency", func() {
 		ctExtra, ctNotes = screenCertificateTransparency(ctClient, entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("CourtListener", func() {
 		clExtra, clNotes = screenCourtListener(clClient, queries, limit, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("OpenFEC", func() {
 		fecExtra, fecNotes = screenOpenFECContributions(entities, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("USAspending.gov", func() {
 		usaExtra, usaNotes = screenUSASpendingAwards(queries, limit, progress)
-	}()
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		defer progress.completeUnit()
+	})
+	phase2("The Gazette", func() {
 		gzExtra, gzNotes = screenGazetteInsolvencyNotices(queries, entities, limit, progress)
-	}()
+	})
 	wg2.Wait()
 
 	extra = append(extra, usExtra...)
@@ -1206,7 +1233,7 @@ func runRiskBatch(queries []string, limit int, cache *riskcache.Cache, cacheTTL 
 		if progress != nil {
 			progress.report("batch", "entity %d/%d: %q", i+1, len(queries), query)
 		}
-		entities, _, score := gatherAndScore([]string{query}, limit, cache, cacheTTL, progress)
+		entities, _, score := gatherAndScore([]string{query}, limit, cache, cacheTTL, progress, nil)
 		progress.finish()
 		score, _ = excludeIndicators(score, excludeTerms)
 		top := ""
@@ -1305,6 +1332,8 @@ func runRisk(args []string) {
 	watch := fs.Duration("watch", 0, "re-run this scan every this-long, forever, until interrupted (Ctrl+C) -- each run is automatically diffed against the previous one (no need to also pass --diff) and rewritten to the same --output/--json/--graph/etc. destinations. Minimum 1m, to stay polite to the public sources being queried. Mutually exclusive with --fail-on (a continuous monitor shouldn't exit the process); combine with --webhook instead to get alerted only when a run's diff shows new entities/indicators since the last check")
 	batch := fs.Bool("batch", false, "score every <query>/--input-file entry independently instead of cross-referencing them together -- one scorecard row per entity (query, entities found, score, confidence, indicator count, top indicator) written as CSV (or a JSON array with --json) to --output/stdout, for screening a list of vendors/donors/grantees where you want N separate verdicts, not one combined report. Mutually exclusive with --diff/--watch/--fail-on/--webhook (all assume a single overall score); --top/--min-weight/--indicator/--min-corroboration/--summary/--graph/--html/--graph-csv/--graph-graphml/--entities-csv are ignored in this mode")
 	servePort := fs.String("serve", "", "start a local web server at http://127.0.0.1:<port> (always loopback-only, regardless of what's passed) with a search form instead of running one scan -- type one name per line and get the same HTML report --report-html writes to a file, rendered in the browser instead, one independent scan per search. Runs until interrupted (Ctrl+C). Takes no <query>/--input-file/--batch/--diff/--watch/--fail-on/--webhook -- --limit/--cache-ttl/--exclude/--exclude-file still apply to every search")
+	fast := fs.Bool("fast", false, "skip the sources confirmed slowest in real use -- OpenFEC, CourtListener, and GDELT -- for a quicker first pass; run again later without --fast to fill in the rest (--cache-ttl lets every other source's already-fetched results be reused instead of re-fetched)")
+	retryFailedPath := fs.String("retry-failed-sources", "", "re-run only the sources whose circuit breaker tripped (see the source-health summary) in a previous --output --json report at this path, and merge the results into it -- instead of a full re-scan of every source, including the ones that already succeeded. Ignores any <query>/--input-file given; uses that report's own queries. Mutually exclusive with --batch/--serve/--watch/--diff")
 	flagArgs, positional := splitPositional(fs, args)
 	fs.Parse(flagArgs)
 
@@ -1320,7 +1349,7 @@ func runRisk(args []string) {
 		}
 	}
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
 
 	if *servePort != "" && (len(positional) > 0 || *inputFile != "" || *batch) {
 		fmt.Fprintln(os.Stderr, "Error: --serve takes no <query>/--input-file/--batch -- queries come from the search form in the browser instead")
@@ -1328,6 +1357,10 @@ func runRisk(args []string) {
 	}
 	if *servePort != "" && (*diffPath != "" || *watch != 0 || *failOn != "" || *webhookURL != "") {
 		fmt.Fprintln(os.Stderr, "Error: --serve is mutually exclusive with --diff/--watch/--fail-on/--webhook -- it never completes a single run to diff/watch/gate on")
+		os.Exit(1)
+	}
+	if *retryFailedPath != "" && (*batch || *servePort != "" || *watch != 0 || *diffPath != "") {
+		fmt.Fprintln(os.Stderr, "Error: --retry-failed-sources is mutually exclusive with --batch/--serve/--watch/--diff")
 		os.Exit(1)
 	}
 
@@ -1340,7 +1373,7 @@ func runRisk(args []string) {
 		}
 		queries = append(queries, fromFile...)
 	}
-	if len(queries) < 1 && *servePort == "" {
+	if len(queries) < 1 && *servePort == "" && *retryFailedPath == "" {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
 	}
@@ -1410,6 +1443,54 @@ func runRisk(args []string) {
 		return
 	}
 
+	// --retry-failed-sources loads its previous report and source list
+	// up front too, same fail-fast reasoning as --diff above -- and
+	// replaces queries entirely with that report's own, since a retry
+	// only makes sense against the exact search that produced it.
+	var retryPrev *riskReportJSON
+	var retryFilter *sourceFilter
+	if *retryFailedPath != "" {
+		data, err := os.ReadFile(*retryFailedPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --retry-failed-sources %q: %v\n", *retryFailedPath, err)
+			os.Exit(1)
+		}
+		var r riskReportJSON
+		if err := json.Unmarshal(data, &r); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --retry-failed-sources %q is not a valid risk --json report: %v\n", *retryFailedPath, err)
+			os.Exit(1)
+		}
+		health := parseSourceHealth(r.Notes)
+		if len(health.Degraded) == 0 {
+			fmt.Fprintln(os.Stderr, "Nothing to retry: no source in that report shows a tripped circuit breaker (see its source-health summary).")
+			os.Exit(0)
+		}
+		if !*quiet {
+			fmt.Fprintf(os.Stderr, "Retrying %d degraded source(s): %s\n", len(health.Degraded), strings.Join(health.Degraded, ", "))
+		}
+		only := make(map[string]bool, len(health.Degraded))
+		for _, s := range health.Degraded {
+			only[s] = true
+		}
+		retryPrev = &r
+		retryFilter = &sourceFilter{only: only}
+		queries = r.Queries
+	}
+
+	// --fast skips a fixed list of sources confirmed slowest in real
+	// use (see fastModeSkipSources); mutually exclusive with
+	// --retry-failed-sources's own filter, since a retry is already
+	// scoped to a specific (usually small) set of sources -- if one of
+	// those happens to be a --fast source, retrying it is exactly the
+	// point.
+	var filter *sourceFilter
+	switch {
+	case retryFilter != nil:
+		filter = retryFilter
+	case *fast:
+		filter = &sourceFilter{skip: fastModeSkipSources}
+	}
+
 	// Everything from here to the end of the function is one scan --
 	// with --watch set, this whole block repeats forever (until
 	// interrupted) rather than running once. previousReport is
@@ -1424,8 +1505,40 @@ func runRisk(args []string) {
 			progress = newProgressReporter(os.Stderr)
 		}
 
-		entities, notes, score := gatherAndScore(queries, *limit, cache, cacheTTL, progress)
+		entities, notes, score := gatherAndScore(queries, *limit, cache, cacheTTL, progress, filter)
 		progress.finish()
+
+		// Merge a --retry-failed-sources run's fresh (but partial --
+		// only the retried sources actually ran) results into the
+		// previous report it started from: entities from untouched
+		// sources are kept, entities from retried sources are replaced
+		// with their fresh copies, screen-sourced indicators from
+		// untouched sources are carried forward untouched, and every
+		// structural indicator (shared_person and the rest) is
+		// recomputed fresh from the merged entity pool -- never carried
+		// forward from either run, since a partial run's own structural
+		// indicators are necessarily incomplete. See carryForwardIndicators's
+		// own doc comment for the one disclosed imprecision
+		// (jurisdiction_risk when only one of the two sanctions screens
+		// is retried).
+		if retryPrev != nil {
+			mergedEntities := mergeEntitiesByLabel(retryPrev.Entities, entities)
+			carried := carryForwardIndicators(retryPrev.Score.Indicators, retryFilter.only)
+			fresh := freshScreenIndicators(score.Indicators)
+			combinedExtra := append(carried, fresh...)
+
+			keptNotes := make([]string, 0, len(retryPrev.Notes)+len(notes))
+			for _, n := range retryPrev.Notes {
+				if source, _, ok := strings.Cut(n, ": "); !ok || !retryFilter.only[source] {
+					keptNotes = append(keptNotes, n)
+				}
+			}
+			keptNotes = append(keptNotes, notes...)
+
+			entities = mergedEntities
+			notes = keptNotes
+			score = risk.Assess(mergedEntities, combinedExtra)
+		}
 
 		// --exclude/--exclude-file apply before everything else below,
 		// including --diff: unlike --top/--min-weight/--indicator, which
@@ -1457,7 +1570,7 @@ func runRisk(args []string) {
 		hiddenIndicators := hiddenByFilter + hiddenByTop
 		score, hiddenCorroborations := filterCorroborations(score, *minCorroboration)
 
-		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, HiddenCorroborations: hiddenCorroborations}
+		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, HiddenCorroborations: hiddenCorroborations, SourceHealth: parseSourceHealth(notes)}
 
 		var w io.Writer = os.Stdout
 		if *output != "" {
@@ -1495,6 +1608,14 @@ func runRisk(args []string) {
 				for _, n := range notes {
 					fmt.Fprintf(w, "  - %s\n", n)
 				}
+			}
+
+			health := parseSourceHealth(notes)
+			if len(health.Degraded) > 0 {
+				fmt.Fprintf(w, "\nSource health -- degraded (repeatedly failed mid-scan, likely a live outage or rate limit; a real gap, not a confirmed absence): %s\n", strings.Join(health.Degraded, ", "))
+			}
+			if len(health.Skipped) > 0 {
+				fmt.Fprintf(w, "Source health -- skipped (no API key configured): %s\n", strings.Join(health.Skipped, ", "))
 			}
 
 			if excludedCount > 0 {
