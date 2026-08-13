@@ -149,6 +149,122 @@ func TestDiffSourceLabelFallsBackForWatchMode(t *testing.T) {
 	}
 }
 
+// TestGroupIndicatorsByEntitySumsWeightAndSorts guards the core
+// grouping behavior the entity-centric HTML view depends on: each
+// entity's card totals the weight of every indicator naming it, and
+// cards come back sorted by that total descending.
+func TestGroupIndicatorsByEntitySumsWeightAndSorts(t *testing.T) {
+	indicators := []risk.Indicator{
+		{Code: "shared_address", Weight: 1, Entities: []string{"A"}},
+		{Code: "shared_person", Weight: 3, Entities: []string{"A"}},
+		{Code: "sanctions_match", Weight: 5, Entities: []string{"B"}},
+	}
+	cards := groupIndicatorsByEntity(indicators)
+	if len(cards) != 2 {
+		t.Fatalf("got %d cards, want 2", len(cards))
+	}
+	if cards[0].Label != "B" || cards[0].TotalWeight != 5 {
+		t.Errorf("cards[0] = %+v, want B at total weight 5 (sorted first)", cards[0])
+	}
+	if cards[1].Label != "A" || cards[1].TotalWeight != 4 {
+		t.Errorf("cards[1] = %+v, want A at total weight 4 (1+3 summed)", cards[1])
+	}
+	if len(cards[1].Indicators) != 2 {
+		t.Errorf("card A has %d indicators, want 2", len(cards[1].Indicators))
+	}
+}
+
+// TestGroupIndicatorsByEntityDuplicatesMultiEntityIndicators guards
+// the deliberate choice to show a shared_person-style indicator (one
+// naming several entities at once) on every one of those entities'
+// cards, not just the first -- each entity is independently a lead
+// worth seeing it from.
+func TestGroupIndicatorsByEntityDuplicatesMultiEntityIndicators(t *testing.T) {
+	indicators := []risk.Indicator{
+		{Code: "shared_person", Weight: 3, Entities: []string{"A", "B"}, Evidence: "Jane Doe"},
+	}
+	cards := groupIndicatorsByEntity(indicators)
+	if len(cards) != 2 {
+		t.Fatalf("got %d cards, want 2 (one per named entity)", len(cards))
+	}
+	for _, c := range cards {
+		if len(c.Indicators) != 1 || c.Indicators[0].Evidence != "Jane Doe" {
+			t.Errorf("card %q didn't get the shared indicator: %+v", c.Label, c)
+		}
+		if c.TotalWeight != 3 {
+			t.Errorf("card %q TotalWeight = %d, want 3", c.Label, c.TotalWeight)
+		}
+	}
+}
+
+// TestGroupIndicatorsByEntityBreaksTiesAlphabetically guards
+// determinism: two entities with equal total weight must come back in
+// a stable, predictable order rather than depending on Go's
+// unspecified map iteration order.
+func TestGroupIndicatorsByEntityBreaksTiesAlphabetically(t *testing.T) {
+	indicators := []risk.Indicator{
+		{Code: "shared_address", Weight: 1, Entities: []string{"Zebra Corp"}},
+		{Code: "shared_address", Weight: 1, Entities: []string{"Acme Corp"}},
+	}
+	cards := groupIndicatorsByEntity(indicators)
+	if len(cards) != 2 || cards[0].Label != "Acme Corp" || cards[1].Label != "Zebra Corp" {
+		t.Errorf("cards = %+v, want [Acme Corp, Zebra Corp] alphabetically on a weight tie", cards)
+	}
+}
+
+func TestOtherEntitiesExcludesSelf(t *testing.T) {
+	ind := risk.Indicator{Entities: []string{"A", "B", "C"}}
+	got := otherEntities(ind, "B")
+	want := []string{"A", "C"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("otherEntities = %v, want %v", got, want)
+	}
+}
+
+func TestOtherEntitiesEmptyForSingleEntityIndicator(t *testing.T) {
+	ind := risk.Indicator{Entities: []string{"A"}}
+	if got := otherEntities(ind, "A"); len(got) != 0 {
+		t.Errorf("otherEntities = %v, want empty (nothing else to link to)", got)
+	}
+}
+
+// TestWriteReportHTMLRendersEntityCards is the integration check: the
+// actual rendered page groups indicators under a per-entity card and
+// surfaces the "also linked to" cross-reference for a multi-entity
+// indicator.
+func TestWriteReportHTMLRendersEntityCards(t *testing.T) {
+	report := riskReportJSON{
+		Queries: []string{"Example Corp"},
+		Score: risk.Score{
+			Total:      8,
+			Confidence: "MEDIUM",
+			Indicators: []risk.Indicator{
+				{Code: "shared_person", Description: "Same officer at two entities", Weight: 3, Entities: []string{"edgar: Example Corp (0001)", "edgar: Sibling Co (0002)"}, Evidence: "Jane Doe"},
+			},
+		},
+	}
+
+	path := filepath.Join(t.TempDir(), "report.html")
+	if err := writeReportHTML(report, nil, "", path); err != nil {
+		t.Fatalf("writeReportHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	html := string(data)
+
+	if !strings.Contains(html, `class="entity-card`) {
+		t.Error("expected an entity-card element in the rendered output")
+	}
+	if !strings.Contains(html, "Findings by entity") {
+		t.Error("expected the entity-centric section heading")
+	}
+	if !strings.Contains(html, "Also linked to: edgar: Sibling Co (0002)") {
+		t.Error("expected the Example Corp card to cross-reference Sibling Co as the other named entity")
+	}
+}
+
 func TestWeightClassThresholds(t *testing.T) {
 	cases := []struct {
 		weight int

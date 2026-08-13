@@ -3,6 +3,7 @@ package main
 import (
 	"html/template"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/bennett-17/paper-trail/internal/risk"
@@ -19,10 +20,79 @@ type reportHTMLView struct {
 	Entities      []risk.Entity
 	Notes         []string
 	Score         risk.Score
+	EntityCards   []entityCard
 	ExcludedCount int
 	Diff          *riskReportDiff
 	DiffSource    string
 	GeneratedAt   string
+}
+
+// entityCard groups every indicator naming one entity label, so the
+// HTML report can render "everything found about X" as a single card
+// instead of the flat weight-sorted list making the reader re-scan the
+// whole report to piece one entity's findings back together (exactly
+// the friction hit by hand -- grouping indicators by entity, summing
+// weight per entity -- while reading a real multi-hundred-entity scan;
+// see groupIndicatorsByEntity).
+type entityCard struct {
+	Label       string
+	TotalWeight int
+	Indicators  []risk.Indicator
+}
+
+// groupIndicatorsByEntity groups indicators (already weight-sorted by
+// risk.Assess) by every entity label they name. An indicator naming
+// more than one entity (shared_person and friends) appears on every
+// one of those entities' cards, not just the first -- each entity is
+// independently a lead worth seeing it from, the same "duplicated
+// intentionally" reasoning risk.Score's own Corroborations already
+// applies to entity pairs. Cards are sorted by total weight (the sum
+// of every indicator's weight on that card) descending, breaking ties
+// alphabetically by label so output stays deterministic run to run.
+// Indicators within a card keep the order they arrived in, which is
+// already weight-descending.
+func groupIndicatorsByEntity(indicators []risk.Indicator) []entityCard {
+	byLabel := make(map[string]*entityCard)
+	var order []string
+	for _, ind := range indicators {
+		for _, label := range ind.Entities {
+			card, ok := byLabel[label]
+			if !ok {
+				card = &entityCard{Label: label}
+				byLabel[label] = card
+				order = append(order, label)
+			}
+			card.Indicators = append(card.Indicators, ind)
+			card.TotalWeight += ind.Weight
+		}
+	}
+
+	cards := make([]entityCard, 0, len(order))
+	for _, label := range order {
+		cards = append(cards, *byLabel[label])
+	}
+	sort.Slice(cards, func(i, j int) bool {
+		if cards[i].TotalWeight != cards[j].TotalWeight {
+			return cards[i].TotalWeight > cards[j].TotalWeight
+		}
+		return cards[i].Label < cards[j].Label
+	})
+	return cards
+}
+
+// otherEntities returns ind's named entities minus self -- used by the
+// template so a card for one entity still shows which OTHER entities a
+// multi-entity indicator (e.g. shared_person) also names, instead of
+// silently dropping that context just because it's rendered once per
+// entity now rather than once per indicator.
+func otherEntities(ind risk.Indicator, self string) []string {
+	others := make([]string, 0, len(ind.Entities))
+	for _, e := range ind.Entities {
+		if e != self {
+			others = append(others, e)
+		}
+	}
+	return others
 }
 
 // weightClass mirrors weightColor's thresholds (5+ high, 3+ moderate)
@@ -62,6 +132,7 @@ func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource s
 		Entities:      report.Entities,
 		Notes:         report.Notes,
 		Score:         report.Score,
+		EntityCards:   groupIndicatorsByEntity(report.Score.Indicators),
 		ExcludedCount: report.ExcludedIndicators,
 		Diff:          diff,
 		DiffSource:    diffSource,
@@ -82,6 +153,7 @@ func reportTemplate(name, page string) (*template.Template, error) {
 		"weightClass":     weightClass,
 		"confidenceClass": confidenceClass,
 		"sub":             func(a, b int) int { return a - b },
+		"otherEntities":   otherEntities,
 	}).Parse(page + reportBodyTemplate)
 }
 
@@ -187,6 +259,25 @@ const reportStyle = `<style>
     float: right;
     font-weight: 700;
   }
+  .entity-card {
+    border: 1px solid var(--panel-border);
+    border-left-width: 6px;
+    border-radius: 4px;
+    padding: 12px 14px 4px;
+    margin-bottom: 14px;
+  }
+  .entity-card.sev-high { border-left-color: var(--high); }
+  .entity-card.sev-med { border-left-color: var(--med); }
+  .entity-card.sev-low { border-left-color: var(--low); }
+  .entity-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .entity-card-name { font-weight: 700; font-size: 1.02em; }
+  .entity-card .indicator { margin-bottom: 10px; }
   ul.plain { list-style: none; padding-left: 0; }
   ul.plain li { padding: 3px 0; }
   .corroboration {
@@ -259,14 +350,25 @@ const reportBodyTemplate = `{{define "reportBody"}}
   <div class="meta">{{.Score.ConfidenceReason}}</div>
 </div>
 
-<h2>Indicators</h2>
-{{if .Score.Indicators}}
-{{range .Score.Indicators}}
-<div class="indicator {{weightClass .Weight}}">
-  <span class="weight-tag {{weightClass .Weight}}">+{{.Weight}}</span>
-  <div class="desc">{{.Description}}</div>
-  <div class="field">Entities: {{range $i, $e := .Entities}}{{if $i}}; {{end}}{{$e}}{{end}}</div>
-  <div class="field">Evidence: {{.Evidence}}</div>
+<h2>Findings by entity</h2>
+{{if .EntityCards}}
+<p class="meta">Every entity named by at least one indicator, grouped together and sorted by that entity's own total weight -- so everything found about one entity reads as a single card instead of being scattered across a weight-sorted list.</p>
+{{range .EntityCards}}
+{{$label := .Label}}
+<div class="entity-card {{weightClass .TotalWeight}}">
+  <div class="entity-card-head">
+    <span class="entity-card-name">{{$label}}</span>
+    <span class="weight-tag {{weightClass .TotalWeight}}">+{{.TotalWeight}}</span>
+  </div>
+  {{range .Indicators}}
+  <div class="indicator {{weightClass .Weight}}">
+    <span class="weight-tag {{weightClass .Weight}}">+{{.Weight}}</span>
+    <div class="desc">{{.Description}}</div>
+    {{$others := otherEntities . $label}}
+    {{if $others}}<div class="field">Also linked to: {{range $i, $e := $others}}{{if $i}}; {{end}}{{$e}}{{end}}</div>{{end}}
+    <div class="field">Evidence: {{.Evidence}}</div>
+  </div>
+  {{end}}
 </div>
 {{end}}
 {{else}}
