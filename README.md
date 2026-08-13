@@ -1483,6 +1483,10 @@ go run ./cmd/paper-trail usaspending "Example Corp"
 # via The Gazette -- free, keyless, no registration
 go run ./cmd/paper-trail gazette "Example Name"
 
+# Search the US SAM.gov Exclusions list -- debarred/suspended firms and
+# individuals (requires SAM_GOV_API_KEY -- see Setup)
+go run ./cmd/paper-trail samgov "Example Name"
+
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
 go run ./cmd/paper-trail risk "Example Name"

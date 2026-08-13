@@ -60,6 +60,8 @@ func main() {
 		runUSASpending(os.Args[2:])
 	case "gazette":
 		runGazette(os.Args[2:])
+	case "samgov":
+		runSamgov(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "completion":
@@ -107,6 +109,7 @@ Usage:
   paper-trail openfec <contributor name> [--limit <n>] [--json]
   paper-trail usaspending <recipient name> [--limit <n>] [--json]
   paper-trail gazette <name> [--limit <n>] [--json]
+  paper-trail samgov <name> [--json]
   paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
