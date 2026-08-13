@@ -41,7 +41,7 @@ func runCompaniesHouse(args []string) {
 	exitOnErr(err)
 
 	if *officer != "" {
-		appointments, err := client.GetOfficerAppointments(*officer, *limit)
+		appointments, totalResults, err := client.GetOfficerAppointments(*officer, *limit)
 		exitOnErr(err)
 
 		if *asJSON {
@@ -49,7 +49,11 @@ func runCompaniesHouse(args []string) {
 			return
 		}
 
-		fmt.Printf("%d appointment(s):\n", len(appointments))
+		if totalResults > len(appointments) {
+			fmt.Printf("%d appointment(s) shown (of %d total -- raise --limit to see more):\n", len(appointments), totalResults)
+		} else {
+			fmt.Printf("%d appointment(s):\n", len(appointments))
+		}
 		for _, a := range appointments {
 			status := "current"
 			if a.ResignedOn != "" {

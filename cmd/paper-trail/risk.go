@@ -277,6 +277,7 @@ func excludeIndicators(score risk.Score, terms []string) (risk.Score, int) {
 		return score, 0
 	}
 	kept = risk.RecomputeConvergentRisk(kept)
+	kept = risk.RecomputeEntityCluster(kept)
 	total := 0
 	for _, ind := range kept {
 		total += ind.Weight

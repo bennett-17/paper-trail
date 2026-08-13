@@ -285,6 +285,33 @@ code, just a different final render target.
   framing as officer_appointment_burst -- common in lawful bulk
   formation services, but also how a nominee is unwound, so a lead to
   investigate either way.
+- **mass_nominee_officer**: a different failure mode from the two burst
+  checks above -- not several appointments in one tight window, but an
+  unusually large *total* appointment count register-wide (10 or more,
+  current and former combined), the hallmark of a professional/corporate
+  nominee-director service rather than a time-clustered event. Uses
+  Companies House's own `total_results` count for the officer's full
+  appointment history, not just however many records this project's own
+  `--limit` happens to fetch on one page -- otherwise a real mass
+  nominee (this project's own reference case, cited above, has 540
+  appointments register-wide) would look, from the fetched page alone,
+  identical to someone with only a handful. Routine and often entirely
+  lawful, but also a known technique for obscuring who's actually
+  behind a company, since a professional nominee's own name reveals
+  nothing about who they're acting for.
+- **sanctions_adjacent_officer_change**: each fanned-out officer's own
+  name is separately screened against the UK Sanctions List (OFSI, see
+  below) -- not a duplicate of that screen's usual name-match check, but
+  a check of *timing*: whether their appointment or resignation at
+  another company falls within 90 days of their own OFSI designation
+  date. Motivated by OFAC's 2026 guidance that its long-standing "50%
+  Rule" (an entity 50%+ owned by a blocked person is itself blocked) is
+  "a floor, not a ceiling" -- a designated person's corporate footprint
+  often doesn't simply vanish on the designation date, and ownership or
+  control changes timed close to one are themselves worth a second look.
+  90 days is this project's own first calibration, not a value
+  confirmed live the way the burst windows above are -- OFAC's guidance
+  names the pattern without giving a specific window.
 - **sequential_registration_numbers**: every Companies-House-sourced
   entity in a scan (including ones found only via the officer fan-out
   above) is also cross-referenced by registration number -- fires when
@@ -982,6 +1009,24 @@ does.
   well-documented entity can legitimately rack up several unrelated
   weak hits (say, a shared registered-agent address plus a common
   institutional director) with nothing improper going on.
+- **entity_cluster**: the graph-shaped version of the same idea --
+  instead of one entity converging on 3+ distinct indicator *types*
+  (convergent_risk) or one *pair* sharing 2+ kinds of evidence
+  (Corroborated pairs), this asks how many entities are transitively
+  connected to each other at all, directly or through a chain of
+  intermediate entities. A-B connected via one indicator and B-C via a
+  completely different one still puts A and C in the same network, even
+  though the two of them may never co-occur in any single indicator
+  together -- exactly the shape a purely pairwise view can miss (this
+  project's own live scans have turned up an 11-company web chained
+  together this way through a single nominee director, invisible from
+  any one shared_person hit alone). Fires once per connected network of
+  4 or more entities, naming every member, at a flat weight of 2 --
+  deliberately below convergent_risk's minimum single-entity payout,
+  since "these entities are linked" is weaker per-entity evidence than
+  "this one entity converges on 3+ independent signal types." Common
+  for a large, legitimately multi-subsidiary organization as well as a
+  shell-company network, so it's a map to investigate, not a verdict.
 - Every report also carries a plain LOW/MEDIUM/HIGH confidence read
   next to the numeric score -- deliberately not a pure function of the
   total, since summing many weak signals shouldn't outrank one strong

@@ -572,6 +572,7 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, extra...)
 	indicators = append(indicators, ConvergentRisk(indicators)...)
+	indicators = append(indicators, EntityCluster(indicators)...)
 
 	// Sorted most-significant-first (stable, so indicators of equal
 	// weight keep the order they were computed in above) -- otherwise

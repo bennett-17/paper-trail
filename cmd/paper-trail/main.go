@@ -283,6 +283,27 @@ even more tightly than its appointments do, with four separate
 companies resigning the same officer on the exact same day. Same
 caveat as officer_appointment_burst -- common in lawful bulk formation
 services too, so a lead to investigate rather than proof on its own.
+A different failure mode from either burst check
+(mass_nominee_officer): not several appointments in one tight window,
+but an unusually large TOTAL appointment count register-wide (10 or
+more, current and former combined) -- the hallmark of a professional/
+corporate nominee-director service rather than a time-clustered event.
+Uses Companies House's own total_results count for the officer's full
+history, not just however many records --limit happens to fetch on one
+page, since a real mass nominee (the same real reference service cited
+above has 540 appointments register-wide) would otherwise look
+identical to someone with a handful, purely because of how small
+--limit's default is. Each fanned-out officer's own name is also
+separately screened against the UK Sanctions List (OFSI)
+(sanctions_adjacent_officer_change) -- not a duplicate of the ordinary
+name-match sanctions screen below, but a check of timing: whether an
+appointment or resignation at another company falls within 90 days of
+their own OFSI designation date. Motivated by OFAC's 2026 guidance that
+its long-standing "50% Rule" (an entity 50%+ owned by a blocked person
+is itself blocked) is "a floor, not a ceiling" -- a designated person's
+corporate footprint often doesn't simply vanish the day they're
+designated. 90 days is this project's own first calibration, not a
+value confirmed live the way the burst windows above are.
 Every Companies-House-sourced
 entity in a scan, including ones found only via the officer fan-out
 above, is also cross-referenced by registration number
@@ -865,7 +886,19 @@ distinct converging code, capped at 6, this tool's ceiling), since the
 convergence itself is treated as an independent finding rather than a
 silent side effect of the total; --exclude recomputes it the same way
 it recomputes Corroborations, so removing one of the codes it depended
-on can't leave a stale convergent_risk hit behind. Every
+on can't leave a stale convergent_risk hit behind. The graph-shaped
+version of the same idea (entity_cluster) asks a different question:
+not "does one entity converge on 3+ distinct indicator types" but "how
+many entities are transitively connected to each other at all," even
+through a chain of intermediate entities that never co-occur in any
+single indicator together (A-B via one indicator, B-C via a completely
+different one still puts A and C in one network) -- exactly the shape
+a purely pairwise view of the data can miss. Fires once per connected
+network of 4 or more entities, naming every member, at a flat weight
+of 2 (below convergent_risk's minimum single-entity payout, since
+"these entities are linked" is weaker per-entity evidence); --exclude
+recomputes this one too, for the same stale-hit reason as
+convergent_risk. Every
 report also carries a plain LOW/MEDIUM/HIGH confidence read next to
 the numeric score, so the headline number comes with an at-a-glance
 signal before digging into individual indicators -- deliberately not a

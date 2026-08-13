@@ -1007,7 +1007,18 @@ type appointmentsResponse struct {
 // single officer, identified by the stable OfficerID from an Officer
 // returned by GetOfficers (not a company number). limit caps how many
 // come back (0 uses the API's own default page size).
-func (c *Client) GetOfficerAppointments(officerID string, limit int) ([]Appointment, error) {
+//
+// The second return value is the API's own total_results count -- the
+// officer's TRUE total appointment count register-wide, independent of
+// limit/pagination. This matters because limit is very often small in
+// practice (paper-trail's own --limit defaults to 5, sized for "how
+// many candidates to pull per source per query term," a different
+// concept from "how many appointments does this one already-identified
+// officer hold"): a genuine mass-nominee officer with hundreds of
+// appointments would otherwise look, from len(appointments) alone,
+// exactly like an officer with only limit's worth -- silently
+// undercounting the one case a mass-nominee check most needs to catch.
+func (c *Client) GetOfficerAppointments(officerID string, limit int) (appointments []Appointment, totalResults int, err error) {
 	u := c.BaseURL + "/officers/" + url.PathEscape(officerID) + "/appointments"
 	if limit > 0 {
 		params := url.Values{}
@@ -1016,15 +1027,15 @@ func (c *Client) GetOfficerAppointments(officerID string, limit int) ([]Appointm
 	}
 	body, err := c.get(u)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var resp appointmentsResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, newClientError("parsing officer appointments: %v", err)
+		return nil, 0, newClientError("parsing officer appointments: %v", err)
 	}
 
-	appointments := make([]Appointment, 0, len(resp.Items))
+	appointments = make([]Appointment, 0, len(resp.Items))
 	for _, item := range resp.Items {
 		appointments = append(appointments, Appointment{
 			CompanyName:   item.AppointedTo.CompanyName,
@@ -1035,5 +1046,5 @@ func (c *Client) GetOfficerAppointments(officerID string, limit int) ([]Appointm
 			ResignedOn:    item.ResignedOn,
 		})
 	}
-	return appointments, nil
+	return appointments, resp.TotalResults, nil
 }

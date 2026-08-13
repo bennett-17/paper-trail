@@ -16,6 +16,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/littlesis"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
 	"github.com/bennett-17/paper-trail/internal/nzbn"
+	"github.com/bennett-17/paper-trail/internal/ofsi"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/riskcache"
 	"github.com/bennett-17/paper-trail/internal/ukcharity"
@@ -1372,17 +1373,30 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, currentOfficers []companieshouse.Officer, limit int, entityLabel string, note func(format string, a ...any)) (fannedOutEntities []risk.Entity, extra []risk.Indicator) {
 	fannedOut := map[string]bool{}
 	var hop1Companies []companieshouse.Appointment
+
+	// A second, independent OFSI screen of each hop-1 officer's own
+	// name -- not a duplicate of screenUKSanctions (which also
+	// eventually screens this same name, but only once it's attached
+	// to a fanned-out entity's People list, and only for a plain
+	// name-match uk_sanctions_match). This one asks a different
+	// question those name-match hits never do: did this officer's own
+	// appointment/resignation history change suspiciously close to
+	// their OFSI designation date -- see sanctionsAdjacentOfficerChange.
+	ofsiClient := ofsi.NewClient()
+	var ofsiBreaker circuitBreaker
+
 	for _, o := range currentOfficers {
 		if o.OfficerID == "" {
 			continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
 		}
-		appointments, err := chClient.GetOfficerAppointments(o.OfficerID, limit)
+		appointments, totalAppointments, err := chClient.GetOfficerAppointments(o.OfficerID, limit)
 		if err != nil {
 			note("%s appointments: %v", o.Name, err)
 			continue
 		}
-		// Appointment-burst and resignation-burst checks both reuse
-		// this same fetch -- no extra API call needed for either.
+		// Appointment-burst, resignation-burst, and mass-nominee checks
+		// all reuse this same fetch -- no extra API call needed for any
+		// of them.
 		if desc := appointmentBurst(appointments); desc != "" {
 			extra = append(extra, risk.Indicator{
 				Code:        "officer_appointment_burst",
@@ -1400,6 +1414,46 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 				Entities:    []string{entityLabel},
 				Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
 			})
+		}
+		if count := massNomineeOfficer(totalAppointments); count > 0 {
+			extra = append(extra, risk.Indicator{
+				Code:        "mass_nominee_officer",
+				Description: "An officer of this entity has an unusually large number of appointment records register-wide, current and former combined -- the hallmark of a professional/corporate nominee-director service (the real one this project's officer_appointment_burst indicator cites separately has appointments numbering in the hundreds), a routine and often entirely lawful business model, but also a known technique for obscuring who is actually behind a company, since a professional nominee's own name reveals nothing about who they're acting for",
+				Weight:      2,
+				Entities:    []string{entityLabel},
+				Evidence:    fmt.Sprintf("%s: %d appointments register-wide", o.Name, count),
+			})
+		}
+		if !ofsiBreaker.Skip() {
+			if result, err := ofsiClient.SearchDesignations(o.Name, 5); err != nil {
+				// Deliberately not routed through tripNote/parseSourceHealth
+				// on trip: note (here, chNote) always prepends its own
+				// "Companies House: " prefix, which would make
+				// parseSourceHealth's single-colon-cut misattribute this
+				// as Companies House itself being degraded, when it's
+				// really just this fan-out's own secondary OFSI screen.
+				// The breaker still stops wasting retries on a real
+				// outage; it just doesn't get its own source-health line.
+				note("%s OFSI screen: %v", o.Name, err)
+				ofsiBreaker.Record(err)
+			} else {
+				ofsiBreaker.Record(nil)
+				wantName := risk.NormalizeNameFuzzy(o.Name)
+				for _, hit := range result.Hits {
+					if wantName != "" && risk.NormalizeNameFuzzy(hit.Name) != wantName {
+						continue
+					}
+					if desc := sanctionsAdjacentOfficerChange(appointments, hit); desc != "" {
+						extra = append(extra, risk.Indicator{
+							Code:        "sanctions_adjacent_officer_change",
+							Description: "An officer of this entity, separately matched against the UK Sanctions List (OFSI), had an appointment or resignation at another company within a few months of their own OFSI designation date -- OFAC's own 2026 guidance treats ownership/control changes timed close to a sanctions designation as worth extra scrutiny beyond a simple current-ownership check, since a designated person's corporate footprint often doesn't simply vanish on the designation date. Not proof of anything by itself: a lot of ordinary corporate activity happens to fall within any few-month window",
+							Weight:      4,
+							Entities:    []string{entityLabel},
+							Evidence:    fmt.Sprintf("%s -- %s", desc, hit.Regime),
+						})
+					}
+				}
+			}
 		}
 		for _, appt := range appointments {
 			if appt.ResignedOn != "" || sameCompanyNumber(appt.CompanyNumber, rootCompanyNumber) || fannedOut[appt.CompanyNumber] {
@@ -1430,7 +1484,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 				continue
 			}
 			hop2Officers[o2.OfficerID] = true
-			appointments2, err := chClient.GetOfficerAppointments(o2.OfficerID, limit)
+			appointments2, _, err := chClient.GetOfficerAppointments(o2.OfficerID, limit)
 			if err != nil {
 				note("%s appointments (hop 2) for %s: %v", o2.Name, hop1.CompanyName, err)
 				continue
@@ -1877,6 +1931,95 @@ func resignationBurst(appointments []companieshouse.Appointment) string {
 		dates = append(dates, datedCompany{when: t, number: a.CompanyNumber, name: a.CompanyName})
 	}
 	return burstDescription(dates, "resigned from")
+}
+
+// massNomineeOfficerThreshold is the minimum register-wide appointment
+// count (current and former combined, per GetOfficerAppointments' own
+// total_results -- see massNomineeOfficer) before an officer is flagged
+// as a likely professional/corporate nominee rather than an ordinary
+// individual who happens to sit on a handful of boards. Deliberately
+// well above appointmentBurstThreshold (3 within a week): this is a
+// lifetime-scope signal, not a time-clustered one, and this project's
+// own real reference case -- "Corporate Directors Limited"
+// (officer ID nEggfu04XePBqnRERobPjXjmHGk), cited by appointmentBurst's
+// doc comment -- has 540 appointments register-wide, so 10 is a
+// conservative floor meant to catch the pattern well before it reaches
+// that scale, not a tight fit against it.
+const massNomineeOfficerThreshold = 10
+
+// massNomineeOfficer reports whether totalAppointments (the true
+// register-wide total from GetOfficerAppointments -- deliberately not
+// len(appointments), which paper-trail's own default --limit=5 would
+// otherwise silently truncate to a number far below any real
+// mass-nominee's actual footprint) clears massNomineeOfficerThreshold,
+// returning it as-is for use as the indicator's Evidence count, or 0 if
+// not.
+func massNomineeOfficer(totalAppointments int) int {
+	if totalAppointments < massNomineeOfficerThreshold {
+		return 0
+	}
+	return totalAppointments
+}
+
+// sanctionsAdjacentWindow is how close an officer's own
+// appointment/resignation date must fall to their OFSI designation
+// date before sanctionsAdjacentOfficerChange flags it -- wider than
+// appointmentBurstWindow (7 days) since this asks a different
+// question ("did this person's corporate footprint change around the
+// time they were designated," not "did several companies change in
+// the same tight burst"), so a matter of months, not days, is the
+// relevant timescale. 90 days either side is a starting calibration,
+// not a value confirmed live the way appointmentBurstWindow's 7 days
+// is -- OFAC's own 2026 sham-transactions guidance names the pattern
+// (divestitures timed close to a designation) without giving a
+// specific window, so this is this project's own first approximation.
+const sanctionsAdjacentWindow = 90 * 24 * time.Hour
+
+// sanctionsAdjacentOfficerChange checks every one of one officer's own
+// appointments for an AppointedOn or ResignedOn date falling within
+// sanctionsAdjacentWindow of hit's OFSI DateDesignated, returning a
+// human-readable description of the first such match found, or "" if
+// none. Unparseable dates (on either side) are silently skipped rather
+// than erroring -- same defensive posture as appointmentBurst/
+// resignationBurst -- since a malformed date shouldn't take down the
+// whole check for every other appointment.
+func sanctionsAdjacentOfficerChange(appointments []companieshouse.Appointment, hit ofsi.Hit) string {
+	designated, err := time.Parse("2006-01-02", hit.DateDesignated)
+	if err != nil {
+		return ""
+	}
+	for _, a := range appointments {
+		if t, err := time.Parse("2006-01-02", a.AppointedOn); err == nil {
+			if d := t.Sub(designated); d.Abs() <= sanctionsAdjacentWindow {
+				return fmt.Sprintf("%s: appointed to %s on %s, %s OFSI-designated on %s", hit.Name, a.CompanyName, a.AppointedOn, daysRelative(d), hit.DateDesignated)
+			}
+		}
+		if a.ResignedOn == "" {
+			continue
+		}
+		if t, err := time.Parse("2006-01-02", a.ResignedOn); err == nil {
+			if d := t.Sub(designated); d.Abs() <= sanctionsAdjacentWindow {
+				return fmt.Sprintf("%s: resigned from %s on %s, %s OFSI-designated on %s", hit.Name, a.CompanyName, a.ResignedOn, daysRelative(d), hit.DateDesignated)
+			}
+		}
+	}
+	return ""
+}
+
+// daysRelative renders a signed time.Duration as e.g. "12 days after"
+// or "40 days before", for sanctionsAdjacentOfficerChange's evidence
+// string -- 0 renders as "the same day as", not "0 days after", since
+// "0 days after" reads oddly for an exact match.
+func daysRelative(d time.Duration) string {
+	days := int(d.Abs().Hours() / 24)
+	switch {
+	case days == 0:
+		return "the same day as"
+	case d > 0:
+		return fmt.Sprintf("%d days after", days)
+	default:
+		return fmt.Sprintf("%d days before", days)
+	}
 }
 
 // trustControlledNatures returns every nature-of-control value (out of

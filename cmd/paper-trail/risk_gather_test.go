@@ -12,6 +12,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
 	"github.com/bennett-17/paper-trail/internal/nzbn"
+	"github.com/bennett-17/paper-trail/internal/ofsi"
 	"github.com/bennett-17/paper-trail/internal/risk"
 	"github.com/bennett-17/paper-trail/internal/riskcache"
 )
@@ -335,6 +336,110 @@ func TestResignationBurstIgnoresOrdinaryResignationsSpreadOverYears(t *testing.T
 	}
 	if desc := resignationBurst(appointments); desc != "" {
 		t.Errorf("got %q, want no flag for resignations spread over years", desc)
+	}
+}
+
+func TestMassNomineeOfficerFiresAtThreshold(t *testing.T) {
+	if count := massNomineeOfficer(massNomineeOfficerThreshold); count != massNomineeOfficerThreshold {
+		t.Errorf("massNomineeOfficer(%d) = %d, want %d (threshold itself should fire)", massNomineeOfficerThreshold, count, massNomineeOfficerThreshold)
+	}
+}
+
+func TestMassNomineeOfficerIgnoresBelowThreshold(t *testing.T) {
+	if count := massNomineeOfficer(massNomineeOfficerThreshold - 1); count != 0 {
+		t.Errorf("massNomineeOfficer(%d) = %d, want 0 (one below threshold)", massNomineeOfficerThreshold-1, count)
+	}
+}
+
+func TestMassNomineeOfficerReturnsRealisticMassNomineeCount(t *testing.T) {
+	// Modeled on this project's own real reference case, "Corporate
+	// Directors Limited" (see massNomineeOfficerThreshold's doc
+	// comment): 540 appointments register-wide.
+	if count := massNomineeOfficer(540); count != 540 {
+		t.Errorf("massNomineeOfficer(540) = %d, want 540", count)
+	}
+}
+
+func TestMassNomineeOfficerIgnoresOrdinaryFewDirectorships(t *testing.T) {
+	if count := massNomineeOfficer(3); count != 0 {
+		t.Errorf("massNomineeOfficer(3) = %d, want 0: a handful of directorships is completely normal", count)
+	}
+}
+
+func TestSanctionsAdjacentOfficerChangeFlagsAppointmentNearDesignation(t *testing.T) {
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2019-01-01"},
+		{CompanyNumber: "2", CompanyName: "B LTD", AppointedOn: "2022-05-01"}, // 25 days after designation
+	}
+	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
+	desc := sanctionsAdjacentOfficerChange(appointments, hit)
+	if desc == "" {
+		t.Fatal("got no flag, want one: an appointment fell 25 days after the designation date")
+	}
+	if !strings.Contains(desc, "B LTD") || !strings.Contains(desc, "days after") {
+		t.Errorf("desc = %q, want it to name B LTD and describe the gap as days after", desc)
+	}
+}
+
+func TestSanctionsAdjacentOfficerChangeFlagsResignationBeforeDesignation(t *testing.T) {
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2018-01-01", ResignedOn: "2022-03-01"}, // 36 days before designation
+	}
+	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
+	desc := sanctionsAdjacentOfficerChange(appointments, hit)
+	if desc == "" {
+		t.Fatal("got no flag, want one: a resignation fell 36 days before the designation date")
+	}
+	if !strings.Contains(desc, "resigned from A LTD") || !strings.Contains(desc, "days before") {
+		t.Errorf("desc = %q, want it to describe a resignation before the designation", desc)
+	}
+}
+
+func TestSanctionsAdjacentOfficerChangeIgnoresDatesOutsideWindow(t *testing.T) {
+	appointments := []companieshouse.Appointment{
+		{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2015-01-01"},
+		{CompanyNumber: "2", CompanyName: "B LTD", AppointedOn: "2022-12-01", ResignedOn: "2023-06-01"},
+	}
+	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
+	if desc := sanctionsAdjacentOfficerChange(appointments, hit); desc != "" {
+		t.Errorf("got %q, want no flag: nothing falls within 90 days of the designation date", desc)
+	}
+}
+
+func TestSanctionsAdjacentOfficerChangeExactBoundary(t *testing.T) {
+	// Exactly 90 days after should still count (<=, not <); 91 should not.
+	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-01-01"}
+	within := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-01"}} // exactly 90 days
+	if desc := sanctionsAdjacentOfficerChange(within, hit); desc == "" {
+		t.Error("got no flag at exactly 90 days, want one (boundary is inclusive)")
+	}
+	outside := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-02"}} // 91 days
+	if desc := sanctionsAdjacentOfficerChange(outside, hit); desc != "" {
+		t.Errorf("got %q at 91 days, want no flag", desc)
+	}
+}
+
+func TestSanctionsAdjacentOfficerChangeSkipsUnparseableDesignationDate(t *testing.T) {
+	appointments := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-01"}}
+	hit := ofsi.Hit{Name: "Jane Doe", DateDesignated: "not-a-date"}
+	if desc := sanctionsAdjacentOfficerChange(appointments, hit); desc != "" {
+		t.Errorf("got %q, want no flag for an unparseable designation date", desc)
+	}
+}
+
+func TestDaysRelativeFormatsSignAndZero(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{12 * 24 * time.Hour, "12 days after"},
+		{-40 * 24 * time.Hour, "40 days before"},
+		{0, "the same day as"},
+	}
+	for _, c := range cases {
+		if got := daysRelative(c.d); got != c.want {
+			t.Errorf("daysRelative(%v) = %q, want %q", c.d, got, c.want)
+		}
 	}
 }
 

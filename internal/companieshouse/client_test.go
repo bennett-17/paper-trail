@@ -488,7 +488,7 @@ func TestGetOfficerAppointmentsFansOutAcrossCompanies(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient(t, srv)
 
-	appointments, err := c.GetOfficerAppointments("exampleOfficerId", 0)
+	appointments, totalResults, err := c.GetOfficerAppointments("exampleOfficerId", 0)
 	if err != nil {
 		t.Fatalf("GetOfficerAppointments: %v", err)
 	}
@@ -500,6 +500,40 @@ func TestGetOfficerAppointmentsFansOutAcrossCompanies(t *testing.T) {
 	}
 	if appointments[1].CompanyNumber != "05397121" || appointments[1].CompanyStatus != "dissolved" || appointments[1].ResignedOn != "2019-03-31" {
 		t.Errorf("appointments[1] = %+v, want a resigned_on set", appointments[1])
+	}
+	if totalResults != 2 {
+		t.Errorf("totalResults = %d, want 2 (this fixture's own total_results field)", totalResults)
+	}
+}
+
+// TestGetOfficerAppointmentsTotalResultsExceedsFetchedPage guards the
+// whole reason totalResults is returned separately from len(appointments)
+// at all: a real mass-nominee officer's total_results (hundreds) is
+// nothing like the items actually returned on one page -- confirmed via
+// this fixture reporting 540 total_results against only 2 fetched items,
+// mirroring this project's own real reference case (see
+// massNomineeOfficerThreshold's doc comment in cmd/paper-trail).
+func TestGetOfficerAppointmentsTotalResultsExceedsFetchedPage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/officers/massNomineeId/appointments", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items_per_page": 2, "start_index": 0, "total_results": 540, "items": [
+			{"officer_role": "director", "appointed_on": "2020-01-01", "appointed_to": {"company_name": "A LTD", "company_number": "1"}},
+			{"officer_role": "director", "appointed_on": "2020-01-02", "appointed_to": {"company_name": "B LTD", "company_number": "2"}}
+		]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	appointments, totalResults, err := c.GetOfficerAppointments("massNomineeId", 2)
+	if err != nil {
+		t.Fatalf("GetOfficerAppointments: %v", err)
+	}
+	if len(appointments) != 2 {
+		t.Fatalf("got %d appointments fetched, want 2 (the requested page size)", len(appointments))
+	}
+	if totalResults != 540 {
+		t.Errorf("totalResults = %d, want 540 -- the true register-wide total, independent of the page actually fetched", totalResults)
 	}
 }
 
