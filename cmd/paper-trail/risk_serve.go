@@ -332,6 +332,10 @@ const servePageTemplate = `<!DOCTYPE html>
     target.innerHTML = atob(e.data);
     wrap.style.display = 'none';
     es.close();
+    // The report body only exists now, so its tab bar has to be wired
+    // up here -- the script that defines initReportTabs ran at page
+    // parse time, when there was nothing to wire.
+    if (typeof initReportTabs === 'function') initReportTabs();
   });
   es.addEventListener('scanerror', function(e){
     var d = JSON.parse(e.data);

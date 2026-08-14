@@ -309,3 +309,12 @@ func TestResultEventPayloadRoundTripsThroughBase64(t *testing.T) {
 		t.Error("base64-encoded payload must not contain a raw newline, or it would break SSE framing")
 	}
 }
+
+// TestServePageReinitializesTabsAfterSSEResult is the other half of
+// TestReportTabInitIsRecallable: defining a re-callable init is useless
+// if the serve page never calls it once the report body lands.
+func TestServePageReinitializesTabsAfterSSEResult(t *testing.T) {
+	if !strings.Contains(servePageTemplate, "initReportTabs()") {
+		t.Error("serve page must call initReportTabs() after injecting the report body over SSE")
+	}
+}

@@ -559,3 +559,158 @@ func TestWriteReportHTMLOmitsCoverageSectionWhenNoScreensRan(t *testing.T) {
 		t.Error("expected no coverage section at all when no screen reported coverage")
 	}
 }
+
+// fullReportFixture is a report exercising every tab, so the tab tests
+// below assert on presence rather than on an artificially empty report.
+func fullReportFixture() riskReportJSON {
+	e1 := risk.NewEntity("companieshouse", "1", "Alpha Ltd", []string{"1 Main St"}, []string{"Jane Doe"})
+	e1.FormedOn = "2020-01-10"
+	e1.DissolvedOn = "2021-03-01"
+	e2 := risk.NewEntity("edgar", "2", "Beta Corp", []string{"1 Main St"}, []string{"Jane Doe"})
+	return riskReportJSON{
+		Queries:  []string{"Alpha"},
+		Entities: []risk.Entity{e1, e2},
+		Notes:    []string{"GLEIF: no match for \"Alpha\""},
+		Score: risk.Score{
+			Total: 5, Confidence: "MEDIUM", ConfidenceReason: "shared_person indicator at weight 3",
+			Indicators: []risk.Indicator{
+				{Code: "shared_person", Description: "Same officer", Weight: 3,
+					Entities: []string{"companieshouse: Alpha Ltd (1)", "edgar: Beta Corp (2)"}, Evidence: "Jane Doe"},
+				{Code: "formation_cluster", Description: "Formed together", Weight: 1,
+					Entities: []string{"companieshouse: Alpha Ltd (1)"}, Evidence: "span", Date: "2020-01-10"},
+			},
+			Corroborations: []risk.Corroboration{
+				{Entities: []string{"companieshouse: Alpha Ltd (1)", "edgar: Beta Corp (2)"},
+					Codes: []string{"shared_address", "shared_person"}},
+			},
+		},
+		ScreenCoverage: []screenCoverage{{Source: "UK sanctions screen", Screened: 4, Matched: 0}},
+	}
+}
+
+func renderFixture(t *testing.T, report riskReportJSON, diff *riskReportDiff) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "report.html")
+	if err := writeReportHTML(report, diff, "baseline.json", path); err != nil {
+		t.Fatalf("writeReportHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	return string(data)
+}
+
+func TestReportRendersEveryTabAndItsPanel(t *testing.T) {
+	html := renderFixture(t, fullReportFixture(), nil)
+	for _, tab := range []string{"overview", "findings", "network", "timeline", "people", "entities", "methodology"} {
+		if !strings.Contains(html, `data-tab="`+tab+`"`) {
+			t.Errorf("missing tab button for %q", tab)
+		}
+		if !strings.Contains(html, `data-panel="`+tab+`"`) {
+			t.Errorf("missing tab panel for %q", tab)
+		}
+	}
+}
+
+// TestReportDiffTabOnlyWhenDiffPresent guards the one conditional tab.
+func TestReportDiffTabOnlyWhenDiffPresent(t *testing.T) {
+	if html := renderFixture(t, fullReportFixture(), nil); strings.Contains(html, `data-tab="diff"`) {
+		t.Error("Diff tab rendered with no diff passed")
+	}
+	diff := &riskReportDiff{ScoreBefore: 2, ScoreAfter: 5}
+	if html := renderFixture(t, fullReportFixture(), diff); !strings.Contains(html, `data-tab="diff"`) {
+		t.Error("Diff tab missing when a diff was passed")
+	}
+}
+
+// TestReportEmptyTabIsDisabledNotHidden guards the deliberate choice
+// that an empty tab still renders: "no shared officers" is information,
+// the same negative-result principle as the coverage table.
+func TestReportEmptyTabIsDisabledNotHidden(t *testing.T) {
+	bare := riskReportJSON{Queries: []string{"Nothing"}, Score: risk.Score{Total: 0}}
+	html := renderFixture(t, bare, nil)
+	if !strings.Contains(html, `data-tab="people"`) {
+		t.Error("People tab vanished when empty -- it should render disabled instead")
+	}
+	if !strings.Contains(html, "disabled") {
+		t.Error("expected empty tabs to render with the disabled attribute")
+	}
+}
+
+// TestReportDefaultsToAllPanelsVisibleForNoJS is the archival
+// guarantee: the stacked report must survive JS being off or failing,
+// so panels are visible by default and only .js-tabs hides them.
+func TestReportDefaultsToAllPanelsVisibleForNoJS(t *testing.T) {
+	html := renderFixture(t, fullReportFixture(), nil)
+	if !strings.Contains(html, ".js-tabs .tab-panel { display: none; }") {
+		t.Error("panels must be hidden only under .js-tabs, never by default")
+	}
+	// Every rule hiding a panel must be scoped under .js-tabs. Checked
+	// per-line rather than by substring, since the scoped rule itself
+	// contains the unscoped text.
+	for _, line := range strings.Split(html, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, ".tab-panel") && strings.Contains(trimmed, "display: none") {
+			t.Errorf("unscoped hide rule %q would blank the report when JS is off", trimmed)
+		}
+	}
+	if !strings.Contains(html, "@media print") {
+		t.Error("expected a print stylesheet so a printed report isn't reduced to one tab")
+	}
+}
+
+func TestReportEmbedsGraphLazilyAndEscaped(t *testing.T) {
+	report := fullReportFixture()
+	// Live API data can contain a script-tag breakout attempt; the graph
+	// document is embedded as an attribute and must be escaped.
+	report.Entities[0].Name = `Alpha </script><img src=x onerror=alert(1)> Ltd`
+	html := renderFixture(t, report, nil)
+
+	if !strings.Contains(html, "data-graphdoc=") {
+		t.Error("graph should be embedded via data-graphdoc for lazy hydration")
+	}
+	if strings.Contains(html, `srcdoc="<!DOCTYPE`) {
+		t.Error("graph must not be assigned eagerly -- it sizes wrong while its tab is hidden")
+	}
+	if strings.Contains(html, `<img src=x onerror=alert(1)>`) {
+		t.Error("unescaped live data leaked out of the graph attribute")
+	}
+}
+
+func TestReportFilterSearchesAcrossTabs(t *testing.T) {
+	html := renderFixture(t, fullReportFixture(), nil)
+	if !strings.Contains(html, "filterAllTabs(this.value)") {
+		t.Error("filter input should call the cross-tab filter, not the findings-only one")
+	}
+	if !strings.Contains(html, "function filterAllTabs(") {
+		t.Error("cross-tab filter function missing")
+	}
+}
+
+// TestReportTabInitIsRecallable guards the bug live verification found:
+// --serve injects the report body over SSE *after* the page script has
+// parsed, so a bare IIFE finds no tab bar and silently leaves the tabs
+// dead. Init must be a named, re-callable function, and the serve page
+// must actually call it after injecting the body.
+func TestReportTabInitIsRecallable(t *testing.T) {
+	html := renderFixture(t, fullReportFixture(), nil)
+	if !strings.Contains(html, "function initReportTabs()") {
+		t.Error("tab init must be a named function so the SSE path can re-run it")
+	}
+	if strings.Contains(html, "(function () {\n  var root = document.querySelector('.tabs');") {
+		t.Error("tab init is still a bare IIFE -- it cannot be re-run after SSE injection")
+	}
+}
+
+// TestDiffPanelAbsentWithoutDiff pairs with the tab-level check: an
+// orphan empty panel with no tab to reach it is dead markup.
+func TestDiffPanelAbsentWithoutDiff(t *testing.T) {
+	if html := renderFixture(t, fullReportFixture(), nil); strings.Contains(html, `data-panel="diff"`) {
+		t.Error("diff panel rendered with no diff -- it would be unreachable dead markup")
+	}
+	diff := &riskReportDiff{ScoreBefore: 2, ScoreAfter: 5}
+	if html := renderFixture(t, fullReportFixture(), diff); !strings.Contains(html, `data-panel="diff"`) {
+		t.Error("diff panel missing when a diff was passed")
+	}
+}

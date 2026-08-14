@@ -14,18 +14,10 @@ import (
 // are labeled by relationship_type, and both are draggable/hoverable
 // for detail.
 func WriteHTML(g Graph, path string) error {
-	data, err := json.Marshal(g)
+	html, err := RenderHTML(g)
 	if err != nil {
 		return err
 	}
-	// Defend against a node/edge string field containing a literal
-	// "</script>" sequence, which would otherwise prematurely close the
-	// embedded script tag -- entity names/evidence come from live
-	// external APIs, not input this program controls.
-	safeData := strings.ReplaceAll(string(data), "</", "<\\/")
-
-	html := strings.Replace(htmlViewerTemplate, "/*__GRAPH_DATA__*/", safeData, 1)
-
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -33,6 +25,34 @@ func WriteHTML(g Graph, path string) error {
 	defer f.Close()
 	_, err = f.WriteString(html)
 	return err
+}
+
+// RenderHTML returns the same self-contained viewer document WriteHTML
+// writes to disk, without writing it -- so a caller that wants to embed
+// the viewer somewhere else (the risk report's Network tab renders it
+// inside an iframe srcdoc) gets the identical document rather than a
+// second, drifting copy of this template.
+//
+// An iframe is the right embedding seam precisely because this document
+// assumes it owns its page: it sizes off window.innerWidth/innerHeight,
+// sets html/body to full-bleed with overflow hidden, positions its
+// detail panel fixed, and defines its color tokens on :root. Inside an
+// iframe every one of those is correct, because the iframe *is* its own
+// document with its own viewport -- whereas splicing the markup
+// directly into a host page would override that page's own :root tokens
+// and disable its scrolling.
+func RenderHTML(g Graph) (string, error) {
+	data, err := json.Marshal(g)
+	if err != nil {
+		return "", err
+	}
+	// Defend against a node/edge string field containing a literal
+	// "</script>" sequence, which would otherwise prematurely close the
+	// embedded script tag -- entity names/evidence come from live
+	// external APIs, not input this program controls.
+	safeData := strings.ReplaceAll(string(data), "</", "<\\/")
+
+	return strings.Replace(htmlViewerTemplate, "/*__GRAPH_DATA__*/", safeData, 1), nil
 }
 
 const htmlViewerTemplate = `<!DOCTYPE html>

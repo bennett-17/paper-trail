@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/bennett-17/paper-trail/internal/graph"
 	"github.com/bennett-17/paper-trail/internal/risk"
 )
 
@@ -31,9 +32,17 @@ type reportHTMLView struct {
 	ReviewedCount  int
 	SourceHealth   sourceHealth
 	ScreenCoverage []screenCoverage
-	Diff           *riskReportDiff
-	DiffSource     string
-	GeneratedAt    string
+	// GraphDoc is the complete, self-contained graph-viewer document
+	// (internal/graph.RenderHTML) that the Network tab loads into an
+	// iframe. Empty when the scan produced no graph at all.
+	GraphDoc string
+	// TabCounts drives the per-tab badges and which tabs render
+	// disabled -- an empty tab is information ("no shared officers"),
+	// so it stays visible rather than disappearing.
+	TabCounts   map[string]int
+	Diff        *riskReportDiff
+	DiffSource  string
+	GeneratedAt string
 }
 
 // entityCard groups every indicator naming one entity label, so the
@@ -138,6 +147,28 @@ func confidenceClass(band string) string {
 func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource string) reportHTMLView {
 	cards := groupIndicatorsByEntity(report.Score.Indicators)
 
+	// The Network tab embeds the same viewer --html writes to a file.
+	// A render failure is not worth failing the whole report over: the
+	// tab simply reports having no graph, and every other tab is
+	// unaffected.
+	var graphDoc string
+	if len(report.Entities) > 0 || len(report.Score.Indicators) > 0 {
+		if doc, err := graph.RenderHTML(graph.BuildFromRisk(report.Entities, report.Score)); err == nil {
+			graphDoc = doc
+		}
+	}
+
+	people := buildPersonPanel(report.Entities)
+	timeline := buildTimeline(report.Score.Indicators)
+	tabCounts := map[string]int{
+		"findings":    len(cards),
+		"network":     len(report.Entities),
+		"timeline":    len(timeline),
+		"people":      len(people),
+		"entities":    len(report.Entities),
+		"methodology": len(report.ScreenCoverage),
+	}
+
 	irrelevant := make(map[string]bool, len(cards))
 	for _, c := range cards {
 		if !cardSharesWordWithQueries(c.Label, report.Queries) {
@@ -155,12 +186,14 @@ func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource s
 		Duplicates:     possibleDuplicates(cards, report.Entities),
 		IrrelevantCard: irrelevant,
 		VerifiedAt:     verifiedAtByLabel(report.Entities),
-		Timeline:       buildTimeline(report.Score.Indicators),
-		People:         buildPersonPanel(report.Entities),
+		Timeline:       timeline,
+		People:         people,
 		ExcludedCount:  report.ExcludedIndicators,
 		ReviewedCount:  report.ReviewedIndicators,
 		SourceHealth:   report.SourceHealth,
 		ScreenCoverage: report.ScreenCoverage,
+		GraphDoc:       graphDoc,
+		TabCounts:      tabCounts,
 		Diff:           diff,
 		DiffSource:     diffSource,
 		GeneratedAt:    time.Now().Format("2006-01-02 15:04:05 MST"),
@@ -440,6 +473,49 @@ const reportStyle = `<style>
   }
   .flag-irrelevant { background: var(--med); color: #1a1a1a; }
   .flag-cached { background: var(--panel-border); color: var(--muted); font-weight: 400; }
+  /* --- Tabbed dashboard ---------------------------------------
+     Default state is ALL PANELS VISIBLE. JS hides the inactive ones on
+     load; it never reveals them. That ordering is deliberate: this
+     report is meant to be archived and reopened years later, so if the
+     script fails or JS is off, the reader gets the full stacked report
+     exactly as before tabs existed -- never a blank page. */
+  .tabs {
+    display: flex; flex-wrap: wrap; gap: 2px;
+    border-bottom: 2px solid var(--panel-border);
+    margin: 1.4em 0 1.2em;
+  }
+  .tab {
+    appearance: none; border: none; background: none; cursor: pointer;
+    font: inherit; font-size: 0.94em; color: var(--muted);
+    padding: 8px 14px; border-bottom: 2px solid transparent; margin-bottom: -2px;
+    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .tab:hover:not(:disabled) { color: var(--fg); }
+  .tab.is-active { color: var(--fg); font-weight: 600; border-bottom-color: var(--fg); }
+  .tab:focus-visible { outline: 2px solid var(--med); outline-offset: -2px; }
+  .tab:disabled { opacity: 0.4; cursor: default; }
+  .tab-count {
+    font-size: 0.82em; font-weight: 600; font-variant-numeric: tabular-nums;
+    background: var(--panel-border); color: var(--muted);
+    border-radius: 9px; padding: 0 7px;
+  }
+  .tab-panel > h2:first-child { margin-top: 0; }
+  /* Only meaningful once JS has taken over; see .js-tabs below. */
+  .js-tabs .tab-panel { display: none; }
+  .js-tabs .tab-panel.is-active { display: block; }
+  .graph-frame {
+    border: 1px solid var(--panel-border); border-radius: 8px;
+    overflow: hidden; height: 70vh; min-height: 420px;
+  }
+  .graph-embed { width: 100%; height: 100%; border: 0; display: block; }
+  /* Printing must never lose content to a hidden tab -- investigators
+     print and PDF these. Reveal every panel and drop the tab bar. */
+  @media print {
+    .tabs, .entity-filter { display: none !important; }
+    .js-tabs .tab-panel { display: block !important; }
+    .tab-panel { break-inside: auto; }
+    .graph-frame { display: none !important; }
+  }
   .coverage-table { border-collapse: collapse; width: 100%; margin-bottom: 1.2em; }
   .coverage-table th, .coverage-table td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--panel-border); }
   .coverage-table th { font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
@@ -552,6 +628,104 @@ function filterEntityCards(query) {
   var empty = document.getElementById('entity-filter-empty');
   if (empty) empty.style.display = (q !== '' && totalVisible === 0) ? '' : 'none';
 }
+
+// --- Tabbed dashboard -------------------------------------------------
+// Adding .js-tabs is what activates the hide-inactive CSS rule. Until
+// this line runs, every panel is visible, so a script error or disabled
+// JS degrades to the full stacked report rather than a blank page.
+// Exposed as a named function, not a bare IIFE, because --serve
+// injects the report body over SSE *after* this script has already
+// parsed: at parse time there are no tabs to wire up yet. The serve
+// page calls this again once the body lands. Idempotent, so calling it
+// twice (or on a page that never gets a report) is harmless.
+function initReportTabs() {
+  var root = document.querySelector('.tabs');
+  if (!root) return;
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  var panels = Array.prototype.slice.call(document.querySelectorAll('.tab-panel'));
+  if (!tabs.length || !panels.length) return;
+  document.body.classList.add('js-tabs');
+
+  function panelFor(name) {
+    for (var i = 0; i < panels.length; i++) {
+      if (panels[i].getAttribute('data-panel') === name) return panels[i];
+    }
+    return null;
+  }
+
+  // The graph is a full document in an iframe srcdoc, assigned on first
+  // activation rather than at load. It sizes itself off its own
+  // window.innerWidth, which reads as zero while its container is
+  // display:none -- assigning eagerly would settle the layout around the
+  // wrong center and leave it clipped in a corner.
+  function hydrateGraph(panel) {
+    var frame = panel.querySelector('.graph-embed[data-graphdoc]');
+    if (!frame) return;
+    frame.srcdoc = frame.getAttribute('data-graphdoc');
+    frame.removeAttribute('data-graphdoc');
+  }
+
+  function activate(name, updateHash) {
+    var panel = panelFor(name);
+    if (!panel) return false;
+    tabs.forEach(function (t) {
+      var on = t.getAttribute('data-tab') === name;
+      t.classList.toggle('is-active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach(function (pnl) {
+      pnl.classList.toggle('is-active', pnl === panel);
+    });
+    hydrateGraph(panel);
+    if (updateHash && history.replaceState) {
+      history.replaceState(null, '', '#' + name);
+    }
+    return true;
+  }
+
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      if (!t.disabled) activate(t.getAttribute('data-tab'), true);
+    });
+  });
+
+  window.addEventListener('hashchange', function () {
+    activate(location.hash.replace(/^#/, ''), false);
+  });
+
+  // Deep-link support: a shared or reloaded #network URL opens on that
+  // tab instead of dumping the reader back on Overview.
+  if (!activate(location.hash.replace(/^#/, ''), false)) {
+    activate('overview', false);
+  }
+}
+
+// Static report files (--report-html) have their body in the document
+// from the start, so wire up immediately; --serve calls this again
+// after its SSE result lands.
+initReportTabs();
+
+// Filtering searches every tab, not just the visible one -- typing a
+// name that only appears under People previously looked like "no
+// results" because the Findings panel was the only thing being
+// filtered. This switches to the first tab that actually matches.
+function filterAllTabs(query) {
+  filterEntityCards(query);
+  var q = query.trim().toLowerCase();
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  var counted = false;
+  tabs.forEach(function (t) {
+    var name = t.getAttribute('data-tab');
+    var panel = document.querySelector('.tab-panel[data-panel="' + name + '"]');
+    if (!panel) return;
+    var hit = q !== '' && !t.disabled && panel.textContent.toLowerCase().indexOf(q) !== -1;
+    t.classList.toggle('has-match', hit);
+    if (hit && !counted && !t.classList.contains('is-active')) {
+      counted = true;
+      t.click();
+    }
+  });
+}
 </script>`
 
 // reportPageTemplate is the full HTML document --report-html writes
@@ -579,48 +753,18 @@ const reportBodyTemplate = `{{define "reportBody"}}
 <h1>Risk assessment for {{range $i, $q := .Queries}}{{if $i}}, {{end}}&#34;{{$q}}&#34;{{end}}</h1>
 <div class="meta">Generated {{.GeneratedAt}} &middot; {{len .Entities}} entit{{if ne (len .Entities) 1}}ies{{else}}y{{end}} found</div>
 
-{{if or .SourceHealth.Degraded .SourceHealth.Skipped}}
-<div class="source-health">
-  {{if .SourceHealth.Degraded}}<div class="field"><strong>Degraded</strong> (repeatedly failed mid-scan -- likely a live outage or rate limit; whatever this source didn't find is a real gap, not a confirmed absence): {{range $i, $s := .SourceHealth.Degraded}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
-  {{if .SourceHealth.Skipped}}<div class="field"><strong>Skipped</strong> (no API key configured -- routine, not an error): {{range $i, $s := .SourceHealth.Skipped}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
-</div>
-{{end}}
+<nav class="tabs" role="tablist" aria-label="Report sections">
+  <button class="tab is-active" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+  <button class="tab" role="tab" data-tab="findings" aria-selected="false"{{if not (index .TabCounts "findings")}} disabled{{end}}>Findings{{with index .TabCounts "findings"}} <span class="tab-count">{{.}}</span>{{end}}</button>
+  <button class="tab" role="tab" data-tab="network" aria-selected="false"{{if not .GraphDoc}} disabled{{end}}>Network{{with index .TabCounts "network"}} <span class="tab-count">{{.}}</span>{{end}}</button>
+  <button class="tab" role="tab" data-tab="timeline" aria-selected="false"{{if not (index .TabCounts "timeline")}} disabled{{end}}>Timeline{{with index .TabCounts "timeline"}} <span class="tab-count">{{.}}</span>{{end}}</button>
+  <button class="tab" role="tab" data-tab="people" aria-selected="false"{{if not (index .TabCounts "people")}} disabled{{end}}>People{{with index .TabCounts "people"}} <span class="tab-count">{{.}}</span>{{end}}</button>
+  <button class="tab" role="tab" data-tab="entities" aria-selected="false"{{if not (index .TabCounts "entities")}} disabled{{end}}>Entities{{with index .TabCounts "entities"}} <span class="tab-count">{{.}}</span>{{end}}</button>
+  <button class="tab" role="tab" data-tab="methodology" aria-selected="false">Methodology</button>
+  {{if .Diff}}<button class="tab" role="tab" data-tab="diff" aria-selected="false">Diff</button>{{end}}
+</nav>
 
-{{if .ScreenCoverage}}
-<h2>What was checked</h2>
-<p class="meta">Every adjudicated-list screen this scan ran, including the ones that came back clean &mdash; so a negative result is visible as a result, not as an absence you have to infer. Only sanctions, exclusion, disqualification, PEP, and offshore-leaks screens appear here: those are the checks where "not on this list" means something. Mention-style screens (news, filings, litigation dockets) are deliberately excluded, since "no article mentions this entity" is not exculpatory in any comparable way.</p>
-<table class="coverage-table">
-  <thead><tr><th>Screen</th><th>Names checked</th><th>Result</th></tr></thead>
-  <tbody>
-  {{range .ScreenCoverage}}
-    <tr>
-      <td>{{.Source}}</td>
-      <td class="num">{{.Screened}}</td>
-      <td>{{if .Clean}}<span class="coverage-clean">no matches</span>{{else}}<span class="coverage-hit">{{.Matched}} matched</span>{{end}}</td>
-    </tr>
-  {{end}}
-  </tbody>
-</table>
-{{end}}
-
-<h2>Entities</h2>
-{{if .Entities}}
-<ul class="plain">
-{{range .Entities}}<li>{{.Label}}</li>
-{{end}}
-</ul>
-{{else}}
-<p class="meta">No entities located among the configured sources.</p>
-{{end}}
-
-{{if .Notes}}
-<h2>Notes</h2>
-<ul class="plain notes">
-{{range .Notes}}<li>{{.}}</li>
-{{end}}
-</ul>
-{{end}}
-
+<section class="tab-panel" data-panel="overview" role="tabpanel">
 {{if gt .ExcludedCount 0}}
 <p class="meta">{{.ExcludedCount}} indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.</p>
 {{end}}
@@ -634,10 +778,23 @@ const reportBodyTemplate = `{{define "reportBody"}}
   <div class="meta">{{.Score.ConfidenceReason}}</div>
 </div>
 
+{{if .Score.Corroborations}}
+<h2>Corroborated pairs</h2>
+<p class="meta">Matched on 2+ independent kinds of evidence -- stronger than any single indicator above.</p>
+{{range .Score.Corroborations}}
+<div class="corroboration">
+  <div>{{range $i, $e := .Entities}}{{if $i}} &harr; {{end}}{{$e}}{{end}}</div>
+  <div class="field">matched on: {{range $i, $c := .Codes}}{{if $i}}, {{end}}{{$c}}{{end}}</div>
+</div>
+{{end}}
+{{end}}
+</section>
+
+<section class="tab-panel" data-panel="findings" role="tabpanel">
 <h2>Findings by entity</h2>
 {{if .EntityCards}}
 <p class="meta">Every entity named by at least one indicator, grouped by severity tier and, within each tier, sorted by that entity's own total weight -- so everything found about one entity reads as a single card, and the tail of single-signal noise stays out of the way until you go looking for it.</p>
-<input type="search" class="entity-filter" placeholder="Filter by name or evidence&hellip;" oninput="filterEntityCards(this.value)" aria-label="Filter entity cards">
+<input type="search" class="entity-filter" placeholder="Filter by name or evidence&hellip;" oninput="filterAllTabs(this.value)" aria-label="Filter entity cards">
 {{range .CardGroups}}
 <details class="tier-group"{{if not .Collapsed}} open{{end}}>
   <summary>{{.Label}} <span class="tier-count">({{len .Cards}})</span></summary>
@@ -681,18 +838,22 @@ const reportBodyTemplate = `{{define "reportBody"}}
 {{else}}
 <p class="meta">No structural indicators found among the entities located.</p>
 {{end}}
+</section>
 
-{{if .People}}
-<h2>Findings by person</h2>
-<p class="meta">Officers, directors, or trustees named on 2 or more entities -- the same cross-entity trace this report's shared_person indicator already flags, laid out per person instead of per pair.</p>
-{{range .People}}
-<div class="person-card">
-  <div class="person-name">{{.Name}}</div>
-  <div class="field">Linked to {{len .Entities}} entities: {{range $i, $e := .Entities}}{{if $i}}; {{end}}{{$e}}{{end}}</div>
+<section class="tab-panel" data-panel="network" role="tabpanel">
+<h2>Network</h2>
+{{if .GraphDoc}}
+<p class="meta">Every entity and the indicators connecting them, as a force-directed graph &mdash; drag nodes to rearrange, click one to highlight its connections, scroll to zoom. Node color is the source; a red outline marks a high-weight lead. This is the same viewer <code>--html</code> writes to a standalone file.</p>
+<div class="graph-frame">
+  <iframe class="graph-embed" title="Entity relationship graph" data-graphdoc="{{.GraphDoc}}" sandbox="allow-scripts"></iframe>
 </div>
+<noscript><p class="meta">The interactive graph needs JavaScript. Every relationship it draws is also listed as an indicator under Findings, and <code>--html</code> writes the same graph to a standalone file.</p></noscript>
+{{else}}
+<p class="meta">No graph &mdash; this scan produced no entities or indicators to plot.</p>
 {{end}}
-{{end}}
+</section>
 
+<section class="tab-panel" data-panel="timeline" role="tabpanel">
 {{if .Timeline}}
 <h2>Timeline</h2>
 <p class="meta">Every indicator above that carries a specific date, in chronological order &mdash; the one axis the by-entity and by-person views can't show. Nothing here is a new finding: each entry appears above too, just reordered by when it happened. Deliberately partial &mdash; only some indicator types carry a date at all today, and an indicator without one is left out entirely rather than shown with a guessed date, so absence from this list says nothing about an indicator's importance.</p>
@@ -708,19 +869,69 @@ const reportBodyTemplate = `{{define "reportBody"}}
 </div>
 {{end}}
 {{end}}
+</section>
 
-{{if .Score.Corroborations}}
-<h2>Corroborated pairs</h2>
-<p class="meta">Matched on 2+ independent kinds of evidence -- stronger than any single indicator above.</p>
-{{range .Score.Corroborations}}
-<div class="corroboration">
-  <div>{{range $i, $e := .Entities}}{{if $i}} &harr; {{end}}{{$e}}{{end}}</div>
-  <div class="field">matched on: {{range $i, $c := .Codes}}{{if $i}}, {{end}}{{$c}}{{end}}</div>
+<section class="tab-panel" data-panel="people" role="tabpanel">
+{{if .People}}
+<h2>Findings by person</h2>
+<p class="meta">Officers, directors, or trustees named on 2 or more entities -- the same cross-entity trace this report's shared_person indicator already flags, laid out per person instead of per pair.</p>
+{{range .People}}
+<div class="person-card">
+  <div class="person-name">{{.Name}}</div>
+  <div class="field">Linked to {{len .Entities}} entities: {{range $i, $e := .Entities}}{{if $i}}; {{end}}{{$e}}{{end}}</div>
 </div>
 {{end}}
 {{end}}
+</section>
+
+<section class="tab-panel" data-panel="entities" role="tabpanel">
+<h2>Entities</h2>
+{{if .Entities}}
+<ul class="plain">
+{{range .Entities}}<li>{{.Label}}</li>
+{{end}}
+</ul>
+{{else}}
+<p class="meta">No entities located among the configured sources.</p>
+{{end}}
+</section>
+
+<section class="tab-panel" data-panel="methodology" role="tabpanel">
+{{if or .SourceHealth.Degraded .SourceHealth.Skipped}}
+<div class="source-health">
+  {{if .SourceHealth.Degraded}}<div class="field"><strong>Degraded</strong> (repeatedly failed mid-scan -- likely a live outage or rate limit; whatever this source didn't find is a real gap, not a confirmed absence): {{range $i, $s := .SourceHealth.Degraded}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
+  {{if .SourceHealth.Skipped}}<div class="field"><strong>Skipped</strong> (no API key configured -- routine, not an error): {{range $i, $s := .SourceHealth.Skipped}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
+</div>
+{{end}}
+
+{{if .ScreenCoverage}}
+<h2>What was checked</h2>
+<p class="meta">Every adjudicated-list screen this scan ran, including the ones that came back clean &mdash; so a negative result is visible as a result, not as an absence you have to infer. Only sanctions, exclusion, disqualification, PEP, and offshore-leaks screens appear here: those are the checks where "not on this list" means something. Mention-style screens (news, filings, litigation dockets) are deliberately excluded, since "no article mentions this entity" is not exculpatory in any comparable way.</p>
+<table class="coverage-table">
+  <thead><tr><th>Screen</th><th>Names checked</th><th>Result</th></tr></thead>
+  <tbody>
+  {{range .ScreenCoverage}}
+    <tr>
+      <td>{{.Source}}</td>
+      <td class="num">{{.Screened}}</td>
+      <td>{{if .Clean}}<span class="coverage-clean">no matches</span>{{else}}<span class="coverage-hit">{{.Matched}} matched</span>{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{if .Notes}}
+<h2>Notes</h2>
+<ul class="plain notes">
+{{range .Notes}}<li>{{.}}</li>
+{{end}}
+</ul>
+{{end}}
+</section>
 
 {{if .Diff}}
+<section class="tab-panel" data-panel="diff" role="tabpanel">
 <h2>Diff against {{.DiffSource}}</h2>
 <p class="diff-score">Score: {{.Diff.ScoreBefore}} &rarr; {{.Diff.ScoreAfter}} ({{if ge (sub .Diff.ScoreAfter .Diff.ScoreBefore) 0}}+{{end}}{{sub .Diff.ScoreAfter .Diff.ScoreBefore}})</p>
 <p>{{len .Diff.NewEntities}} new entit{{if ne (len .Diff.NewEntities) 1}}ies{{else}}y{{end}}:</p>
@@ -737,9 +948,11 @@ const reportBodyTemplate = `{{define "reportBody"}}
   <div class="field">Evidence: {{.Evidence}}</div>
 </div>
 {{end}}
+</section>
 {{end}}
 
 <div class="disclaimer">
   This is a lead-generation report, not a finding &mdash; verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.
 </div>
-{{end}}`
+{{end}}
+`

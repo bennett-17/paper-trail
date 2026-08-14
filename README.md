@@ -1142,6 +1142,38 @@ It's a lead-generation report, not a finding.
 
 #### HTML report: entity cards, severity tiers, and cross-references
 
+The report opens as a **tabbed dashboard** &mdash; Overview, Findings,
+Network, Timeline, People, Entities, Methodology, and Diff (only when
+diffing) &mdash; rather than one long scroll of eight stacked sections.
+The tabs live in the shared report template, so `--report-html`'s
+standalone file and `--serve`'s browser view get the same dashboard.
+
+- **Network** renders the same interactive force-directed graph
+  `--html` writes to a file, embedded in an iframe. The iframe is the
+  right seam because that viewer assumes it owns its page (it sizes off
+  `window.innerWidth`, sets `overflow: hidden`, and defines its own
+  `:root` color tokens) &mdash; inside an iframe all of that is correct,
+  whereas splicing its markup into the report would override the
+  report's own tokens and disable page scrolling. It's sandboxed
+  without `allow-same-origin`, so graph content derived from live
+  third-party data can't reach the parent document, and it's hydrated
+  lazily on first activation, since a graph sizing itself while its tab
+  is hidden would settle around the wrong center.
+- **Empty tabs render disabled, not hidden.** An empty People tab is
+  information ("no shared officers"), the same negative-result
+  principle as the screen-coverage table.
+- **Deep-linkable**: the active tab lives in the URL hash, so
+  `#network` is shareable and survives a reload.
+- **Degrades safely.** Panels are visible by default and JS only
+  *hides* the inactive ones, so a script failure or disabled JS yields
+  the full stacked report rather than a blank page &mdash; which matters
+  because these files are meant to be archived and reopened years
+  later. A print stylesheet reveals every tab, so printing or saving to
+  PDF doesn't silently drop seven eighths of the report.
+- The filter box searches **all** tabs and switches to the first one
+  that matches, instead of appearing to find nothing when a name only
+  occurs under People.
+
 Both `--report-html` (file output) and `--serve` (the browser UI) share
 one report layout, built around finding one entity's whole picture in
 one place instead of piecing it back together from a flat,
