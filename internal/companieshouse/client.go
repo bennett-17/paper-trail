@@ -265,11 +265,15 @@ type PreviousName struct {
 
 // Company is a company's public profile.
 type Company struct {
-	CompanyNumber    string         `json:"companyNumber"`
-	Name             string         `json:"name"`
-	Status           string         `json:"status,omitempty"`
-	Type             string         `json:"type,omitempty"`
-	IncorporatedOn   string         `json:"incorporatedOn,omitempty"`
+	CompanyNumber  string `json:"companyNumber"`
+	Name           string `json:"name"`
+	Status         string `json:"status,omitempty"`
+	Type           string `json:"type,omitempty"`
+	IncorporatedOn string `json:"incorporatedOn,omitempty"`
+	// DissolvedOn is the company's date_of_cessation -- present only
+	// for a dissolved company, empty for a live one. Confirmed live on
+	// company 07346536 (dissolved 2012-12-11, incorporated 2010-08-16).
+	DissolvedOn      string         `json:"dissolvedOn,omitempty"`
 	RegisteredOffice Address        `json:"registeredOffice,omitempty"`
 	SICCodes         []string       `json:"sicCodes,omitempty"`
 	PreviousNames    []PreviousName `json:"previousNames,omitempty"`
@@ -313,6 +317,7 @@ type companyResponse struct {
 	CompanyStatus           string     `json:"company_status"`
 	Type                    string     `json:"type"`
 	DateOfCreation          string     `json:"date_of_creation"`
+	DateOfCessation         string     `json:"date_of_cessation"`
 	RegisteredOfficeAddress addressRaw `json:"registered_office_address"`
 	SICCodes                []string   `json:"sic_codes"`
 	PreviousCompanyNames    []struct {
@@ -382,6 +387,7 @@ func (c *Client) GetCompany(number string) (Company, error) {
 		Status:                       resp.CompanyStatus,
 		Type:                         resp.Type,
 		IncorporatedOn:               resp.DateOfCreation,
+		DissolvedOn:                  resp.DateOfCessation,
 		RegisteredOffice:             resp.RegisteredOfficeAddress.toAddress(),
 		SICCodes:                     resp.SICCodes,
 		PreviousNames:                previousNames,

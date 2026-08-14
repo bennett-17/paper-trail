@@ -706,9 +706,14 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				r.extra = append(r.extra, pscOpacityIndicators(statements, outstandingCharges, entityLabel)...)
 			}
 
+			// Captured out of the profile block below so they survive to
+			// entity construction -- both feed lifespan analysis
+			// (risk.ShortLivedCompanies), which needs the pair.
+			var formedOn, dissolvedOn string
 			if company, err := chClient.GetCompany(hit.CompanyNumber); err != nil {
 				note("%s (%s) profile: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
+				formedOn, dissolvedOn = company.IncorporatedOn, company.DissolvedOn
 				if hit.Type == "registered-overseas-entity" {
 					evidence := "registered as an overseas entity (owns or controls UK land/property while incorporated abroad)"
 					if company.ForeignRegistryCountry != "" {
@@ -859,7 +864,10 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				r.extra = append(r.extra, pscSanctionsAdjacentChange(activePSCs, hit.Name, entityLabel, officerCache, note)...)
 			}
 
-			termEntities = append(termEntities, risk.NewEntity("companieshouse", hit.CompanyNumber, hit.Name, addrs, people))
+			chEntity := risk.NewEntity("companieshouse", hit.CompanyNumber, hit.Name, addrs, people)
+			chEntity.FormedOn = formedOn
+			chEntity.DissolvedOn = dissolvedOn
+			termEntities = append(termEntities, chEntity)
 
 			// Two-hop officer fan-out -- the mechanism that actually
 			// surfaces a shared director connecting this company to
@@ -1838,6 +1846,7 @@ func gatherIrelandEntities(queries []string, limit int, cache *riskcache.Cache, 
 			}
 			e := risk.NewEntity("ireland", c.Number, c.Name, addrs, nil)
 			e.FormedOn = c.RegisteredOn
+			e.DissolvedOn = c.DissolvedOn
 			termEntities = append(termEntities, e)
 		}
 		r.entities = termEntities

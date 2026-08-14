@@ -170,3 +170,82 @@ func TestFastModeSkipsBothOFSISubScreens(t *testing.T) {
 		}
 	}
 }
+
+func TestCoverageNoteRoundTrips(t *testing.T) {
+	notes := []string{
+		coverageNote("UK sanctions screen", 14, 0),
+		coverageNote("SAM.gov Exclusions", 3, 2),
+	}
+	got := parseScreenCoverage(notes)
+	if len(got) != 2 {
+		t.Fatalf("got %d coverage entries, want 2: %+v", len(got), got)
+	}
+	// Sorted by source, so SAM.gov comes first.
+	if got[0].Source != "SAM.gov Exclusions" || got[0].Screened != 3 || got[0].Matched != 2 {
+		t.Errorf("got[0] = %+v, want SAM.gov Exclusions 3/2", got[0])
+	}
+	if got[1].Source != "UK sanctions screen" || got[1].Screened != 14 || got[1].Matched != 0 {
+		t.Errorf("got[1] = %+v, want UK sanctions screen 14/0", got[1])
+	}
+	if !got[1].Clean() {
+		t.Error("14 screened / 0 matched should report Clean()")
+	}
+	if got[0].Clean() {
+		t.Error("3 screened / 2 matched must not report Clean()")
+	}
+}
+
+func TestScreenCoverageCleanRequiresActualWork(t *testing.T) {
+	// A screen that never ran (0 screened) is NOT "clean" -- that's the
+	// exact conflation this whole feature exists to prevent.
+	if (screenCoverage{Source: "x", Screened: 0, Matched: 0}).Clean() {
+		t.Error("a screen that checked nothing must not report Clean()")
+	}
+}
+
+func TestParseScreenCoverageIgnoresOtherNotes(t *testing.T) {
+	notes := []string{
+		"Companies House: some ordinary error note",
+		tripNote("OpenFEC"),
+		"SAM.gov Exclusions: skipped (no API key configured)",
+		coverageNote("UN sanctions screen", 7, 1),
+		"not even a prefixed note",
+	}
+	got := parseScreenCoverage(notes)
+	if len(got) != 1 || got[0].Source != "UN sanctions screen" {
+		t.Errorf("got %+v, want only the one real coverage note", got)
+	}
+}
+
+// TestCoverageNoteDoesNotDisturbSourceHealth guards the shared notes
+// channel: coverage notes and health notes travel together, and a
+// coverage note must never be misread as a degraded or skipped source.
+func TestCoverageNoteDoesNotDisturbSourceHealth(t *testing.T) {
+	notes := []string{
+		coverageNote("UK sanctions screen", 14, 0),
+		coverageNote("Sanctions screen", 14, 0),
+	}
+	h := parseSourceHealth(notes)
+	if !h.Clean() {
+		t.Errorf("coverage notes alone produced source health %+v, want clean", h)
+	}
+}
+
+// TestCoverageCountsOnlySuccessfulChecks documents the bug this
+// feature nearly shipped with: a screen whose requests all FAILED was
+// reporting "3 names screened, no matches", which reads as an
+// all-clear when nothing was actually checked. Coverage counts only
+// names whose request came back successfully, so a degraded source
+// reports 0 screened rather than a false negative result.
+func TestCoverageCountsOnlySuccessfulChecks(t *testing.T) {
+	// A screen that dequeued 3 names but had every request fail should
+	// emit 0 covered -- and 0 covered is not Clean(), so nothing in the
+	// report can read it as "checked and found nothing".
+	c := parseScreenCoverage([]string{coverageNote("INTERPOL Red Notices", 0, 0)})
+	if len(c) != 1 {
+		t.Fatalf("got %+v, want one entry", c)
+	}
+	if c[0].Clean() {
+		t.Error("a screen that completed 0 successful checks must not report Clean() -- that's a false all-clear")
+	}
+}

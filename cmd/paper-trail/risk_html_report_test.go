@@ -504,3 +504,58 @@ func TestWriteReportHTMLRendersReviewedIndicatorCollapsed(t *testing.T) {
 		t.Error("expected the score to still count the reviewed indicator in full")
 	}
 }
+
+func TestWriteReportHTMLRendersScreenCoverageIncludingCleanResults(t *testing.T) {
+	report := riskReportJSON{
+		Queries:  []string{"Example"},
+		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
+		Score:    risk.Score{Total: 0},
+		ScreenCoverage: []screenCoverage{
+			{Source: "SAM.gov Exclusions", Screened: 3, Matched: 2},
+			{Source: "UK sanctions screen", Screened: 14, Matched: 0},
+		},
+	}
+
+	path := filepath.Join(t.TempDir(), "report.html")
+	if err := writeReportHTML(report, nil, "", path); err != nil {
+		t.Fatalf("writeReportHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	html := string(data)
+
+	if !strings.Contains(html, "<h2>What was checked</h2>") {
+		t.Error("expected a screen-coverage section")
+	}
+	// The whole point: a clean result is stated positively.
+	if !strings.Contains(html, "no matches") {
+		t.Error("expected the clean UK sanctions result to be rendered as an explicit \"no matches\"")
+	}
+	if !strings.Contains(html, "2 matched") {
+		t.Error("expected the non-clean SAM.gov result to show its match count")
+	}
+	if !strings.Contains(html, "UK sanctions screen") || !strings.Contains(html, "SAM.gov Exclusions") {
+		t.Error("expected both screens named in the coverage table")
+	}
+}
+
+func TestWriteReportHTMLOmitsCoverageSectionWhenNoScreensRan(t *testing.T) {
+	report := riskReportJSON{
+		Queries:  []string{"Example"},
+		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
+		Score:    risk.Score{Total: 0},
+	}
+	path := filepath.Join(t.TempDir(), "report.html")
+	if err := writeReportHTML(report, nil, "", path); err != nil {
+		t.Fatalf("writeReportHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	if strings.Contains(string(data), "<h2>What was checked</h2>") {
+		t.Error("expected no coverage section at all when no screen reported coverage")
+	}
+}

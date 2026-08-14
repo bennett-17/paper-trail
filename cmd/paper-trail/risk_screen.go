@@ -39,6 +39,8 @@ func screenUSSanctions(queries []string, entities []risk.Entity, progress *progr
 	}
 
 	screened := map[string]bool{}
+	covered := map[string]bool{}
+	matched := map[string]bool{}
 	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
@@ -56,7 +58,9 @@ func screenUSSanctions(queries []string, entities []risk.Entity, progress *progr
 			return
 		}
 		breaker.Record(nil)
+		covered[key] = true
 		for _, hit := range result.Hits {
+			matched[key] = true
 			extra = append(extra, risk.Indicator{
 				Code:        "sanctions_match",
 				Description: "Name matched a US restricted-party list",
@@ -102,6 +106,7 @@ func screenUSSanctions(queries []string, entities []risk.Entity, progress *progr
 			screen(p, e.Label())
 		}
 	}
+	notes = append(notes, coverageNote("Sanctions screen", len(covered), len(matched)))
 	return extra, notes
 }
 
@@ -115,6 +120,8 @@ func screenUKSanctions(queries []string, entities []risk.Entity, progress *progr
 	}
 	ofsiClient := ofsi.NewClient()
 	screened := map[string]bool{}
+	covered := map[string]bool{}
+	matched := map[string]bool{}
 	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
@@ -132,6 +139,7 @@ func screenUKSanctions(queries []string, entities []risk.Entity, progress *progr
 			return
 		}
 		breaker.Record(nil)
+		covered[key] = true
 		wantName := risk.NormalizeNameFuzzy(name)
 		for _, hit := range result.Hits {
 			// Confirmed live: this search matches on individual
@@ -149,6 +157,7 @@ func screenUKSanctions(queries []string, entities []risk.Entity, progress *progr
 			if wantName != "" && risk.NormalizeNameFuzzy(hit.Name) != wantName {
 				continue
 			}
+			matched[key] = true
 			extra = append(extra, risk.Indicator{
 				Code:        "uk_sanctions_match",
 				Description: "Name matched the UK Sanctions List (OFSI)",
@@ -183,6 +192,7 @@ func screenUKSanctions(queries []string, entities []risk.Entity, progress *progr
 			screen(p, e.Label())
 		}
 	}
+	notes = append(notes, coverageNote("UK sanctions screen", len(covered), len(matched)))
 	return extra, notes
 }
 
@@ -203,6 +213,8 @@ func screenICIJOffshoreLeaks(queries []string, entities []risk.Entity, progress 
 	}
 	icijClient := icij.NewClient()
 	screened := map[string]bool{}
+	covered := map[string]bool{}
+	matched := map[string]bool{}
 	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
@@ -220,10 +232,12 @@ func screenICIJOffshoreLeaks(queries []string, entities []risk.Entity, progress 
 			return
 		}
 		breaker.Record(nil)
+		covered[key] = true
 		for _, m := range matches {
 			if !m.Match {
 				continue
 			}
+			matched[key] = true
 			extra = append(extra, risk.Indicator{
 				Code:        "icij_offshore_leaks_match",
 				Description: "Name matched a record in the ICIJ Offshore Leaks Database (Panama Papers/Paradise Papers/Pandora Papers/Offshore Leaks/Bahamas Leaks) -- inclusion reflects appearing in one of these leaks, which covers many entirely legal offshore structures, so on its own this is not evidence of wrongdoing, per ICIJ's own guidance, but it's a specific, real lead worth investigating further",
@@ -242,6 +256,7 @@ func screenICIJOffshoreLeaks(queries []string, entities []risk.Entity, progress 
 			screen(p, e.Label())
 		}
 	}
+	notes = append(notes, coverageNote("ICIJ Offshore Leaks Database", len(covered), len(matched)))
 	return extra, notes
 }
 
@@ -285,6 +300,7 @@ func screenUNSanctions(queries []string, entities []risk.Entity, progress *progr
 	}
 
 	screened := map[string]bool{}
+	matched := map[string]bool{}
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
 		if key == "" || screened[key] {
@@ -302,6 +318,7 @@ func screenUNSanctions(queries []string, entities []risk.Entity, progress *progr
 				continue // the same designation matched via both its own name and an alias
 			}
 			seenRef[d.ReferenceNumber] = true
+			matched[key] = true
 			kind := "individual"
 			if d.IsEntity {
 				kind = "entity"
@@ -324,6 +341,7 @@ func screenUNSanctions(queries []string, entities []risk.Entity, progress *progr
 			screen(p, e.Label())
 		}
 	}
+	notes = append(notes, coverageNote("UN sanctions screen", len(screened), len(matched)))
 	return extra, notes
 }
 
@@ -348,6 +366,8 @@ func screenSAMExclusions(queries []string, entities []risk.Entity, progress *pro
 	}
 
 	screened := map[string]bool{}
+	covered := map[string]bool{}
+	matched := map[string]bool{}
 	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
@@ -365,7 +385,9 @@ func screenSAMExclusions(queries []string, entities []risk.Entity, progress *pro
 			return
 		}
 		breaker.Record(nil)
+		covered[key] = true
 		for _, ex := range exclusions {
+			matched[key] = true
 			extra = append(extra, risk.Indicator{
 				Code:        "sam_exclusion",
 				Description: "Name matched the US SAM.gov Exclusions list -- an already-adjudicated federal debarment/suspension/exclusion action barring this firm or individual from federal contracts or assistance, not a correlation, but still a name-only match to verify like any other list hit here",
@@ -384,6 +406,7 @@ func screenSAMExclusions(queries []string, entities []risk.Entity, progress *pro
 			screen(p, e.Label())
 		}
 	}
+	notes = append(notes, coverageNote("SAM.gov Exclusions", len(covered), len(matched)))
 	return extra, notes
 }
 
@@ -400,6 +423,8 @@ func screenInterpolRedNotices(queries []string, entities []risk.Entity, progress
 	}
 	interpolClient := interpol.NewClient()
 	screened := map[string]bool{}
+	covered := map[string]bool{}
+	matched := map[string]bool{}
 	var breaker circuitBreaker
 	screen := func(name, screenedFor string) {
 		key := strings.ToLower(strings.TrimSpace(name))
@@ -417,6 +442,7 @@ func screenInterpolRedNotices(queries []string, entities []risk.Entity, progress
 			return
 		}
 		breaker.Record(nil)
+		covered[key] = true
 		wantName := risk.NormalizeNameFuzzy(name)
 		for _, n := range notices {
 			// Same guard screenUKSanctions uses and for the same
@@ -430,6 +456,7 @@ func screenInterpolRedNotices(queries []string, entities []risk.Entity, progress
 			if wantName != "" && risk.NormalizeNameFuzzy(fullName) != wantName {
 				continue
 			}
+			matched[key] = true
 			evidence := fmt.Sprintf("%s (entity ID %s)", fullName, n.EntityID)
 			if n.DateOfBirth != "" {
 				evidence += fmt.Sprintf(", born %s", n.DateOfBirth)
@@ -455,6 +482,7 @@ func screenInterpolRedNotices(queries []string, entities []risk.Entity, progress
 			screen(p, e.Label())
 		}
 	}
+	notes = append(notes, coverageNote("INTERPOL Red Notices", len(covered), len(matched)))
 	return extra, notes
 }
 
@@ -471,6 +499,8 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 	}
 	note := func(format string, a ...any) { notes = append(notes, "Companies House: "+fmt.Sprintf(format, a...)) }
 	checked := map[string]bool{}
+	covered := map[string]bool{}
+	matchedNames := map[string]bool{}
 	var breaker circuitBreaker
 	for _, e := range entities {
 		if e.Source != "companieshouse" && e.Source != "ukcharity" {
@@ -492,6 +522,7 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 				continue
 			}
 			breaker.Record(nil)
+			covered[key] = true
 			wantName := risk.NormalizeNameFuzzy(p)
 			for _, hit := range hits {
 				// Confirmed live: this search endpoint matches on
@@ -505,6 +536,7 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 				if wantName == "" || risk.NormalizeNameFuzzy(hit.Name) != wantName {
 					continue
 				}
+				matchedNames[key] = true
 				extra = append(extra, risk.Indicator{
 					Code:        "disqualified_director",
 					Description: "Name matches a UK disqualified-directors register entry -- an adjudicated regulatory action, not a correlation, but still a name-only match; confirm identity (address/date of birth) before treating it as the same person",
@@ -515,6 +547,11 @@ func screenDisqualifiedDirectors(chClient *companieshouse.Client, entities []ris
 			}
 		}
 	}
+	// Deliberately labelled "Disqualified directors", not "Companies
+	// House" like this screen's other notes: Companies House is also a
+	// gatherer, and attributing this coverage to it would read as though
+	// the whole source had been reduced to one name check.
+	notes = append(notes, coverageNote("Disqualified directors", len(covered), len(matchedNames)))
 	return extra, notes
 }
 
@@ -545,6 +582,8 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 	wdClient := wikidata.NewClient()
 
 	checked := map[string]bool{}
+	covered := map[string]bool{}
+	matchedNames := map[string]bool{}
 	var breaker circuitBreaker
 	for _, e := range entities {
 		for _, p := range e.People {
@@ -575,14 +614,20 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 				qids = append(qids, c.QID)
 			}
 			if len(matched) == 0 {
+				// No same-name candidate at all: a completed, clean check.
+				covered[key] = true
 				continue
 			}
 
 			occupations, err := wdClient.Occupations(qids)
 			if err != nil {
+				// Half-finished: candidates found but never classified, so
+				// this name is NOT covered -- reporting it as clean would
+				// be the exact false-reassurance this tally exists to avoid.
 				note("%q occupations: %v", p, err)
 				continue
 			}
+			covered[key] = true
 			for _, c := range matched {
 				isPolitician := false
 				for _, occ := range occupations[c.QID] {
@@ -594,6 +639,7 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 				if !isPolitician {
 					continue
 				}
+				matchedNames[key] = true
 				extra = append(extra, risk.Indicator{
 					Code:        "pep_match",
 					Description: "Name matches a real person Wikidata tags with the occupation \"politician\" -- a standard AML/KYC Politically Exposed Person screen. A common name can still collide with an unrelated real politician (this is Wikidata's own name-matching, not a confirmed identity check), and even a genuine match isn't wrongdoing on its own -- PEP status means extra scrutiny is conventionally warranted, not that anything improper happened",
@@ -604,6 +650,7 @@ func screenPoliticallyExposedPersons(entities []risk.Entity, progress *progressR
 			}
 		}
 	}
+	notes = append(notes, coverageNote("Wikidata PEP screen", len(covered), len(matchedNames)))
 	return extra, notes
 }
 

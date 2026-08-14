@@ -63,6 +63,13 @@ type Entity struct {
 	// has no clean formation date at all).
 	FormedOn string `json:"formedOn,omitempty"`
 
+	// DissolvedOn is when the entity ceased to exist on its register,
+	// in whatever raw format the source returns (same parsing as
+	// FormedOn). Empty for a still-live entity, and empty for every
+	// source that doesn't publish one -- used only by
+	// ShortLivedCompanies, which needs both dates to measure a lifespan.
+	DissolvedOn string `json:"dissolvedOn,omitempty"`
+
 	// LinkedGroup is an explicit, source-asserted grouping key -- set
 	// only when the source itself says two records are part of one
 	// group (e.g. the UK Charity Commission's registered number, shared
@@ -607,6 +614,7 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, SequentialRegistrationNumbers(entities)...)
 	indicators = append(indicators, NearDuplicateNames(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
+	indicators = append(indicators, ShortLivedCompanies(entities)...)
 	indicators = append(indicators, extra...)
 	indicators = append(indicators, ConvergentRisk(indicators)...)
 	indicators = append(indicators, EntityCluster(indicators)...)

@@ -1075,6 +1075,21 @@ does.
   well-documented entity can legitimately rack up several unrelated
   weak hits (say, a shared registered-agent address plus a common
   institutional director) with nothing improper going on.
+- **short_lived_company_cluster**: several entities in one scan
+  dissolved within 24 months of being formed -- the churn signature of
+  a phoenix-company pattern (wound up and re-formed to shed
+  liabilities) or a mini-umbrella network (many micro-companies spun up
+  and discarded to farm employment-tax allowances). Read with real
+  caution and weighted accordingly (2): the overwhelming majority of
+  short-lived companies are ordinary small businesses that failed,
+  which is neither wrongdoing nor a red flag. It deliberately fires
+  only on a *cluster*, never on a single company, and what makes one
+  worth pursuing is overlap with the other signals in the report --
+  confirmed live, where a real cluster surfaced alongside
+  mail_drop_address and mass_nominee_officer on the same entity, which
+  is exactly the convergence convergent_risk exists to catch. Needs
+  both a formation and a dissolution date, so it only applies to
+  sources publishing both (UK Companies House, Ireland CRO today).
 - **entity_cluster**: the graph-shaped version of the same idea --
   instead of one entity converging on 3+ distinct indicator *types*
   (convergent_risk) or one *pair* sharing 2+ kinds of evidence
@@ -1207,6 +1222,21 @@ weight-sorted indicator list:
   timestamp there would be noise, not signal.
 
 #### Reliability: circuit breakers, source health, and partial re-scans
+
+- **Screen coverage (what came back clean)**: every report also states
+  what was *ruled out*, not just what was found -- "35 names screened
+  against the UK Sanctions List, no matches" is a real result, and
+  without it a reader can't tell "checked and clean" apart from "never
+  checked". Only the adjudicated-list screens report coverage
+  (sanctions, SAM.gov exclusions, disqualified directors, PEP, ICIJ
+  offshore leaks), because those are the checks where *not* being on
+  the list means something; mention-style screens (news, filings,
+  litigation dockets) are deliberately excluded, since "no article
+  mentions this entity" is not exculpatory in any comparable way.
+  Crucially, a name only counts as screened once its request actually
+  **succeeded** -- a source whose requests failed reports 0 screened
+  rather than a misleading all-clear, so a degraded source can never
+  masquerade as a clean bill of health.
 
 - Every per-name-scoped screen (sanctions, ICIJ, SAM.gov, disqualified
   directors, PEP, domain age, Certificate Transparency, EDGAR
@@ -1350,6 +1380,23 @@ weight-sorted indicator list:
   `--reviewed-file` -- `--case` *is* that path selection, not an extra
   filter on top. `--exclude`'s own inline comma-flag still composes
   with a case, for a one-off term you don't want stored.
+- `--evidence-dir <path>` records the raw HTTP response behind every
+  API call the scan makes into a dated evidence bundle: a `responses/`
+  directory plus a `manifest.json` listing each response's URL, status,
+  timestamp, byte count, and SHA-256. This exists because public
+  registers **change** -- companies dissolve, officers resign, PSC
+  records get amended, sanctions designations are added and lifted --
+  so a report can quietly become unreproducible. The obvious challenge
+  to any published finding is "the register doesn't say that", and this
+  is the contemporaneous receipt that answers it. The per-response
+  SHA-256 means later alteration of the bundle is detectable.
+  - **API keys are redacted** from every recorded URL, and request
+    headers are never recorded at all, so a bundle is safe to hand to
+    an editor or lawyer. Verified live against a real 292-response
+    scan: no configured credential appeared anywhere in the bundle.
+  - Off by default. It writes third-party data (including personal data
+    like officer names and addresses) to disk, which should be a
+    deliberate choice and becomes your responsibility to handle.
 - `--fail-on <band>` (LOW, MEDIUM, or HIGH) makes the process exit
   non-zero if the final confidence band reaches that level or higher
   -- the report is still written/printed either way, only the exit
@@ -1783,6 +1830,7 @@ internal/crtsh/              # crt.sh Certificate Transparency log client -- no 
 internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
+internal/evidence/           # --evidence-dir raw-response capture (credential-redacting HTTP recorder)
 internal/gazette/            # The Gazette (UK statutory insolvency notices) client -- no API key needed
 internal/gdelt/              # GDELT global news-mention/tone client -- no API key needed
 internal/gleif/              # GLEIF Legal Entity Identifier database client -- no API key needed

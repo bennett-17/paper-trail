@@ -33,7 +33,7 @@ var completionFlags = map[string]string{
 	"samgov":         "--json",
 	"ireland":        "--number --limit --json",
 	"interpol":       "--limit --json",
-	"risk":           "--input-file --batch --serve --fast --retry-failed-sources --limit --output --graph --html --report-html --graph-csv --entities-csv --graph-graphml --cache-ttl --diff --watch --top --min-weight --indicator --min-corroboration --exclude --exclude-file --reviewed-file --case --fail-on --webhook --summary --no-color --quiet --json",
+	"risk":           "--input-file --batch --serve --fast --retry-failed-sources --limit --output --graph --html --report-html --graph-csv --entities-csv --graph-graphml --cache-ttl --diff --watch --top --min-weight --indicator --min-corroboration --exclude --exclude-file --reviewed-file --case --evidence-dir --fail-on --webhook --summary --no-color --quiet --json",
 }
 
 const bashCompletionScript = `# paper-trail bash completion

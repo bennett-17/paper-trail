@@ -212,6 +212,7 @@ func serveScanSSE(w http.ResponseWriter, r *http.Request, tmpl *template.Templat
 		ExcludedIndicators: excludedCount,
 		ReviewedIndicators: reviewedCount,
 		SourceHealth:       parseSourceHealth(notes),
+		ScreenCoverage:     parseScreenCoverage(notes),
 	}, nil, "")
 
 	var buf bytes.Buffer

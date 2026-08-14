@@ -30,6 +30,7 @@ type reportHTMLView struct {
 	ExcludedCount  int
 	ReviewedCount  int
 	SourceHealth   sourceHealth
+	ScreenCoverage []screenCoverage
 	Diff           *riskReportDiff
 	DiffSource     string
 	GeneratedAt    string
@@ -159,6 +160,7 @@ func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource s
 		ExcludedCount:  report.ExcludedIndicators,
 		ReviewedCount:  report.ReviewedIndicators,
 		SourceHealth:   report.SourceHealth,
+		ScreenCoverage: report.ScreenCoverage,
 		Diff:           diff,
 		DiffSource:     diffSource,
 		GeneratedAt:    time.Now().Format("2006-01-02 15:04:05 MST"),
@@ -438,6 +440,12 @@ const reportStyle = `<style>
   }
   .flag-irrelevant { background: var(--med); color: #1a1a1a; }
   .flag-cached { background: var(--panel-border); color: var(--muted); font-weight: 400; }
+  .coverage-table { border-collapse: collapse; width: 100%; margin-bottom: 1.2em; }
+  .coverage-table th, .coverage-table td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--panel-border); }
+  .coverage-table th { font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+  .coverage-table td.num { font-variant-numeric: tabular-nums; }
+  .coverage-clean { color: var(--low); font-weight: 600; }
+  .coverage-hit { color: var(--high); font-weight: 600; }
   /* A reviewed indicator is dimmed and collapsed by default -- a fourth
      axis alongside the severity tiers, not a replacement for them: a
      reviewed Confirmed-fact indicator is still worth a second glance
@@ -576,6 +584,23 @@ const reportBodyTemplate = `{{define "reportBody"}}
   {{if .SourceHealth.Degraded}}<div class="field"><strong>Degraded</strong> (repeatedly failed mid-scan -- likely a live outage or rate limit; whatever this source didn't find is a real gap, not a confirmed absence): {{range $i, $s := .SourceHealth.Degraded}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
   {{if .SourceHealth.Skipped}}<div class="field"><strong>Skipped</strong> (no API key configured -- routine, not an error): {{range $i, $s := .SourceHealth.Skipped}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{end}}
 </div>
+{{end}}
+
+{{if .ScreenCoverage}}
+<h2>What was checked</h2>
+<p class="meta">Every adjudicated-list screen this scan ran, including the ones that came back clean &mdash; so a negative result is visible as a result, not as an absence you have to infer. Only sanctions, exclusion, disqualification, PEP, and offshore-leaks screens appear here: those are the checks where "not on this list" means something. Mention-style screens (news, filings, litigation dockets) are deliberately excluded, since "no article mentions this entity" is not exculpatory in any comparable way.</p>
+<table class="coverage-table">
+  <thead><tr><th>Screen</th><th>Names checked</th><th>Result</th></tr></thead>
+  <tbody>
+  {{range .ScreenCoverage}}
+    <tr>
+      <td>{{.Source}}</td>
+      <td class="num">{{.Screened}}</td>
+      <td>{{if .Clean}}<span class="coverage-clean">no matches</span>{{else}}<span class="coverage-hit">{{.Matched}} matched</span>{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
 {{end}}
 
 <h2>Entities</h2>

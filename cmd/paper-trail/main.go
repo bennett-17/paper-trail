@@ -1248,6 +1248,25 @@ bookkeeping. Mutually exclusive with an explicit --exclude-file/
 --reviewed-file, since --case IS that path selection, not an extra
 filter layered on top; --exclude's own inline comma-flag still
 composes fine with a case, for a one-off term you don't want stored.
+Every report also states what came back CLEAN, not just what was
+found: each adjudicated-list screen (sanctions, SAM.gov exclusions,
+disqualified directors, PEP, ICIJ offshore leaks) reports how many
+names it checked and how many matched, so "35 names screened, no
+matches" is visible as a result rather than an absence you have to
+infer. A name counts as screened only once its request actually
+succeeded -- a failing source reports 0, never a false all-clear.
+Mention-style screens (news, filings, litigation) deliberately don't
+report coverage: a null result there isn't exculpatory the same way.
+--evidence-dir <path> records the raw HTTP response behind every API
+call into a dated bundle (responses/ plus a manifest.json carrying each
+response's URL, status, timestamp, and SHA-256). Public registers
+change, so a report can become unreproducible through no fault of
+anyone's; this is the contemporaneous receipt showing what a source
+actually said on the day it was queried, and the per-response hash
+makes later alteration of the bundle detectable. API keys are redacted
+from recorded URLs and request headers are never recorded, so a bundle
+is safe to hand to someone else. Off by default: it writes third-party
+data, including personal data, to disk.
 --fail-on <band> (LOW, MEDIUM, or HIGH) makes the process exit non-zero
 if the final confidence band (after --exclude, --top, etc. above have
 all been applied) reaches that level or higher -- so a scan can be

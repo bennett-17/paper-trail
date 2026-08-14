@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -150,6 +152,76 @@ func parseSourceHealth(notes []string) sourceHealth {
 	sort.Strings(h.Degraded)
 	sort.Strings(h.Skipped)
 	return h
+}
+
+// screenCoverage is one screen's own account of what it checked and
+// how much of it came back clean -- the negative result, which every
+// report before this one silently discarded.
+//
+// This matters for the same reason a lab reports its controls: a
+// report that only ever accumulates suspicion is biased by
+// construction. "14 names screened against the UK Sanctions List, 0
+// matched" is a real finding about those 14 names, and its absence
+// left readers unable to tell "checked and clean" apart from "never
+// checked at all" -- two situations the source-health summary above
+// only partly separates (it knows a source was skipped or degraded,
+// not how much work a healthy source actually did).
+type screenCoverage struct {
+	Source   string `json:"source"`
+	Screened int    `json:"screened"` // distinct names/terms actually sent to the source
+	Matched  int    `json:"matched"`  // how many of those produced at least one hit
+}
+
+// Clean reports whether this screen checked something and found
+// nothing -- the case worth stating positively in a report.
+func (c screenCoverage) Clean() bool { return c.Screened > 0 && c.Matched == 0 }
+
+// coverageNote encodes a screen's coverage into the same notes channel
+// tripNote already uses, so no screen needs a wider signature just to
+// report a count. Deliberately readable as prose too: it appears
+// verbatim in the notes list, where it reads as an ordinary line.
+//
+// Only the "adjudicated list" screens emit one -- sanctions, exclusion,
+// disqualification, PEP, and offshore-leaks checks -- because those are
+// the screens where a clean result actually means something ("this name
+// is not on that list"). The mention-style screens (news, filings,
+// litigation dockets) deliberately do NOT: "no news article mentions
+// this entity" is not exculpatory in any comparable way, and reporting
+// it in the same breath would overstate what a null result there proves.
+func coverageNote(source string, screened, matched int) string {
+	return fmt.Sprintf("%s: screened %d name(s) against this source, %d matched", source, screened, matched)
+}
+
+var coverageNoteRE = regexp.MustCompile(`^screened (\d+) name\(s\) against this source, (\d+) matched$`)
+
+// parseScreenCoverage pulls every coverageNote back out of a finished
+// scan's notes, deduplicated by source (last one wins) and sorted, so
+// the report can state what was ruled out. Notes that aren't coverage
+// notes are ignored, same defensive posture as parseSourceHealth.
+func parseScreenCoverage(notes []string) []screenCoverage {
+	bySource := map[string]screenCoverage{}
+	for _, n := range notes {
+		source, rest, ok := strings.Cut(n, ": ")
+		if !ok {
+			continue
+		}
+		m := coverageNoteRE.FindStringSubmatch(rest)
+		if m == nil {
+			continue
+		}
+		screened, err1 := strconv.Atoi(m[1])
+		matched, err2 := strconv.Atoi(m[2])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		bySource[source] = screenCoverage{Source: source, Screened: screened, Matched: matched}
+	}
+	out := make([]screenCoverage, 0, len(bySource))
+	for _, c := range bySource {
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Source < out[j].Source })
+	return out
 }
 
 // sourceFilter, when non-nil, restricts gatherAndScore to a subset of
