@@ -22,10 +22,13 @@ type reportHTMLView struct {
 	Score          risk.Score
 	EntityCards    []entityCard
 	CardGroups     []entityCardGroup
-	Duplicates     map[string][]string
+	Duplicates     map[string][]duplicateRef
 	IrrelevantCard map[string]bool
+	VerifiedAt     map[string]string
+	Timeline       []timelineEntry
 	People         []personEntry
 	ExcludedCount  int
+	ReviewedCount  int
 	SourceHealth   sourceHealth
 	Diff           *riskReportDiff
 	DiffSource     string
@@ -148,15 +151,100 @@ func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource s
 		Score:          report.Score,
 		EntityCards:    cards,
 		CardGroups:     groupCardsByTier(cards),
-		Duplicates:     possibleDuplicates(cards),
+		Duplicates:     possibleDuplicates(cards, report.Entities),
 		IrrelevantCard: irrelevant,
+		VerifiedAt:     verifiedAtByLabel(report.Entities),
+		Timeline:       buildTimeline(report.Score.Indicators),
 		People:         buildPersonPanel(report.Entities),
 		ExcludedCount:  report.ExcludedIndicators,
+		ReviewedCount:  report.ReviewedIndicators,
 		SourceHealth:   report.SourceHealth,
 		Diff:           diff,
 		DiffSource:     diffSource,
 		GeneratedAt:    time.Now().Format("2006-01-02 15:04:05 MST"),
 	}
+}
+
+// timelineEntry is one dated indicator, laid out chronologically in
+// the HTML report's own timeline section rather than by weight or by
+// entity. Same data as the entity cards -- nothing here is a separate
+// finding -- reordered along the one axis those views can't show.
+type timelineEntry struct {
+	Date        string // YYYY-MM-DD, always parseable (see buildTimeline)
+	Code        string
+	Entity      string // the indicator's first named entity, "" if it names none
+	Description string
+	Evidence    string
+	Weight      int
+}
+
+// buildTimeline collects every indicator carrying a usable Date into
+// one chronological list, oldest first. This is a deliberately partial
+// first version: only a subset of indicator types populate Date at all
+// today (see risk.Indicator.Date), and one without a usable date is
+// simply absent here rather than shown with a guessed one -- so the
+// timeline is honest about what it knows, never padded. Widening
+// coverage is additive: any construction site that starts setting Date
+// shows up here automatically, with no change to this function.
+//
+// An unparseable stored Date is skipped rather than crashing or
+// sorting arbitrarily, so a future source sending an unexpected format
+// degrades to "absent from the timeline", the same as no date at all.
+func buildTimeline(indicators []risk.Indicator) []timelineEntry {
+	var out []timelineEntry
+	for _, ind := range indicators {
+		date := risk.NormalizeIndicatorDate(ind.Date)
+		if date == "" {
+			continue
+		}
+		entity := ""
+		if len(ind.Entities) > 0 {
+			entity = ind.Entities[0]
+		}
+		out = append(out, timelineEntry{
+			Date:        date,
+			Code:        ind.Code,
+			Entity:      entity,
+			Description: ind.Description,
+			Evidence:    ind.Evidence,
+			Weight:      ind.Weight,
+		})
+	}
+	// Oldest first: a timeline reads forward. Ties break on code then
+	// entity so output stays deterministic run to run (several real
+	// indicators genuinely share one date -- that's often the point).
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Date != out[j].Date {
+			return out[i].Date < out[j].Date
+		}
+		if out[i].Code != out[j].Code {
+			return out[i].Code < out[j].Code
+		}
+		return out[i].Entity < out[j].Entity
+	})
+	return out
+}
+
+// verifiedAtByLabel indexes report.Entities' VerifiedAt by Label(),
+// keeping only entities that actually have one set (i.e. were served
+// from --cache-ttl's on-disk cache this run, see riskcache.Cache.Get)
+// -- displayed as "cached, verified <time>", reformatted from the
+// stored RFC3339 value for readability, falling back to the raw
+// stored string on the (should-never-happen) case it doesn't parse
+// rather than silently dropping a value that IS there.
+func verifiedAtByLabel(entities []risk.Entity) map[string]string {
+	out := map[string]string{}
+	for _, e := range entities {
+		if e.VerifiedAt == "" {
+			continue
+		}
+		display := e.VerifiedAt
+		if t, err := time.Parse(time.RFC3339, e.VerifiedAt); err == nil {
+			display = t.Format("2006-01-02 15:04 MST")
+		}
+		out[e.Label()] = display
+	}
+	return out
 }
 
 // reportTemplate parses page (a full HTML document's worth of
@@ -169,11 +257,26 @@ func newReportHTMLView(report riskReportJSON, diff *riskReportDiff, diffSource s
 // cases, not duplicated.
 func reportTemplate(name, page string) (*template.Template, error) {
 	return template.New(name).Funcs(template.FuncMap{
-		"weightClass":     weightClass,
-		"confidenceClass": confidenceClass,
-		"sub":             func(a, b int) int { return a - b },
-		"otherEntities":   otherEntities,
+		"weightClass":        weightClass,
+		"confidenceClass":    confidenceClass,
+		"sub":                func(a, b int) int { return a - b },
+		"otherEntities":      otherEntities,
+		"dupsWithConfidence": dupsWithConfidence,
 	}).Parse(page + reportBodyTemplate)
+}
+
+// dupsWithConfidence filters dups down to just the labels at the given
+// confidence ("likely" or "possible") -- lets the template render the
+// two tiers with their own wording (see reportBodyTemplate's dup-note
+// block) without a template-language filter of its own.
+func dupsWithConfidence(dups []duplicateRef, confidence string) []string {
+	var out []string
+	for _, d := range dups {
+		if d.Confidence == confidence {
+			out = append(out, d.Label)
+		}
+	}
+	return out
 }
 
 // writeReportHTML writes a single self-contained HTML file rendering
@@ -334,6 +437,37 @@ const reportStyle = `<style>
     white-space: nowrap;
   }
   .flag-irrelevant { background: var(--med); color: #1a1a1a; }
+  .flag-cached { background: var(--panel-border); color: var(--muted); font-weight: 400; }
+  /* A reviewed indicator is dimmed and collapsed by default -- a fourth
+     axis alongside the severity tiers, not a replacement for them: a
+     reviewed Confirmed-fact indicator is still worth a second glance
+     eventually, just not on every re-run. */
+  .indicator-reviewed { opacity: 0.62; }
+  .indicator-reviewed summary { cursor: pointer; }
+  .indicator-reviewed[open] { opacity: 0.85; }
+  /* Timeline entries reuse the same left-severity-stripe language as
+     .entity-card, so a reader doesn't learn a second visual system for
+     the same weights. */
+  .timeline-entry {
+    border-left: 3px solid var(--panel-border);
+    padding: 6px 0 6px 12px;
+    margin-bottom: 10px;
+  }
+  .timeline-entry.sev-high { border-left-color: var(--high); }
+  .timeline-entry.sev-med { border-left-color: var(--med); }
+  .timeline-entry.sev-low { border-left-color: var(--low); }
+  .timeline-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .timeline-date { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .timeline-code { color: var(--muted); font-size: 0.9em; }
+  .reviewed-tag {
+    font-size: 0.78em;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+    background: var(--panel-border);
+    color: var(--muted);
+  }
   .dup-note {
     font-size: 0.88em;
     color: var(--muted);
@@ -341,6 +475,7 @@ const reportStyle = `<style>
     padding-top: 6px;
     margin: 6px 0 10px;
   }
+  .dup-note.dup-likely { color: var(--med); font-weight: 600; }
   .person-card {
     border: 1px solid var(--panel-border);
     border-radius: 4px;
@@ -464,6 +599,9 @@ const reportBodyTemplate = `{{define "reportBody"}}
 {{if gt .ExcludedCount 0}}
 <p class="meta">{{.ExcludedCount}} indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.</p>
 {{end}}
+{{if gt .ReviewedCount 0}}
+<p class="meta">{{.ReviewedCount}} indicator(s) marked reviewed (--reviewed-file) -- still counted in the score below in full, just dimmed and collapsed so they stop competing for attention on every re-run.</p>
+{{end}}
 
 <div class="score-line">
   Risk score: <strong>{{.Score.Total}}</strong>
@@ -485,10 +623,22 @@ const reportBodyTemplate = `{{define "reportBody"}}
     <div class="entity-card-head">
       <span class="entity-card-name">{{$label}}</span>
       {{if index $.IrrelevantCard $label}}<span class="flag flag-irrelevant" title="This entity's own name doesn't share a distinctive word with any search term -- it may have surfaced via a generic keyword collision rather than a genuine connection to what was searched for. Not a verdict, just worth a second look.">possibly unrelated to search</span>{{end}}
+      {{with index $.VerifiedAt $label}}<span class="flag flag-cached" title="This entity was reused from --cache-ttl's on-disk cache rather than fetched live this run -- everything else in this report reflects the live state as of the report's own generated-at time above, but this one entity's data is only as fresh as its own cache timestamp.">(cached, verified {{.}})</span>{{end}}
       <span class="weight-tag {{weightClass .TotalWeight}}">+{{.TotalWeight}}</span>
     </div>
-    {{if $dups}}<div class="field dup-note">Possibly the same entity as: {{range $i, $d := $dups}}{{if $i}}, {{end}}{{$d}}{{end}} &mdash; verify before treating as one; sources are shown separately on purpose.</div>{{end}}
+    {{$likelyDups := dupsWithConfidence $dups "likely"}}
+    {{$possibleDups := dupsWithConfidence $dups "possible"}}
+    {{if $likelyDups}}<div class="field dup-note dup-likely">Likely the same entity as: {{range $i, $d := $likelyDups}}{{if $i}}, {{end}}{{$d}}{{end}} &mdash; same normalized name AND a shared address or person; verify before treating as one, sources are shown separately on purpose.</div>{{end}}
+    {{if $possibleDups}}<div class="field dup-note">Possibly the same entity as: {{range $i, $d := $possibleDups}}{{if $i}}, {{end}}{{$d}}{{end}} &mdash; verify before treating as one; sources are shown separately on purpose.</div>{{end}}
     {{range .Indicators}}
+    {{if .Reviewed}}
+    <details class="indicator indicator-reviewed {{weightClass .Weight}}">
+      <summary><span class="weight-tag {{weightClass .Weight}}">+{{.Weight}}</span> <span class="reviewed-tag" title="Marked reviewed via --reviewed-file: you've already looked at this one. It still counts toward the score in full -- unlike --exclude, which removes an indicator from the score entirely -- it's just collapsed here so it stops competing for attention on every re-run.">reviewed</span> {{.Description}}</summary>
+      {{$others := otherEntities . $label}}
+      {{if $others}}<div class="field">Also linked to: {{range $i, $e := $others}}{{if $i}}; {{end}}{{$e}}{{end}}</div>{{end}}
+      <div class="field">Evidence: {{.Evidence}}</div>
+    </details>
+    {{else}}
     <div class="indicator {{weightClass .Weight}}">
       <span class="weight-tag {{weightClass .Weight}}">+{{.Weight}}</span>
       <div class="desc">{{.Description}}</div>
@@ -496,6 +646,7 @@ const reportBodyTemplate = `{{define "reportBody"}}
       {{if $others}}<div class="field">Also linked to: {{range $i, $e := $others}}{{if $i}}; {{end}}{{$e}}{{end}}</div>{{end}}
       <div class="field">Evidence: {{.Evidence}}</div>
     </div>
+    {{end}}
     {{end}}
   </div>
   {{end}}
@@ -513,6 +664,22 @@ const reportBodyTemplate = `{{define "reportBody"}}
 <div class="person-card">
   <div class="person-name">{{.Name}}</div>
   <div class="field">Linked to {{len .Entities}} entities: {{range $i, $e := .Entities}}{{if $i}}; {{end}}{{$e}}{{end}}</div>
+</div>
+{{end}}
+{{end}}
+
+{{if .Timeline}}
+<h2>Timeline</h2>
+<p class="meta">Every indicator above that carries a specific date, in chronological order &mdash; the one axis the by-entity and by-person views can't show. Nothing here is a new finding: each entry appears above too, just reordered by when it happened. Deliberately partial &mdash; only some indicator types carry a date at all today, and an indicator without one is left out entirely rather than shown with a guessed date, so absence from this list says nothing about an indicator's importance.</p>
+{{range .Timeline}}
+<div class="timeline-entry {{weightClass .Weight}}">
+  <div class="timeline-head">
+    <span class="timeline-date">{{.Date}}</span>
+    <span class="weight-tag {{weightClass .Weight}}">+{{.Weight}}</span>
+    <span class="timeline-code">{{.Code}}</span>
+  </div>
+  {{if .Entity}}<div class="field">{{.Entity}}</div>{{end}}
+  <div class="field">Evidence: {{.Evidence}}</div>
 </div>
 {{end}}
 {{end}}

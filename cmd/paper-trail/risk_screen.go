@@ -14,6 +14,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/gazette"
 	"github.com/bennett-17/paper-trail/internal/gdelt"
 	"github.com/bennett-17/paper-trail/internal/icij"
+	"github.com/bennett-17/paper-trail/internal/interpol"
 	"github.com/bennett-17/paper-trail/internal/ofsi"
 	"github.com/bennett-17/paper-trail/internal/openfec"
 	"github.com/bennett-17/paper-trail/internal/rdap"
@@ -371,6 +372,77 @@ func screenSAMExclusions(queries []string, entities []risk.Entity, progress *pro
 				Weight:      5,
 				Entities:    []string{screenedFor},
 				Evidence:    fmt.Sprintf("%s -- %s, %s (%s)", ex.Name, ex.Classification, ex.ExclusionType, ex.ExcludingAgency),
+			})
+		}
+	}
+
+	for _, query := range queries {
+		screen(query, fmt.Sprintf("search query: %q", query))
+	}
+	for _, e := range entities {
+		for _, p := range e.People {
+			screen(p, e.Label())
+		}
+	}
+	return extra, notes
+}
+
+// screenInterpolRedNotices screens the same scope as screenUKSanctions
+// (every query term, plus every distinct person name found) against
+// INTERPOL's public Red Notices database -- a member country's own
+// request for a wanted person's arrest, published only after
+// INTERPOL's own review, so a hit is an already-adjudicated fact this
+// project reports, not an inference. Weighted in the same "already-
+// adjudicated" tier as a sanctions match.
+func screenInterpolRedNotices(queries []string, entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
+	note := func(format string, a ...any) {
+		notes = append(notes, "INTERPOL Red Notices: "+fmt.Sprintf(format, a...))
+	}
+	interpolClient := interpol.NewClient()
+	screened := map[string]bool{}
+	var breaker circuitBreaker
+	screen := func(name, screenedFor string) {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || screened[key] || breaker.Skip() {
+			return
+		}
+		screened[key] = true
+		progress.report("INTERPOL Red Notices", "checking %q (%d so far)", name, len(screened))
+		notices, err := interpolClient.SearchByName(name, 5)
+		if err != nil {
+			note("%q: %v", name, err)
+			if breaker.Record(err) {
+				notes = append(notes, tripNote("INTERPOL Red Notices"))
+			}
+			return
+		}
+		breaker.Record(nil)
+		wantName := risk.NormalizeNameFuzzy(name)
+		for _, n := range notices {
+			// Same guard screenUKSanctions uses and for the same
+			// reason: the public search matches on name tokens, so a
+			// query like "James Smith" could otherwise pull back an
+			// unrelated notice that merely shares one token. Require
+			// the full token set (forename + surname) to match before
+			// treating a hit as plausibly the same person. A short
+			// single-word query (wantName == "") skips this filter.
+			fullName := strings.TrimSpace(n.Forename + " " + n.Name)
+			if wantName != "" && risk.NormalizeNameFuzzy(fullName) != wantName {
+				continue
+			}
+			evidence := fmt.Sprintf("%s (entity ID %s)", fullName, n.EntityID)
+			if n.DateOfBirth != "" {
+				evidence += fmt.Sprintf(", born %s", n.DateOfBirth)
+			}
+			if len(n.Nationalities) > 0 {
+				evidence += fmt.Sprintf(", nationality: %s", strings.Join(n.Nationalities, ", "))
+			}
+			extra = append(extra, risk.Indicator{
+				Code:        "interpol_red_notice_match",
+				Description: "Name matched an INTERPOL Red Notice -- a member country's own request for a wanted person's arrest, published after INTERPOL's own review, an already-adjudicated fact rather than a correlation this project inferred",
+				Weight:      5,
+				Entities:    []string{screenedFor},
+				Evidence:    evidence,
 			})
 		}
 	}
@@ -1045,7 +1117,7 @@ func screenCourtListener(clClient *courtlistener.Client, queries []string, limit
 		for _, d := range result.Dockets {
 			extra = append(extra, risk.Indicator{
 				Code:        "litigation_mention",
-				Description: "Name is a party (plaintiff, defendant, or otherwise) to federal litigation archived in CourtListener's RECAP Archive -- scored lowest, the same as edgar_fulltext_mention and gdelt_news_mention, since being named in a lawsuit is not an admission or a finding of anything: most federal litigation is routine commercial, contract, or debt-collection activity, and a defendant in a civil suit has not been found liable of anything by virtue of being sued. A lead to read the actual docket over, not proof on its own",
+				Description: "Name is a party (plaintiff, defendant, or otherwise) to federal litigation archived in CourtListener's RECAP Archive -- scored lowest, the same as filing_mention and gdelt_news_mention, since being named in a lawsuit is not an admission or a finding of anything: most federal litigation is routine commercial, contract, or debt-collection activity, and a defendant in a civil suit has not been found liable of anything by virtue of being sued. A lead to read the actual docket over, not proof on its own",
 				Weight:      1,
 				Entities:    []string{fmt.Sprintf("search query: %q", query)},
 				Evidence:    fmt.Sprintf("%s -- %s, filed %s (docket %s): %s", d.CaseName, d.Court, orDash(d.DateFiled), orDash(d.DocketNumber), d.DocketURL),
@@ -1070,7 +1142,7 @@ func screenCourtListener(clClient *courtlistener.Client, queries []string, limit
 // here is far more likely to be an unrelated namesake than a
 // screenDomainAge or screenPoliticallyExposedPersons hit is. Scored at
 // the same lowest weight as litigation_mention/gdelt_news_mention/
-// edgar_fulltext_mention for exactly that reason: a lead to verify
+// filing_mention for exactly that reason: a lead to verify
 // against the contribution's own employer/occupation/committee fields,
 // not a confirmed identity match.
 func screenOpenFECContributions(entities []risk.Entity, progress *progressReporter) (extra []risk.Indicator, notes []string) {
@@ -1217,6 +1289,11 @@ func screenGazetteInsolvencyNotices(queries []string, entities []risk.Entity, li
 				Weight:      1,
 				Entities:    []string{screenedFor},
 				Evidence:    fmt.Sprintf("%s -- %s, published %s: %s", n.Title, orDash(n.Category), orDash(n.Published), n.URL),
+				// The Gazette sends a full ISO datetime; normalized to a
+				// plain date so the timeline can parse every Date the same
+				// way. Empty (and so absent from the timeline) if this
+				// notice happens to carry no parseable publication date.
+				Date: risk.NormalizeIndicatorDate(n.Published),
 			})
 		}
 	}

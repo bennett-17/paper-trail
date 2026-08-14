@@ -72,7 +72,7 @@ func loadBanner() []byte {
 // old synchronous version of this handler both use. There's no session
 // state or database, just one goroutine per open browser tab's /scan
 // connection.
-func runRiskServe(port string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, excludeTerms []string, quiet bool) {
+func runRiskServe(port string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, excludeTerms, reviewedTerms []string, quiet bool) {
 	tmpl, err := reportTemplate("serve", servePageTemplate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: building serve template: %v\n", err)
@@ -85,7 +85,7 @@ func runRiskServe(port string, limit int, cache *riskcache.Cache, cacheTTL time.
 		serveRiskRequest(w, r, tmpl)
 	})
 	mux.HandleFunc("/scan", func(w http.ResponseWriter, r *http.Request) {
-		serveScanSSE(w, r, tmpl, limit, cache, cacheTTL, excludeTerms)
+		serveScanSSE(w, r, tmpl, limit, cache, cacheTTL, excludeTerms, reviewedTerms)
 	})
 	mux.HandleFunc("/banner.png", func(w http.ResponseWriter, r *http.Request) {
 		banner := loadBanner()
@@ -177,7 +177,7 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, pa
 // call simply fails silently into a closed connection). Acceptable for
 // a single-user local tool; threading cancellation through every
 // gather/screen function would be a much larger change for a rare case.
-func serveScanSSE(w http.ResponseWriter, r *http.Request, tmpl *template.Template, limit int, cache *riskcache.Cache, cacheTTL time.Duration, excludeTerms []string) {
+func serveScanSSE(w http.ResponseWriter, r *http.Request, tmpl *template.Template, limit int, cache *riskcache.Cache, cacheTTL time.Duration, excludeTerms, reviewedTerms []string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -203,12 +203,14 @@ func serveScanSSE(w http.ResponseWriter, r *http.Request, tmpl *template.Templat
 
 	entities, notes, score := gatherAndScore(queries, limit, cache, cacheTTL, progress, nil)
 	score, excludedCount := excludeIndicators(score, excludeTerms)
+	score, reviewedCount := markReviewed(score, reviewedTerms)
 	report := newReportHTMLView(riskReportJSON{
 		Queries:            queries,
 		Entities:           entities,
 		Notes:              notes,
 		Score:              score,
 		ExcludedIndicators: excludedCount,
+		ReviewedIndicators: reviewedCount,
 		SourceHealth:       parseSourceHealth(notes),
 	}, nil, "")
 

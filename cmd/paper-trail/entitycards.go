@@ -184,6 +184,51 @@ func cardSharesWordWithQueries(label string, queries []string) bool {
 	return false
 }
 
+// duplicateRef is one "possibly the same entity" cross-reference --
+// the other card's label, plus how confident that specific pairing is
+// (see duplicateConfidence).
+type duplicateRef struct {
+	Label      string
+	Confidence string // "likely" or "possible"
+}
+
+// duplicateConfidence judges how confident a same-normalized-name
+// pairing is that a and b are actually the same real-world entity, not
+// just two unrelated organizations that happen to share a name (the
+// exact WELLS FARGO LTD / Wells Fargo & Company case possibleDuplicates'
+// own doc comment describes). "likely" when they also share an address
+// or a person -- reusing risk.NormalizeText, the exact same
+// normalization SharedAddresses/SharedPeople themselves use, so this
+// stays consistent with what those indicators would themselves already
+// call a match. "possible" otherwise -- today's original, unqualified
+// behavior, unchanged, for the common case where a name match is truly
+// all there is to go on.
+func duplicateConfidence(a, b risk.Entity) string {
+	addrs := map[string]bool{}
+	for _, addr := range a.Addresses {
+		if n := risk.NormalizeText(addr); n != "" {
+			addrs[n] = true
+		}
+	}
+	for _, addr := range b.Addresses {
+		if n := risk.NormalizeText(addr); n != "" && addrs[n] {
+			return "likely"
+		}
+	}
+	people := map[string]bool{}
+	for _, p := range a.People {
+		if n := risk.NormalizeText(p); n != "" {
+			people[n] = true
+		}
+	}
+	for _, p := range b.People {
+		if n := risk.NormalizeText(p); n != "" && people[n] {
+			return "likely"
+		}
+	}
+	return "possible"
+}
+
 // possibleDuplicates finds, for each card, every OTHER card whose own
 // entity name normalizes to the same value -- a cross-reference, not a
 // merge. Cards are deliberately never combined: a real, confirmed
@@ -192,9 +237,17 @@ func cardSharesWordWithQueries(label string, queries []string) bool {
 // genuine Wells Fargo & Company found via EDGAR/GLEIF/LittleSis --
 // silently merging same-named cards together would have hidden that
 // brand-impersonation finding inside the real company's card instead
-// of surfacing it. This only ever adds a "possibly the same entity as"
-// pointer for the reader to check by hand.
-func possibleDuplicates(cards []entityCard) map[string][]string {
+// of surfacing it. This only ever adds a "possibly/likely the same
+// entity as" pointer for the reader to check by hand -- entities is
+// the full resolved entity pool (report.Entities), keyed here by
+// Label() to look up each pairing's own Addresses/People for
+// duplicateConfidence, which entityCard alone doesn't carry.
+func possibleDuplicates(cards []entityCard, entities []risk.Entity) map[string][]duplicateRef {
+	byLabel := make(map[string]risk.Entity, len(entities))
+	for _, e := range entities {
+		byLabel[e.Label()] = e
+	}
+
 	byNormalized := map[string][]string{}
 	for _, c := range cards {
 		name, isQuery := entityNameFromCardLabel(c.Label)
@@ -208,18 +261,25 @@ func possibleDuplicates(cards []entityCard) map[string][]string {
 		byNormalized[norm] = append(byNormalized[norm], c.Label)
 	}
 
-	out := map[string][]string{}
+	out := map[string][]duplicateRef{}
 	for _, labels := range byNormalized {
 		if len(labels) < 2 {
 			continue
 		}
 		sort.Strings(labels)
 		for _, label := range labels {
-			var others []string
+			var others []duplicateRef
 			for _, other := range labels {
-				if other != label {
-					others = append(others, other)
+				if other == label {
+					continue
 				}
+				confidence := "possible"
+				if a, ok := byLabel[label]; ok {
+					if b, ok := byLabel[other]; ok {
+						confidence = duplicateConfidence(a, b)
+					}
+				}
+				others = append(others, duplicateRef{Label: other, Confidence: confidence})
 			}
 			out[label] = others
 		}

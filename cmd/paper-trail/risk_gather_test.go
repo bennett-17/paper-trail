@@ -334,7 +334,7 @@ func TestAppointmentBurstFlagsRealCorporateNomineeDirectorPattern(t *testing.T) 
 		{CompanyNumber: "00000003", CompanyName: "DRUMMAND LTD", AppointedOn: "2014-12-09"},
 		{CompanyNumber: "00000004", CompanyName: "EASTBROOKE DEVELOPMENT LIMITED", AppointedOn: "2014-11-17"},
 	}
-	desc := appointmentBurst(appointments)
+	desc, _ := appointmentBurst(appointments)
 	if desc == "" {
 		t.Fatal("got no flag, want a burst flagged for 3 companies on the same day")
 	}
@@ -353,7 +353,7 @@ func TestAppointmentBurstIgnoresOrdinaryMultiDirectorshipsSpreadOverYears(t *tes
 		{CompanyNumber: "00000002", CompanyName: "SECOND COMPANY LTD", AppointedOn: "2014-06-15"},
 		{CompanyNumber: "00000003", CompanyName: "THIRD COMPANY LTD", AppointedOn: "2019-11-30"},
 	}
-	if desc := appointmentBurst(appointments); desc != "" {
+	if desc, _ := appointmentBurst(appointments); desc != "" {
 		t.Errorf("got %q, want no flag for directorships spread over years", desc)
 	}
 }
@@ -367,7 +367,7 @@ func TestAppointmentBurstDedupesRepeatAppointmentsToSameCompany(t *testing.T) {
 		{CompanyNumber: "00000001", CompanyName: "SAME COMPANY LTD", AppointedOn: "2020-01-03"},
 		{CompanyNumber: "00000002", CompanyName: "OTHER COMPANY LTD", AppointedOn: "2020-01-02"},
 	}
-	if desc := appointmentBurst(appointments); desc != "" {
+	if desc, _ := appointmentBurst(appointments); desc != "" {
 		t.Errorf("got %q, want no flag: only 2 distinct companies, below the threshold of 3", desc)
 	}
 }
@@ -380,7 +380,7 @@ func TestAppointmentBurstSkipsUnparseableDates(t *testing.T) {
 	}
 	// Must not panic, and the two unparseable entries can't contribute
 	// to any window, so this falls well short of the threshold.
-	if desc := appointmentBurst(appointments); desc != "" {
+	if desc, _ := appointmentBurst(appointments); desc != "" {
 		t.Errorf("got %q, want no flag when only 1 of 3 appointments has a parseable date", desc)
 	}
 }
@@ -407,7 +407,7 @@ func TestResignationBurstFlagsRealCorporateNomineeDirectorPattern(t *testing.T) 
 		// Still active -- no resignation date, must not contribute.
 		{CompanyNumber: "00000099", CompanyName: "STILL ACTIVE LTD", AppointedOn: "2014-01-01"},
 	}
-	desc := resignationBurst(appointments)
+	desc, _ := resignationBurst(appointments)
 	if desc == "" {
 		t.Fatal("got no flag, want a resignation burst flagged for the April 2016 cluster")
 	}
@@ -427,7 +427,7 @@ func TestResignationBurstIgnoresStillActiveAppointments(t *testing.T) {
 	}
 	// None of these have a ResignedOn at all -- a burst of new
 	// appointments must not be mistaken for a resignation burst.
-	if desc := resignationBurst(appointments); desc != "" {
+	if desc, _ := resignationBurst(appointments); desc != "" {
 		t.Errorf("got %q, want no flag: nothing here has actually resigned", desc)
 	}
 }
@@ -438,7 +438,7 @@ func TestResignationBurstIgnoresOrdinaryResignationsSpreadOverYears(t *testing.T
 		{CompanyNumber: "00000002", CompanyName: "SECOND LTD", AppointedOn: "2010-01-01", ResignedOn: "2014-06-15"},
 		{CompanyNumber: "00000003", CompanyName: "THIRD LTD", AppointedOn: "2014-06-15", ResignedOn: "2019-11-30"},
 	}
-	if desc := resignationBurst(appointments); desc != "" {
+	if desc, _ := resignationBurst(appointments); desc != "" {
 		t.Errorf("got %q, want no flag for resignations spread over years", desc)
 	}
 }
@@ -476,7 +476,7 @@ func TestSanctionsAdjacentChangeFlagsAppointmentNearDesignation(t *testing.T) {
 		{CompanyNumber: "2", CompanyName: "B LTD", AppointedOn: "2022-05-01"}, // 25 days after designation
 	}
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit)
+	desc, _ := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit)
 	if desc == "" {
 		t.Fatal("got no flag, want one: an appointment fell 25 days after the designation date")
 	}
@@ -490,7 +490,7 @@ func TestSanctionsAdjacentChangeFlagsResignationBeforeDesignation(t *testing.T) 
 		{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2018-01-01", ResignedOn: "2022-03-01"}, // 36 days before designation
 	}
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit)
+	desc, _ := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit)
 	if desc == "" {
 		t.Fatal("got no flag, want one: a resignation fell 36 days before the designation date")
 	}
@@ -505,7 +505,7 @@ func TestSanctionsAdjacentChangeIgnoresDatesOutsideWindow(t *testing.T) {
 		{CompanyNumber: "2", CompanyName: "B LTD", AppointedOn: "2022-12-01", ResignedOn: "2023-06-01"},
 	}
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
+	if desc, _ := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
 		t.Errorf("got %q, want no flag: nothing falls within 90 days of the designation date", desc)
 	}
 }
@@ -514,11 +514,11 @@ func TestSanctionsAdjacentChangeExactBoundary(t *testing.T) {
 	// Exactly 90 days after should still count (<=, not <); 91 should not.
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-01-01"}
 	within := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-01"}} // exactly 90 days
-	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(within), hit); desc == "" {
+	if desc, _ := sanctionsAdjacentChange(appointmentsToDatedRecords(within), hit); desc == "" {
 		t.Error("got no flag at exactly 90 days, want one (boundary is inclusive)")
 	}
 	outside := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-02"}} // 91 days
-	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(outside), hit); desc != "" {
+	if desc, _ := sanctionsAdjacentChange(appointmentsToDatedRecords(outside), hit); desc != "" {
 		t.Errorf("got %q at 91 days, want no flag", desc)
 	}
 }
@@ -526,7 +526,7 @@ func TestSanctionsAdjacentChangeExactBoundary(t *testing.T) {
 func TestSanctionsAdjacentChangeSkipsUnparseableDesignationDate(t *testing.T) {
 	appointments := []companieshouse.Appointment{{CompanyNumber: "1", CompanyName: "A LTD", AppointedOn: "2022-04-01"}}
 	hit := ofsi.Hit{Name: "Jane Doe", DateDesignated: "not-a-date"}
-	if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
+	if desc, _ := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
 		t.Errorf("got %q, want no flag for an unparseable designation date", desc)
 	}
 }
@@ -536,7 +536,7 @@ func TestSanctionsAdjacentChangeFlagsPSCNotifiedNearDesignation(t *testing.T) {
 	// record, notified 12 days before their OFSI designation.
 	records := []datedRecord{{CompanyName: "SHELL LTD", StartOn: "2022-03-25", StartVerb: "notified as a PSC of", EndOn: "", EndVerb: "ceased being a PSC of"}}
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	desc := sanctionsAdjacentChange(records, hit)
+	desc, _ := sanctionsAdjacentChange(records, hit)
 	if desc == "" {
 		t.Fatal("got no flag, want one: notified 12 days before the designation date")
 	}
@@ -548,7 +548,7 @@ func TestSanctionsAdjacentChangeFlagsPSCNotifiedNearDesignation(t *testing.T) {
 func TestSanctionsAdjacentChangeFlagsPSCCeasedNearDesignation(t *testing.T) {
 	records := []datedRecord{{CompanyName: "SHELL LTD", StartOn: "2010-01-01", StartVerb: "notified as a PSC of", EndOn: "2022-04-20", EndVerb: "ceased being a PSC of"}} // 14 days after
 	hit := ofsi.Hit{Name: "Jane Doe", Regime: "Russia", DateDesignated: "2022-04-06"}
-	desc := sanctionsAdjacentChange(records, hit)
+	desc, _ := sanctionsAdjacentChange(records, hit)
 	if desc == "" {
 		t.Fatal("got no flag, want one: ceased 14 days after the designation date")
 	}
@@ -1306,5 +1306,62 @@ func TestGatherNZBNEntitiesNilClientReturnsNothing(t *testing.T) {
 	entities, extra, notes := gatherNZBNEntities(nil, []string{"anything"}, 10, riskcache.New(), time.Hour, newProgressReporter(io.Discard))
 	if entities != nil || extra != nil || notes != nil {
 		t.Errorf("got (%v, %v, %v), want all nil when nzClient is nil", entities, extra, notes)
+	}
+}
+
+func TestWithVerifiedAtStampsCopyWithoutMutatingOriginal(t *testing.T) {
+	original := []risk.Entity{risk.NewEntity("ireland", "1", "Example Ltd", nil, nil)}
+	cachedAt := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+
+	stamped := withVerifiedAt(original, cachedAt)
+
+	if len(stamped) != 1 || stamped[0].VerifiedAt != cachedAt.Format(time.RFC3339) {
+		t.Fatalf("stamped = %+v, want VerifiedAt = %s", stamped, cachedAt.Format(time.RFC3339))
+	}
+	// The original slice/struct riskcache.Cache.Get returned must be
+	// left untouched -- it's the same underlying data every other
+	// caller sharing that cache key (including concurrently, from a
+	// different query term or source) sees.
+	if original[0].VerifiedAt != "" {
+		t.Errorf("original entity was mutated: VerifiedAt = %q, want empty", original[0].VerifiedAt)
+	}
+}
+
+// TestGatherIrelandEntitiesPopulatesVerifiedAtOnCacheHit pre-seeds the
+// cache directly (Set) rather than going through a live/httptest
+// SearchByName call -- gatherIrelandEntities checks the cache before
+// ever touching its client, so this exercises the real cache-hit code
+// path with no network involved, offline-safe like every other test
+// in this file.
+func TestGatherIrelandEntitiesPopulatesVerifiedAtOnCacheHit(t *testing.T) {
+	cache := &riskcache.Cache{Dir: t.TempDir()}
+	cache.Set(riskcache.Key("ireland", "Example Ltd", 10), []risk.Entity{
+		risk.NewEntity("ireland", "12345", "EXAMPLE LTD", nil, nil),
+	})
+
+	entities, _ := gatherIrelandEntities([]string{"Example Ltd"}, 10, cache, time.Hour, newProgressReporter(io.Discard))
+
+	if len(entities) != 1 {
+		t.Fatalf("got %d entities, want 1 from the cache hit: %+v", len(entities), entities)
+	}
+	if entities[0].VerifiedAt == "" {
+		t.Error("expected VerifiedAt to be populated for an entity served from the cache")
+	}
+	if _, err := time.Parse(time.RFC3339, entities[0].VerifiedAt); err != nil {
+		t.Errorf("VerifiedAt = %q is not valid RFC3339: %v", entities[0].VerifiedAt, err)
+	}
+}
+
+// TestNewEntityLeavesVerifiedAtEmpty documents the complementary half
+// of the cache-hit test above: every gatherer's non-cached/live-fetch
+// path builds entities via risk.NewEntity (see e.g.
+// gatherIrelandEntities, gatherACNCEntities), which never touches
+// VerifiedAt at all -- so a live-fetched entity's freshness is only
+// ever implied by the report's own GeneratedAt, never a stale-looking
+// blank timestamp.
+func TestNewEntityLeavesVerifiedAtEmpty(t *testing.T) {
+	e := risk.NewEntity("ireland", "1", "Example Ltd", nil, nil)
+	if e.VerifiedAt != "" {
+		t.Errorf("VerifiedAt = %q, want empty for a freshly-constructed (non-cached) entity", e.VerifiedAt)
 	}
 }

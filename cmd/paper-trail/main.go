@@ -62,6 +62,10 @@ func main() {
 		runGazette(os.Args[2:])
 	case "samgov":
 		runSamgov(os.Args[2:])
+	case "ireland":
+		runIreland(os.Args[2:])
+	case "interpol":
+		runInterpol(os.Args[2:])
 	case "risk":
 		runRisk(os.Args[2:])
 	case "completion":
@@ -110,7 +114,10 @@ Usage:
   paper-trail usaspending <recipient name> [--limit <n>] [--json]
   paper-trail gazette <name> [--limit <n>] [--json]
   paper-trail samgov <name> [--json]
-  paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
+  paper-trail ireland <query> [--limit <n>] [--json]
+  paper-trail ireland --number <company number> [--json]
+  paper-trail interpol <name> [--limit <n>] [--json]
+  paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--reviewed-file <path>] [--case <name>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]
   paper-trail completion bash|zsh
   paper-trail version
 
@@ -504,6 +511,15 @@ docs describe real fuzzy/partial matching, so this fan-out only
 accepts a hit whose returned name normalizes to an exact match of the
 name searched for, ruling out an unrelated same-surname collision
 though not guaranteeing the same real person the way an ID match would.
+Every query term is also searched against Ireland's Companies
+Registration Office (CRO) Open Data Portal -- free and keyless, no
+credential to configure. Its dataset is company records only (name,
+number, status, type, formation/dissolution dates, address), with no
+officer or director data at all, so an Ireland-sourced entity can only
+ever contribute to shared_address and formation_cluster, never
+shared_person -- the same limitation this project's ACNC (Australia)
+integration already has, and for the same reason (its free data has
+no officer data either).
 Every distinct website domain across all resolved entities is also
 looked up in crt.sh's Certificate Transparency log search (free,
 keyless, no registration) -- a ct_shared_certificate indicator fires
@@ -587,7 +603,15 @@ no keyless option -- requires your own free SAM_GOV_API_KEY, register
 at https://sam.gov, go to your Account Details page, and request a
 public API key (shown once -- copy it immediately) -- and this screen
 is skipped cleanly, same as companieshouse/ukcharity without their own
-keys, when it isn't set. And,
+keys, when it isn't set. The same scope is also checked against
+INTERPOL's public Red Notices database (interpol_red_notice_match) --
+free and keyless, no registration. A Red Notice is a member country's
+own request for a wanted person's arrest, published only after
+INTERPOL's own review, so a hit is an already-adjudicated fact this
+tool reports, not an inference, weighted in the same tier as a
+sanctions match. Uses the same full-name-token-match guard as the UK
+sanctions screen below to avoid a same-single-name false positive
+(e.g. a common surname alone shouldn't match an unrelated notice). And,
 when a sanctions hit's own country (or, for a UK hit, its sanctions
 regime, when that regime happens to be named after a country) is on
 FATF's high-risk or increased-monitoring list, a separate
@@ -780,10 +804,10 @@ over, not proof on its own. Each query term is also checked against
 CourtListener's free, keyless RECAP Archive search (federal PACER
 court dockets, run by the nonprofit Free Law Project) for litigation
 naming that party -- litigation_mention, scored the same lowest weight
-as edgar_fulltext_mention/gdelt_news_mention, since being a party to
+as filing_mention/gdelt_news_mention, since being a party to
 litigation isn't an admission of anything and most federal litigation
 is routine commercial or debt-collection activity. Scoped to query
-terms only, more forcing here than for edgar_fulltext_mention/
+terms only, more forcing here than for filing_mention/
 gdelt_news_mention: CourtListener's own documented rate limit is 5
 requests/minute even for a registered free account (confirmed live),
 tighter than GDELT's 12/minute, the previous strictest limit in this
@@ -918,15 +942,23 @@ network of 4 or more entities, naming every member, at a flat weight
 of 2 (below convergent_risk's minimum single-entity payout, since
 "these entities are linked" is weaker per-entity evidence); --exclude
 recomputes this one too, for the same stale-hit reason as
-convergent_risk. Each cluster also names a "hub" -- the member with
-the most distinct direct connections within the network (degree
-centrality), the cheapest useful answer to "which entity does this
-network actually hinge on." Meaningful for a chain- or star-shaped
-network; for a fully-connected clique (every member named together in
-one shared_person indicator, confirmed live as the more common real
-shape) every member ties at the same degree, so the named hub is just
-whichever tied member sorts first alphabetically -- worth knowing
-before reading too much into which name gets picked. Every
+convergent_risk. Each cluster also names a "hub" -- primarily the
+member with the most distinct direct connections within the network
+(degree centrality), the cheapest useful answer to "which entity does
+this network actually hinge on," exactly right for a star-shaped
+network. Degree alone can't distinguish anyone in a fully-connected
+clique (every member named together in one shared_person indicator,
+confirmed live as the more common real shape -- everyone ties at the
+same degree) or, less obviously, a longer chain's interior (every
+non-endpoint node also ties). When 2+ members tie at the max degree,
+betweenness centrality -- how often a member sits on the shortest path
+between two OTHER members, via Brandes' algorithm -- breaks the tie:
+correctly singling out a chain's actual midpoint, or, in a clique,
+tying too (nobody sits "between" anyone else there), which is the
+honest answer, not a flaw. Any remaining tie falls back to whichever
+member sorts first alphabetically, exactly as before betweenness was
+added -- worth knowing before reading too much into which name gets
+picked. Every
 report also carries a plain LOW/MEDIUM/HIGH confidence read next to
 the numeric score, so the headline number comes with an at-a-glance
 signal before digging into individual indicators -- deliberately not a
@@ -990,8 +1022,12 @@ flag -- catching the real, repeated pattern of an entity surfacing
 only via a generic keyword collision, not an actual connection. Cards
 whose entity names normalize to the same bare company name (legal
 suffixes and trailing state-code suffixes stripped) cross-reference
-each other with a "Possibly the same entity as: ..." note instead of
-being merged -- deliberately just a note: a live scan during this
+each other instead of being merged, and that note is confidence-scored:
+"Likely the same entity as: ..." when the pairing also shares an
+address or a person (the exact same normalization shared_address/
+shared_person themselves use), "Possibly the same entity as: ..." (the
+original wording) when the name match is all there is. Deliberately
+just a note either way, never a merge: a live scan during this
 project's own development flagged a UK "WELLS FARGO LTD" shell company
 (mail-drop address, nominee director) alongside the real Wells Fargo &
 Company, and silently merging same-named cards would have hidden that
@@ -999,7 +1035,19 @@ brand-impersonation finding inside the real company's card. A
 "Findings by person" panel lists every officer/director/trustee named
 on 2+ entities alongside every entity they're linked to, and a
 client-side filter box above the cards narrows by substring match
-against each card's name and evidence with no server round-trip.
+against each card's name and evidence with no server round-trip. A
+"Timeline" section lists every indicator that carries a specific date
+in chronological order -- the one axis the by-entity and by-person
+views can't show (a resignation burst three months before a sanctions
+designation reads very differently from one three years after).
+Nothing in it is a new finding, just the same indicators reordered by
+when they happened. Deliberately partial for now: only some indicator
+types carry a date at all (formation_cluster, officer_appointment_burst,
+officer_resignation_burst, sanctions_adjacent_officer_change,
+gazette_insolvency_notice), and an indicator without one is left out
+entirely rather than shown with a guessed date -- so absence from the
+timeline says nothing about an indicator's importance. Widening that
+coverage is additive, not a redesign.
 --graph-csv writes the same nodes/edges as a single denormalized
 edge-list CSV (each endpoint's label/type included directly on the
 row), readable in a spreadsheet or importable into a dedicated
@@ -1045,7 +1093,15 @@ Unset by default: every run is fully live, since that's this tool's
 whole point, and caching is something you opt into, not something that
 silently happens to you. Sanctions screening and full-text mentions are
 never cached even with --cache-ttl set -- that data is time-sensitive
-in a way registration data isn't, so it's always checked fresh.
+in a way registration data isn't, so it's always checked fresh. Every
+entity actually served from the cache (rather than fetched live this
+run) carries its own "(cached, verified <time>)" flag in the HTML
+report (--report-html/--serve), next to its card's name -- so a reader
+can tell "confirmed fresh this run" from "reused from a few hours/days
+ago" at a glance, rather than wrongly assuming every card in the report
+is equally current. A non-cached entity carries no such flag at all --
+its freshness is already implied by the report's own generated-at
+time, so adding a redundant per-entity timestamp there would be noise.
 --diff <path> compares this run against a previously saved --output
 --json report (see --output above), printing what's new since then:
 entities that weren't in the old report, indicators that weren't in
@@ -1099,7 +1155,8 @@ same query would from the command line. Runs until interrupted
 (Ctrl+C). Takes no <query>/--input-file/--batch, and is mutually
 exclusive with --diff/--watch/--fail-on/--webhook (none of
 which make sense when there's no single run to diff/watch/gate on);
---limit/--cache-ttl/--exclude/--exclude-file still apply to every
+--limit/--cache-ttl/--exclude/--exclude-file/--reviewed-file/--case
+still apply to every
 search submitted through the form.
 Every per-name-scoped screen (sanctions, ICIJ, SAM.gov, disqualified
 directors, PEP, domain age, Certificate Transparency, EDGAR full-text,
@@ -1166,6 +1223,31 @@ are recomputed without it. Use this to permanently dismiss a lead
 you've already reviewed and cleared (e.g. --exclude "Example Corp" for
 a known, legitimate shared registered-agent address), across every
 future run, not just this one.
+--reviewed-file <path> (one term per line, same format as
+--exclude-file) is the softer counterpart to --exclude: it does a
+different job. An indicator matching one of its terms keeps its full
+weight and still counts toward the total and the confidence band --
+it's simply marked as already looked at, rendering dimmed and
+collapsed-by-default in the HTML report (--report-html/--serve) and
+tagged "[reviewed]" in the text one. That's for the common case that
+--exclude handles badly: "I've seen this, it's real, but stop drawing
+my eye to it on every re-run" -- as opposed to --exclude's "this isn't
+a real finding at all." A reviewed mark is a fourth axis alongside the
+report's existing severity tiers, not a replacement for them: a
+reviewed Confirmed-fact indicator is still worth a second glance
+eventually, just not every single run. Point successive scans of one
+investigation at the same file and the marks carry across all of them.
+--case <name> is pure convenience over that: it resolves --exclude-file
+and --reviewed-file to ~/.paper-trail/cases/<name>/exclude.txt and
+reviewed.txt (both created empty on first use, both plain text you can
+edit by hand), so every sub-scan of one investigation shares both lists
+without you remembering and retyping one consistent path each time. It
+adds no capability that isn't already there -- pointing two scans at
+the same --exclude-file has always grouped them that way -- only the
+bookkeeping. Mutually exclusive with an explicit --exclude-file/
+--reviewed-file, since --case IS that path selection, not an extra
+filter layered on top; --exclude's own inline comma-flag still
+composes fine with a case, for a one-off term you don't want stored.
 --fail-on <band> (LOW, MEDIUM, or HIGH) makes the process exit non-zero
 if the final confidence band (after --exclude, --top, etc. above have
 all been applied) reaches that level or higher -- so a scan can be

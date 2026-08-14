@@ -45,10 +45,14 @@ registered-agent/address-based relationship mapping).
 | `openfec` | FEC OpenFEC (Schedule A) | itemized US federal campaign contributions by individual | none (works via FEC's shared `DEMO_KEY`) |
 | `usaspending` | USAspending.gov | US federal contracts/grants/loans by recipient | none |
 | `gazette` | The Gazette | UK statutory insolvency notices (companies + individuals) | none |
+| `samgov` | US SAM.gov Exclusions | firms, individuals, and vessels excluded from US federal contracts/assistance | `SAM_GOV_API_KEY` |
+| `ireland` | Ireland's Companies Registration Office (CRO) Open Data Portal | Irish company records (current + dissolved) | none |
+| `interpol` | INTERPOL public Red Notices | member-country wanted-person notices, worldwide | none |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
-Fourteen independent public-data sources across four countries, unified
-under one CLI and one `--json` output convention. Every command is a
+Seventeen independent public-data sources across five countries plus
+one worldwide source, unified under one CLI and one `--json` output
+convention. Every command is a
 live query against a government or government-adjacent API -- no
 scraping, no bulk downloads to maintain, no third-party Go
 dependencies.
@@ -156,6 +160,22 @@ Separately, for organizations that don't file with the SEC at all:
   voluntary arrangements, and personal bankruptcy) by name -- free and
   keyless, and the original statutory publication, not a downstream
   status summary.
+- Searches the US SAM.gov Exclusions list by name -- firms,
+  individuals, and vessels debarred, suspended, or otherwise excluded
+  from federal contracts or financial assistance. Requires your own
+  free `SAM_GOV_API_KEY` (see Setup); no keyless option exists for this
+  source.
+- Searches Ireland's Companies Registration Office (CRO) Open Data
+  Portal by name, or fetches one company's record by exact CRO company
+  number -- free and keyless, covering every company registered in
+  Ireland, current and dissolved. Company records only (name, number,
+  status, type, formation/dissolution dates, address) -- no officer or
+  director data, the same limitation ACNC's free data has for the same
+  reason.
+- Searches INTERPOL's public Red Notices database by name -- free and
+  keyless, no registration. Worldwide in scope, unlike every registry
+  source above: a Red Notice is a member country's own request for a
+  wanted person's arrest, published only after INTERPOL's own review.
 
 And separately, for sanctions screening:
 
@@ -170,6 +190,12 @@ And separately, for sanctions screening:
   designations under UK (post-Brexit) sanctions regulations, which
   overlap heavily with the US lists above but not completely. Unlike
   every other UK source in this project, this needs no API key at all.
+- Searches INTERPOL's public Red Notices database by name -- a member
+  country's own wanted-person request, published only after INTERPOL's
+  own review, so a hit is an already-adjudicated fact, not an
+  inference. Free and keyless. Same full-name-token-match guard as the
+  UK Sanctions List screen (a hit's name tokens must fully match the
+  name being screened, not just share one common word).
 - Screens officer/trustee/beneficial-owner names against Wikidata's own
   "politician" occupation tag -- a Politically Exposed Person (PEP)
   screen, standard AML/KYC guidance this tool didn't have before. Free
@@ -516,21 +542,42 @@ code, just a different final render target.
   guarantee than Companies House's ID-based match, since two different
   people can share an identical full name outright.
 
+#### Ireland: CRO Open Data Portal
+
+- Every query term is also searched against Ireland's Companies
+  Registration Office (CRO) Open Data Portal -- free and keyless, no
+  credential to configure or missing-key case to guard against.
+- The dataset carries company-record fields only (name, number,
+  status, type, formation/dissolution dates, address) -- no officer or
+  director data at all, so an Ireland-sourced entity can only ever
+  contribute to shared_address and formation_cluster below, never
+  shared_person -- the same limitation this project's ACNC (Australia)
+  integration has, and for the same reason (its own free data has no
+  officer data either).
+
 #### Cross-entity matching
 
-- **shared_address** / **shared_person**: a registered/mailing address,
-  phone number, email, or website used by more than one entity, and
-  the same individual appearing as an officer, director, or trustee of
-  more than one of them (an "interlocking directorate").
+- **shared_address** / **shared_phone** / **shared_person**: a
+  registered/mailing address, phone number, email, or website used by
+  more than one entity (addresses and phone numbers each get their own
+  indicator code), and the same individual appearing as an officer,
+  director, or trustee of more than one of them (an "interlocking
+  directorate").
 - **shared_person_fuzzy**: a weaker, lower-scored version of the same
   check for names that only match once titles/honorifics are stripped
   and word order is ignored (different sources format the same person
   differently, and an exact match alone misses that).
-- Addresses get the same fuzzy treatment, stripping suite/unit/floor/
-  room numbers so two entities at the same building under different
-  specific offices still match (e.g. "123 Main St, Suite 200" vs. "123
-  Main St, Suite 450") -- confirmed live catching two real
-  same-building matches a 25-org scan's exact matcher missed entirely.
+- **shared_address_fuzzy**: addresses get the same fuzzy treatment,
+  stripping suite/unit/floor/room numbers so two entities at the same
+  building under different specific offices still match (e.g. "123
+  Main St, Suite 200" vs. "123 Main St, Suite 450") -- confirmed live
+  catching two real same-building matches a 25-org scan's exact
+  matcher missed entirely.
+- **near_duplicate_name**: two entities whose *names* are near-matches
+  of each other once normalized -- catching the deliberate
+  lookalike/typosquat pattern (and the ordinary
+  same-group-different-suffix one) that an exact name comparison
+  misses entirely.
 - Both the exact and fuzzy matchers also fold common Latin diacritics
   before comparing (e.g. "José García" vs. "Jose Garcia", "Müller" vs.
   "Muller") -- a hand-maintained common-character table, not full
@@ -601,6 +648,17 @@ code, just a different final render target.
   `SAM_GOV_API_KEY` (see Setup) -- and this screen is skipped cleanly
   (like companieshouse/ukcharity without their own keys) when it isn't
   set.
+- **interpol_red_notice_match**: the same scope also gets checked
+  against INTERPOL's public Red Notices database -- a member country's
+  own request for a wanted person's arrest, published only after
+  INTERPOL's own review, so a hit is an already-adjudicated fact this
+  project reports, not a correlation it inferred, weighted in the same
+  tier as a sanctions match. Uses the same full-name-token-match guard
+  as uk_sanctions_match, since this search also matches on individual
+  name tokens rather than the whole queried name -- a hit's forename
+  and surname must together normalize to an exact match of the name
+  being screened before it's treated as plausibly the same person.
+  Free and keyless.
 - A separate flag fires when a sanctions hit's own country (or, for a
   UK hit, its sanctions regime, when that regime happens to be named
   after a country) is on FATF's high-risk or increased-monitoring list
@@ -821,7 +879,7 @@ code, just a different final render target.
 
 #### News & filing mentions
 
-- **edgar_fulltext_mention**: each query term is also run against SEC's
+- **filing_mention**: each query term is also run against SEC's
   full-text index (see `fulltext` above) for a mention in some *other*
   company's filing -- its own indicator, scored lowest of the bunch
   since a filing can mention a name for reasons that have nothing to
@@ -878,7 +936,7 @@ code, just a different final render target.
   CourtListener's free, keyless RECAP Archive search -- the largest
   free index of federal PACER court dockets in existence, run by the
   nonprofit Free Law Project -- for federal litigation naming that
-  party. Scored the same lowest weight as edgar_fulltext_mention and
+  party. Scored the same lowest weight as filing_mention and
   gdelt_news_mention: being a party (plaintiff or defendant) to
   litigation is not an admission of anything, and most federal
   litigation is routine commercial, contract, or debt-collection
@@ -1035,15 +1093,25 @@ does.
   "this one entity converges on 3+ independent signal types." Common
   for a large, legitimately multi-subsidiary organization as well as a
   shell-company network, so it's a map to investigate, not a verdict.
-  Each cluster also names a "hub" -- the member with the most distinct
-  direct connections within the network (degree centrality), the
-  cheapest useful answer to "which entity does this network actually
-  hinge on." Meaningful for a chain- or star-shaped network; for a
-  fully-connected clique (every member named together in one
-  shared_person indicator, confirmed live as the more common real
-  shape) every member ties at the same degree, so the named hub is
-  just the alphabetically-first tied member -- worth knowing before
-  reading too much into which name gets picked.
+  Each cluster also names a "hub" -- primarily the member with the most
+  distinct direct connections within the network (degree centrality),
+  the cheapest useful answer to "which entity does this network
+  actually hinge on," exactly right for a star-shaped network. Degree
+  alone can't distinguish anyone in a fully-connected clique (every
+  member named together in one shared_person indicator, confirmed live
+  as the more common real shape -- everyone ties at the same degree)
+  or, less obviously, the interior of a longer chain (every
+  non-endpoint node also ties). When 2 or more members tie at the max
+  degree, betweenness centrality -- how often a member sits on the
+  shortest path between two OTHER members, via Brandes' algorithm --
+  breaks the tie: in a chain it correctly singles out the actual
+  midpoint, since only that member mediates paths between members on
+  either side of it; in a clique it also ties (nobody sits "between"
+  anyone else when every pair is directly connected), which is the
+  honest answer, not a flaw. Any remaining tie -- including a full
+  clique tie -- falls back to the alphabetically-first member, exactly
+  as before betweenness was added, worth knowing before reading too
+  much into which name gets picked.
 - Every report also carries a plain LOW/MEDIUM/HIGH confidence read
   next to the numeric score -- deliberately not a pure function of the
   total, since summing many weak signals shouldn't outrank one strong
@@ -1088,17 +1156,24 @@ weight-sorted indicator list:
   like "Society" or a shared officer's other, unrelated companies).
   Common words (Ltd, Foundation, Society, and, of, ...) don't count on
   their own.
-- **Possible-duplicate cross-reference**: when two or more cards'
-  entity names normalize to the same bare company name (legal
+- **Confidence-scored duplicate cross-reference**: when two or more
+  cards' entity names normalize to the same bare company name (legal
   suffixes and trailing state-code suffixes like "/MN" stripped), each
-  gets a "Possibly the same entity as: ..." note pointing at the
-  others. This is deliberately a note, not a merge -- a live scan
-  during this project's own development flagged a UK "WELLS FARGO
-  LTD" shell company (mail-drop address, nominee director) alongside
-  the real Wells Fargo & Company; silently merging same-named cards
-  together would have hidden that brand-impersonation finding inside
-  the real company's card instead of surfacing it. Every card, and
-  every indicator on it, stays exactly where it was found.
+  gets a note pointing at the others -- and, unlike a plain name match
+  alone, that note is confidence-scored: "Likely the same entity as:
+  ..." when the pairing also shares an address or a person (reusing
+  the exact same address/person normalization shared_address and
+  shared_person themselves use, so this stays consistent with what
+  those indicators would call a match), "Possibly the same entity as:
+  ..." (the original, unqualified wording) when the name match is all
+  there is to go on. This is deliberately a note, not a merge either
+  way -- a live scan during this project's own development flagged a
+  UK "WELLS FARGO LTD" shell company (mail-drop address, nominee
+  director) alongside the real Wells Fargo & Company; silently merging
+  same-named cards together would have hidden that
+  brand-impersonation finding inside the real company's card instead
+  of surfacing it. Every card, and every indicator on it, stays
+  exactly where it was found.
 - **Findings by person**: officers/directors/trustees named on 2 or
   more entities get their own panel entry listing every entity they're
   linked to -- the same cross-entity trace shared_person already
@@ -1108,6 +1183,28 @@ weight-sorted indicator list:
   by substring match against each card's own text (name and evidence)
   with no server round-trip -- a match inside the collapsed
   weak-signal tier auto-opens that section instead of staying hidden.
+- **Timeline**: every indicator carrying a specific date, listed
+  chronologically -- the one axis the by-entity and by-person views
+  can't show (a resignation burst three months before a sanctions
+  designation reads very differently from one three years after).
+  Nothing in it is a new finding: each entry also appears above, just
+  reordered by when it happened. Deliberately partial in this first
+  version -- only some indicator types carry a date at all today
+  (`formation_cluster`, `officer_appointment_burst`,
+  `officer_resignation_burst`, `sanctions_adjacent_officer_change`,
+  `gazette_insolvency_notice`), and an indicator without one is left
+  out entirely rather than shown with a guessed date, so absence from
+  the timeline says nothing about an indicator's importance. Widening
+  the coverage is additive follow-on work, not a redesign: any
+  indicator that starts carrying a date appears here automatically.
+- **Per-source "verified at" timestamps**: an entity actually served
+  from `--cache-ttl`'s on-disk cache (rather than fetched live this
+  run) carries its own "(cached, verified &lt;time&gt;)" flag next to
+  its card's name -- distinguishing "confirmed fresh this run" from
+  "reused from a few hours or days ago" at a glance. A non-cached
+  entity carries no such flag -- its freshness is already implied by
+  the report's own generated-at time, so a redundant per-entity
+  timestamp there would be noise, not signal.
 
 #### Reliability: circuit breakers, source health, and partial re-scans
 
@@ -1200,7 +1297,7 @@ weight-sorted indicator list:
   a database. Runs until interrupted (Ctrl+C); takes no
   `<query>`/`--input-file`/`--batch` and is mutually exclusive with
   `--diff`/`--watch`/`--fail-on`/`--webhook`, though
-  `--limit`/`--cache-ttl`/`--exclude`/`--exclude-file` still apply to
+  `--limit`/`--cache-ttl`/`--exclude`/`--exclude-file`/`--reviewed-file`/`--case` still apply to
   every search submitted through the form.
 
 #### Filtering & output flags
@@ -1227,6 +1324,32 @@ weight-sorted indicator list:
   score/confidence band are recomputed without it. Use this to
   permanently dismiss a lead you've already reviewed and cleared,
   across every future run.
+- `--reviewed-file <path>` (one term per line, same format as
+  `--exclude-file`) is the softer counterpart to `--exclude`, doing a
+  genuinely different job. A matching indicator **keeps its full weight
+  and still counts** toward the total and the confidence band -- it's
+  just marked as already looked at: dimmed and collapsed by default in
+  the HTML report, tagged `[reviewed]` in the text one. That covers the
+  case `--exclude` handles badly: "I've seen this, it's real, but stop
+  drawing my eye to it every re-run," as opposed to "this isn't a real
+  finding at all." A reviewed mark is a fourth axis alongside the
+  severity tiers below, not a replacement for them -- a reviewed
+  Confirmed-fact indicator is still worth a second glance eventually,
+  just not on every single run. Point successive scans of one
+  investigation at the same file and the marks carry across all of
+  them.
+- `--case <name>` is pure convenience on top of that. Pointing two
+  scans at the same `--exclude-file` has **always** grouped them --
+  that's not new, and `--reviewed-file` works the same way. The gap
+  was only bookkeeping: remembering and retyping one consistent path
+  across every sub-scan of one investigation. `--case` resolves both
+  paths for you, to `~/.paper-trail/cases/<name>/exclude.txt` and
+  `reviewed.txt` (created empty on first use, plain text, editable by
+  hand), so a whole investigation shares both lists automatically.
+  Mutually exclusive with an explicit `--exclude-file`/
+  `--reviewed-file` -- `--case` *is* that path selection, not an extra
+  filter on top. `--exclude`'s own inline comma-flag still composes
+  with a case, for a one-off term you don't want stored.
 - `--fail-on <band>` (LOW, MEDIUM, or HIGH) makes the process exit
   non-zero if the final confidence band reaches that level or higher
   -- the report is still written/printed either way, only the exit
@@ -1274,7 +1397,7 @@ names, and addresses to spot patterns (e.g., the same individual showing
 up as an officer across multiple entities). Paper Trail automates the
 first step of that process using freely available government data --
 no API key required for any command except `ukcharity`, `sanctions`,
-and `companieshouse` (see Setup).
+`companieshouse`, `nzbn`, and `samgov` (see Setup).
 
 ## Setup
 
@@ -1487,6 +1610,17 @@ go run ./cmd/paper-trail gazette "Example Name"
 # individuals (requires SAM_GOV_API_KEY -- see Setup)
 go run ./cmd/paper-trail samgov "Example Name"
 
+# Search Ireland's Companies Registration Office (CRO) Open Data
+# Portal by name -- free, keyless, no registration
+go run ./cmd/paper-trail ireland "Example Name"
+
+# Show one company's record by exact CRO company number
+go run ./cmd/paper-trail ireland --number 25332
+
+# Search INTERPOL's public Red Notices database by name -- free,
+# keyless, no registration, worldwide in scope
+go run ./cmd/paper-trail interpol "Example Name"
+
 # Cross-reference a name across every configured source and flag shared
 # addresses, shared officers/trustees, and sanctions hits
 go run ./cmd/paper-trail risk "Example Name"
@@ -1539,6 +1673,20 @@ grep -v "^reviewed:" watchlist.txt | go run ./cmd/paper-trail risk --input-file 
 # unlike --top/--min-weight/--indicator, this removes it from the
 # score entirely, and it stays excluded on every future run
 go run ./cmd/paper-trail risk --input-file watchlist.txt --exclude "Example Corp"
+
+# Mark a lead as already looked at WITHOUT dismissing it -- it keeps
+# its full weight and still counts toward the score, it just renders
+# dimmed and collapsed so it stops competing for attention on re-runs.
+# Point every scan of one investigation at the same file to carry the
+# marks across all of them.
+go run ./cmd/paper-trail risk --input-file watchlist.txt --reviewed-file case-reviewed.txt
+
+# Group every scan of one investigation under a named case -- sugar for
+# pointing --exclude-file and --reviewed-file at
+# ~/.paper-trail/cases/<name>/{exclude,reviewed}.txt (created empty on
+# first use), so dismissals and reviewed marks carry across all of them
+go run ./cmd/paper-trail risk "First Org" --case my-investigation
+go run ./cmd/paper-trail risk "Second Org" --case my-investigation
 
 # Re-check the same watchlist later and see only what's new since a
 # previously saved --output --json report
@@ -1626,7 +1774,7 @@ source <(paper-trail completion zsh)
 
 ```
 .github/workflows/ci.yml     # gofmt/vet/build/test -race on every push and PR to main
-cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, crtsh, courtlistener, littlesis, openfec, usaspending, gazette, risk, completion, version subcommands)
+cmd/paper-trail/             # CLI entrypoint (lookup, filings, graph, fulltext, nonprofit, aucharity, ukcharity, sanctions, uksanctions, companieshouse, person, nzbn, crtsh, courtlistener, littlesis, openfec, usaspending, gazette, samgov, ireland, interpol, risk, completion, version subcommands)
 cmd/smoketest/               # manual live-API validation tool (see Testing below)
 internal/aucharity/          # Australian ACNC charity register client, via data.gov.au
 internal/companieshouse/      # UK Companies House client -- needs COMPANIES_HOUSE_API_KEY
@@ -1636,18 +1784,27 @@ internal/edgar/              # SEC EDGAR client + data models
 internal/edgar/fulltext.go   # EDGAR full-text search (filing content, not company names)
 internal/envfile/            # minimal .env loader (stdlib only, see Setup below)
 internal/gazette/            # The Gazette (UK statutory insolvency notices) client -- no API key needed
+internal/gdelt/              # GDELT global news-mention/tone client -- no API key needed
 internal/gleif/              # GLEIF Legal Entity Identifier database client -- no API key needed
 internal/graph/              # builds a node/edge relationship graph, exports JSON/HTML/CSV/GraphML
+internal/icij/               # ICIJ Offshore Leaks Database client (reconciliation API) -- no API key needed
+internal/interpol/           # INTERPOL public Red Notices client -- no API key needed
+internal/ireland/            # Ireland CRO Open Data Portal client -- no API key needed
 internal/littlesis/          # LittleSis crowdsourced who-knows-who database client -- no API key needed
 internal/nonprofit/          # IRS Form 990 client (via ProPublica), for entities EDGAR can't see
 internal/nzbn/               # New Zealand NZBN + Companies Entity Role Search clients -- needs NZBN_API_KEY
 internal/ofsi/               # UK Sanctions List (OFSI) client -- no API key needed
 internal/openfec/            # FEC OpenFEC (campaign contribution) client -- works via shared DEMO_KEY, or OPENFEC_API_KEY
+internal/rdap/               # RDAP domain-registration lookup (the IETF successor to WHOIS) -- no API key needed
 internal/risk/                # structural red-flag heuristics and scoring (calls no API itself)
 internal/riskcache/           # opt-in on-disk cache for risk --cache-ttl (see Usage below)
+internal/samgov/             # US SAM.gov Exclusions client -- needs SAM_GOV_API_KEY
 internal/sanctions/          # US Consolidated Screening List client -- needs CSL_API_KEY_PRIMARY
 internal/ukcharity/          # UK Charity Commission (England & Wales) client -- needs UK_CHARITY_API_KEY_PRIMARY
+internal/unsc/               # UN Security Council Consolidated Sanctions List client (bulk file) -- no API key needed
 internal/usaspending/        # USAspending.gov (federal contract/grant) client -- no API key needed
+internal/wayback/            # Internet Archive Wayback Machine first-snapshot client -- no API key needed
+internal/wikidata/           # Wikidata client, for the politically-exposed-person (PEP) screen -- no API key needed
 testdata/                    # fixtures used by the offline test suite
 ```
 
@@ -1672,8 +1829,11 @@ No scraping — everything goes through documented public JSON/Atom APIs:
 - `https://api.usaspending.gov/api/v2/search/spending_by_award/` (USAspending.gov -- federal contract/grant awards by recipient name, no API key required)
 - `https://www.thegazette.co.uk/insolvency/notice/data.json` (The Gazette -- the UK's official statutory publication of record, insolvency notice search, no API key required)
 - `https://api.gleif.org/api/v1/` (GLEIF's Legal Entity Identifier database -- worldwide legal-entity search, ownership relationships, and reporting-exception records, no API key required)
+- `https://api.sam.gov/entity-information/v3/exclusions` (US SAM.gov Exclusions -- firms, individuals, and vessels excluded from federal contracts/assistance, requires a free registered API key)
+- `https://opendata.cro.ie/api/3/action/datastore_search` (Ireland's Companies Registration Office (CRO) Open Data Portal, via a CKAN API -- company records, current and dissolved, no API key required)
+- `https://ws-public.interpol.int/notices/v1/red` (INTERPOL's public Red Notices search -- member-country wanted-person notices, worldwide, no API key required)
 
-`ukcharity`, `sanctions`, `companieshouse`, and `nzbn` are the exceptions to this project's no-key model.
+`ukcharity`, `sanctions`, `companieshouse`, `nzbn`, and `samgov` are the exceptions to this project's no-key model.
 
 Every client above retries with exponential backoff on a 429 (rate-limited) response before giving up, so a momentary rate-limit hiccup during a large `risk` scan doesn't skip an entire source.
 
@@ -1701,7 +1861,7 @@ every push as a regression smoke test; run one for longer yourself with:
 go test ./internal/risk/... -run=^$ -fuzz=FuzzFoldDiacritics -fuzztime=60s
 ```
 
-`cmd/smoketest` is a separate, manually-run tool for validating five of
+`cmd/smoketest` is a separate, manually-run tool for validating eight of
 `risk`'s live-API clients directly against their *real* endpoints, not
 the recorded fixtures the offline test suite runs against:
 
@@ -1712,13 +1872,46 @@ go run ./cmd/smoketest littlesis "Wells Fargo"
 go run ./cmd/smoketest openfec "Jane Doe"
 go run ./cmd/smoketest usaspending "Wells Fargo"
 go run ./cmd/smoketest gazette "Wells Fargo"
+go run ./cmd/smoketest samgov "Jane Doe"  # requires SAM_GOV_API_KEY -- see Setup
+go run ./cmd/smoketest ireland "Wells Fargo"
+go run ./cmd/smoketest interpol "Smith"
 ```
+
+Note: INTERPOL's edge (Akamai) returns HTTP 403 "Access Denied" to
+requests from some cloud/datacenter IP ranges (confirmed during this
+integration's own development, run from a sandboxed environment) --
+run the `interpol` smoketest from a normal residential/office network
+if it 403s; that's a network-level block, not a client bug.
 
 Run this yourself when you want to confirm nothing on a source's end has
 drifted (field names, response shapes, SEC's Atom feed title format,
 etc.) — it's deliberately kept out of `go test` and shouldn't be wired
 into CI on a schedule; several of these APIs ask that automated tools
 stay well under their rate limits.
+
+### Performance: where a scan's time actually goes
+
+A real 8-term scan was CPU-profiled (`runtime/pprof` around a live
+`gatherAndScore`, 52 entities and 83 indicators resolved) to check
+whether anything in this project's own code was worth optimizing. The
+answer was an unambiguous no, and the number is worth recording so
+nobody re-derives it:
+
+**480ms of CPU across a 100.4-second scan — 0.48% utilization.** A
+scan is almost entirely network-wait, not computation. Every one of
+this project's own functions profiled at a *flat* cost of zero: all
+their measured time is HTTP, TLS, gzip, and JSON-decode underneath
+them. The structural heuristics (`risk.Assess`, the `Shared*` checks,
+`EntityCluster` and its centrality math) don't appear in the profile
+at all — they're below the sampling floor.
+
+The practical consequence: making a large scan faster is about issuing
+fewer or better-overlapped *requests*, never about faster code. That's
+exactly what the levers this tool already has do — concurrent sources
+and query terms, `--fast`, `--cache-ttl`, and the per-scan
+officer/OFSI memoization — and it's why no optimization came out of
+this profiling pass. Micro-optimizing anything in `internal/risk`
+would be measuring against 0.48% of the runtime.
 
 ## Data license note
 

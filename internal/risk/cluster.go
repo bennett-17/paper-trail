@@ -125,18 +125,43 @@ func EntityCluster(indicators []Indicator) []Indicator {
 		}
 		sort.Strings(codes)
 
-		// Hub: the member with the most distinct direct neighbors
-		// (degree centrality) -- a cheap, first-cut answer to "which
-		// entity does this network actually hinge on," exactly right
-		// for a star-shaped network (one nominee, many companies, each
-		// only ever paired with the nominee) and still meaningful,
-		// just less pointed, for a chain-shaped one. entities is
-		// already sorted, so ties go to the lexicographically first
-		// member -- deterministic, not otherwise significant.
+		// Hub: primarily the member with the most distinct direct
+		// neighbors (degree centrality) -- a cheap, first-cut answer to
+		// "which entity does this network actually hinge on," exactly
+		// right for a star-shaped network (one nominee, many companies,
+		// each only ever paired with the nominee). Degree alone can't
+		// distinguish anyone in two real shapes: a fully-connected
+		// clique (everyone tied at len(entities)-1) or a chain's
+		// interior (every non-endpoint node tied at degree 2) -- when
+		// 2+ members tie at the max degree, betweenness centrality (see
+		// betweenness's own doc comment below) breaks the tie: in a
+		// chain it correctly singles out the actual midpoint, since
+		// only that member sits on shortest paths between members on
+		// either side of it; in a clique it also ties (nobody sits
+		// "between" anyone else there), which is the honest answer, not
+		// a flaw. entities is already sorted, so any remaining tie
+		// (including a full clique tie) falls back to the
+		// lexicographically first member -- deterministic, not
+		// otherwise significant.
 		hub, hubDegree := "", -1
+		var tiedAtMaxDegree []string
 		for _, e := range entities {
-			if d := len(neighbors[e]); d > hubDegree {
+			d := len(neighbors[e])
+			switch {
+			case d > hubDegree:
 				hub, hubDegree = e, d
+				tiedAtMaxDegree = []string{e}
+			case d == hubDegree:
+				tiedAtMaxDegree = append(tiedAtMaxDegree, e)
+			}
+		}
+		if len(tiedAtMaxDegree) > 1 {
+			bc := betweenness(neighbors, entities)
+			bestBC := -1.0
+			for _, e := range tiedAtMaxDegree { // already sorted -> first strictly-greater wins ties
+				if bc[e] > bestBC {
+					hub, bestBC = e, bc[e]
+				}
 			}
 		}
 
@@ -149,6 +174,90 @@ func EntityCluster(indicators []Indicator) []Indicator {
 		})
 	}
 	return out
+}
+
+// betweenness computes, for every member of one component, how often
+// that member sits on a shortest path between two OTHER members --
+// via Brandes' algorithm (BFS-based, O(V*E), trivial at the cluster
+// sizes this package ever deals with: single digits to low tens of
+// entities per scan, confirmed against this project's own largest
+// real scans). Only called as EntityCluster's hub tiebreaker (see its
+// doc comment above), not as a standalone indicator of its own --
+// degree centrality stays the primary, cheaper signal for the
+// clear-cut star case, and this only runs when it's actually needed
+// to disambiguate a tie.
+//
+// The graph is treated as unweighted and undirected (the same
+// assumption degree centrality above already makes -- an indicator
+// either connects two entities or it doesn't; this package has no
+// notion of a stronger or weaker connection). Each shortest path
+// between s and t is discovered once walking out from s and once
+// walking out from t, so every accumulated value is halved at the end
+// to avoid double-counting.
+func betweenness(neighbors map[string]map[string]bool, members []string) map[string]float64 {
+	inComponent := make(map[string]bool, len(members))
+	for _, m := range members {
+		inComponent[m] = true
+	}
+	centrality := make(map[string]float64, len(members))
+	for _, m := range members {
+		centrality[m] = 0
+	}
+
+	for _, s := range members {
+		// Single-source BFS from s over the component, recording (per
+		// Brandes) each node's distance from s, the number of distinct
+		// shortest paths from s reaching it (sigma), and which
+		// neighbors immediately precede it on some shortest path.
+		var stack []string
+		predecessors := map[string][]string{}
+		sigma := map[string]int{s: 1}
+		dist := map[string]int{s: 0}
+		queue := []string{s}
+		for len(queue) > 0 {
+			v := queue[0]
+			queue = queue[1:]
+			stack = append(stack, v)
+
+			neighborNames := make([]string, 0, len(neighbors[v]))
+			for n := range neighbors[v] {
+				if inComponent[n] {
+					neighborNames = append(neighborNames, n)
+				}
+			}
+			sort.Strings(neighborNames) // deterministic traversal order; doesn't affect the final scores, only tie-order within the BFS itself
+
+			for _, w := range neighborNames {
+				if _, seen := dist[w]; !seen {
+					dist[w] = dist[v] + 1
+					queue = append(queue, w)
+				}
+				if dist[w] == dist[v]+1 {
+					sigma[w] += sigma[v]
+					predecessors[w] = append(predecessors[w], v)
+				}
+			}
+		}
+
+		// Accumulate dependency scores back-to-front over the BFS
+		// order -- Brandes' own key insight, avoiding the need to
+		// enumerate every shortest path explicitly.
+		delta := map[string]float64{}
+		for i := len(stack) - 1; i >= 0; i-- {
+			w := stack[i]
+			for _, v := range predecessors[w] {
+				delta[v] += (float64(sigma[v]) / float64(sigma[w])) * (1 + delta[w])
+			}
+			if w != s {
+				centrality[w] += delta[w]
+			}
+		}
+	}
+
+	for m := range centrality {
+		centrality[m] /= 2
+	}
+	return centrality
 }
 
 // RecomputeEntityCluster strips any existing entity_cluster indicators

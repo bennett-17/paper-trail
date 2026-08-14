@@ -316,6 +316,219 @@ func TestParseExcludeTermsMissingFileReturnsError(t *testing.T) {
 	}
 }
 
+func TestMarkReviewedNoOpWhenNoTerms(t *testing.T) {
+	score := risk.Score{
+		Total:      5,
+		Indicators: []risk.Indicator{{Code: "a", Weight: 5, Evidence: "123 Main St"}},
+		Confidence: "MEDIUM",
+	}
+	got, marked := markReviewed(score, nil)
+	if marked != 0 {
+		t.Errorf("marked = %d, want 0", marked)
+	}
+	if got.Indicators[0].Reviewed {
+		t.Error("Reviewed was set with no terms given")
+	}
+}
+
+func TestMarkReviewedMatchesEvidenceCaseInsensitively(t *testing.T) {
+	score := risk.Score{
+		Total: 3,
+		Indicators: []risk.Indicator{
+			{Code: "shared_address", Weight: 2, Evidence: "123 MAIN ST, Suite 200", Entities: []string{"edgar: Example Corp (1)"}},
+			{Code: "formation_cluster", Weight: 1, Evidence: "formed within 3 days", Entities: []string{"edgar: Other Corp (2)"}},
+		},
+	}
+	got, marked := markReviewed(score, []string{"main st"})
+	if marked != 1 {
+		t.Fatalf("marked = %d, want 1", marked)
+	}
+	if !got.Indicators[0].Reviewed {
+		t.Error("the matching shared_address indicator should be marked Reviewed")
+	}
+	if got.Indicators[1].Reviewed {
+		t.Error("the non-matching formation_cluster indicator must not be marked Reviewed")
+	}
+}
+
+func TestMarkReviewedMatchesEntityLabels(t *testing.T) {
+	score := risk.Score{
+		Total: 3,
+		Indicators: []risk.Indicator{
+			{Code: "shared_person", Weight: 3, Evidence: "Jane Example", Entities: []string{"edgar: Seen Corp (1)", "edgar: Other Corp (2)"}},
+		},
+	}
+	got, marked := markReviewed(score, []string{"Seen Corp"})
+	if marked != 1 || !got.Indicators[0].Reviewed {
+		t.Errorf("got %+v (marked %d), want the entity-label match flagged Reviewed", got.Indicators, marked)
+	}
+}
+
+// TestMarkReviewedKeepsScoreAndIndicatorsIntact is the whole point of
+// --reviewed-file existing alongside --exclude: a reviewed indicator is
+// still a real finding that counts in full. Nothing about the score,
+// the indicator list, or the confidence band may change.
+func TestMarkReviewedKeepsScoreAndIndicatorsIntact(t *testing.T) {
+	high := risk.Indicator{Code: "disqualified_director", Weight: 6, Evidence: "already looked at", Entities: []string{"a", "b"}}
+	other := risk.Indicator{Code: "shared_address", Weight: 1, Evidence: "123 Main St", Entities: []string{"a", "b"}}
+	score := risk.Assess(nil, []risk.Indicator{high, other})
+	wantTotal, wantConfidence, wantCount := score.Total, score.Confidence, len(score.Indicators)
+
+	got, marked := markReviewed(score, []string{"already looked at"})
+	if marked != 1 {
+		t.Fatalf("marked = %d, want 1", marked)
+	}
+	if got.Total != wantTotal {
+		t.Errorf("Total = %d, want %d unchanged -- a reviewed indicator still counts in full", got.Total, wantTotal)
+	}
+	if got.Confidence != wantConfidence {
+		t.Errorf("Confidence = %q, want %q unchanged", got.Confidence, wantConfidence)
+	}
+	if len(got.Indicators) != wantCount {
+		t.Errorf("got %d indicators, want %d -- marking reviewed must never remove one", len(got.Indicators), wantCount)
+	}
+}
+
+func TestMarkReviewedIsIdempotent(t *testing.T) {
+	score := risk.Score{
+		Indicators: []risk.Indicator{
+			{Code: "shared_address", Weight: 2, Evidence: "123 Main St", Entities: []string{"a"}},
+		},
+	}
+	score, first := markReviewed(score, []string{"main st"})
+	score, second := markReviewed(score, []string{"main st"})
+	if first != 1 {
+		t.Errorf("first pass marked %d, want 1", first)
+	}
+	if second != 0 {
+		t.Errorf("second pass marked %d, want 0 -- an already-reviewed indicator must not be double-counted", second)
+	}
+	if !score.Indicators[0].Reviewed {
+		t.Error("Reviewed should still be set after the second pass")
+	}
+}
+
+func TestParseReviewedTermsReadsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reviewed.txt")
+	content := "Seen Corp\n\n# a comment\nAnother Seen Entity\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	terms, err := parseReviewedTerms(path)
+	if err != nil {
+		t.Fatalf("parseReviewedTerms: %v", err)
+	}
+	want := []string{"Seen Corp", "Another Seen Entity"}
+	if len(terms) != len(want) {
+		t.Fatalf("got %v, want %v", terms, want)
+	}
+	for i := range want {
+		if terms[i] != want[i] {
+			t.Errorf("got %v, want %v", terms, want)
+		}
+	}
+}
+
+func TestParseReviewedTermsEmptyPathIsNoOp(t *testing.T) {
+	terms, err := parseReviewedTerms("")
+	if err != nil || terms != nil {
+		t.Errorf("got (%v, %v), want (nil, nil) for an unset --reviewed-file", terms, err)
+	}
+}
+
+func TestParseReviewedTermsMissingFileReturnsError(t *testing.T) {
+	if _, err := parseReviewedTerms(filepath.Join(t.TempDir(), "does-not-exist.txt")); err == nil {
+		t.Fatal("expected an error for a missing --reviewed-file")
+	}
+}
+
+// caseFilePaths writes under the user's real home directory, so these
+// tests point HOME at a temp dir -- t.Setenv restores it afterward.
+func TestCaseFilePathsCreatesBothFilesEmpty(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	excludePath, reviewedPath, err := caseFilePaths("example-investigation")
+	if err != nil {
+		t.Fatalf("caseFilePaths: %v", err)
+	}
+
+	wantDir := filepath.Join(home, ".paper-trail", "cases", "example-investigation")
+	if filepath.Dir(excludePath) != wantDir || filepath.Dir(reviewedPath) != wantDir {
+		t.Errorf("paths = %q, %q, want both under %q", excludePath, reviewedPath, wantDir)
+	}
+	if filepath.Base(excludePath) != "exclude.txt" || filepath.Base(reviewedPath) != "reviewed.txt" {
+		t.Errorf("paths = %q, %q, want exclude.txt and reviewed.txt", excludePath, reviewedPath)
+	}
+	for _, p := range []string{excludePath, reviewedPath} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("expected %q to have been created: %v", p, err)
+			continue
+		}
+		if len(data) != 0 {
+			t.Errorf("%q = %q, want an empty file on first use", p, data)
+		}
+	}
+}
+
+// TestCaseFilePathsPreservesExistingContent guards the whole point of
+// --case: it runs on EVERY scan of a case, not just the first, so it
+// must never truncate the lists the user has built up.
+func TestCaseFilePathsPreservesExistingContent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	excludePath, reviewedPath, err := caseFilePaths("ongoing")
+	if err != nil {
+		t.Fatalf("first caseFilePaths: %v", err)
+	}
+	if err := os.WriteFile(excludePath, []byte("Cleared Corp\n"), 0o644); err != nil {
+		t.Fatalf("writing exclude fixture: %v", err)
+	}
+	if err := os.WriteFile(reviewedPath, []byte("Seen Corp\n"), 0o644); err != nil {
+		t.Fatalf("writing reviewed fixture: %v", err)
+	}
+
+	if _, _, err := caseFilePaths("ongoing"); err != nil {
+		t.Fatalf("second caseFilePaths: %v", err)
+	}
+
+	for p, want := range map[string]string{excludePath: "Cleared Corp\n", reviewedPath: "Seen Corp\n"} {
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("reading %q: %v", p, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%q = %q after a second call, want %q preserved", p, got, want)
+		}
+	}
+}
+
+func TestCaseFilePathsRejectsPathTraversalAndSeparators(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	for _, name := range []string{"..", "../escape", "a/b", `a\b`, "", "with space", "semi;colon"} {
+		if _, _, err := caseFilePaths(name); err == nil {
+			t.Errorf("caseFilePaths(%q): got nil error, want a rejection -- this value becomes a real directory name", name)
+		}
+	}
+}
+
+func TestCaseFilePathsAcceptsOrdinaryNames(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	for _, name := range []string{"case1", "my-case", "my_case", "case.2024"} {
+		if _, _, err := caseFilePaths(name); err != nil {
+			t.Errorf("caseFilePaths(%q) = %v, want it accepted", name, err)
+		}
+	}
+}
+
 func TestValidateFailOnAcceptsKnownBandsCaseInsensitively(t *testing.T) {
 	for _, v := range []string{"LOW", "low", "Medium", "HIGH", ""} {
 		if err := validateFailOn(v); err != nil {

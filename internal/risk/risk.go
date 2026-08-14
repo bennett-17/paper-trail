@@ -82,6 +82,15 @@ type Entity struct {
 	// signal in this package that can connect entities with no other
 	// visible overlap at all.
 	UltimateParentID string `json:"ultimateParentId,omitempty"`
+
+	// VerifiedAt is set only when this entity was served from
+	// riskcache's on-disk --cache-ttl cache rather than fetched live
+	// this run -- RFC3339, empty otherwise. A non-cached entity's
+	// freshness is already implied by the report's own GeneratedAt, so
+	// this deliberately isn't populated for every entity, only the
+	// ones a reader might otherwise wrongly assume are as fresh as
+	// everything else in the same report.
+	VerifiedAt string `json:"verifiedAt,omitempty"`
 }
 
 // NewEntity builds an Entity from its core fields (addresses/people may
@@ -115,6 +124,28 @@ type Indicator struct {
 	Weight      int      `json:"weight"`
 	Entities    []string `json:"entities"` // human-readable "source: name (id)" for each entity involved
 	Evidence    string   `json:"evidence"` // the specific matched value (address, name, sanctions program, etc.)
+
+	// Reviewed is set (by cmd/paper-trail's --reviewed-file, not
+	// anything in this package) when a term matching this indicator's
+	// Evidence or Entities has been marked as already looked at. Unlike
+	// --exclude, a reviewed indicator keeps its full weight and still
+	// counts toward Total/Confidence -- this is "I've seen this, stop
+	// drawing my eye to it every re-run," not "this isn't a real
+	// finding." A separate axis from the severity tiers the HTML report
+	// already groups by, not a replacement for them.
+	Reviewed bool `json:"reviewed,omitempty"`
+
+	// Date is when the thing this indicator describes actually
+	// happened -- YYYY-MM-DD, empty when this indicator has no single
+	// meaningful date (most don't: "these two entities share an
+	// address" isn't an event). Populated only where a construction
+	// site already holds one clean, unambiguous date; an indicator
+	// without one is simply absent from the HTML report's timeline
+	// section rather than shown with a guessed date. Deliberately a
+	// partial first version -- widening Date coverage to more indicator
+	// types is additive follow-on work, not a redesign, since every
+	// consumer already has to handle the empty case.
+	Date string `json:"date,omitempty"`
 }
 
 // Score is a fully transparent, additive total: every point traces back
@@ -203,6 +234,12 @@ var nonDigitRE = regexp.MustCompile(`\D+`)
 // and "jane a example", or "José García" and "Jose Garcia") compare
 // equal without claiming any deeper fuzzy-matching than that. Used for
 // addresses and person names.
+// NormalizeText is normalizeText, exported for callers outside this
+// package (cmd/paper-trail's duplicateConfidence, at the time this was
+// added) that need the exact same address/person comparison
+// SharedAddresses/SharedPeople use, rather than reimplementing it.
+func NormalizeText(s string) string { return normalizeText(s) }
+
 func normalizeText(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = foldDiacritics(s)

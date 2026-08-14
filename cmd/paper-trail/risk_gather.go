@@ -13,6 +13,7 @@ import (
 	"github.com/bennett-17/paper-trail/internal/companieshouse"
 	"github.com/bennett-17/paper-trail/internal/edgar"
 	"github.com/bennett-17/paper-trail/internal/gleif"
+	"github.com/bennett-17/paper-trail/internal/ireland"
 	"github.com/bennett-17/paper-trail/internal/littlesis"
 	"github.com/bennett-17/paper-trail/internal/nonprofit"
 	"github.com/bennett-17/paper-trail/internal/nzbn"
@@ -59,6 +60,22 @@ func runConcurrentQueries[T any](queries []string, work func(i int, query string
 	return results
 }
 
+// withVerifiedAt returns a copy of entities with VerifiedAt stamped to
+// cachedAt (RFC3339) -- every gatherer's cache-hit branch uses this
+// rather than mutating cached in place, since riskcache.Cache.Get
+// hands back the same underlying slice/structs to every caller that
+// hits the same key, including concurrently from other query terms or
+// even other sources sharing a cache -- mutating it in place would be
+// a data race as well as corrupting what's stored for the next hit.
+func withVerifiedAt(entities []risk.Entity, cachedAt time.Time) []risk.Entity {
+	out := make([]risk.Entity, len(entities))
+	for i, e := range entities {
+		e.VerifiedAt = cachedAt.Format(time.RFC3339)
+		out[i] = e
+	}
+	return out
+}
+
 // queryResult is one query term's contribution to a gather function's
 // result -- entities, extra indicators, and notes, all local to that
 // term until runConcurrentQueries's caller flattens every result back
@@ -92,8 +109,8 @@ func gatherEDGAREntities(edgarClient *edgar.Client, queries []string, limit int,
 		note := func(format string, a ...any) { r.notes = append(r.notes, "SEC EDGAR: "+fmt.Sprintf(format, a...)) }
 
 		cacheKey := riskcache.Key("edgar", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 
@@ -199,8 +216,8 @@ func gatherNonprofitEntities(queries []string, limit int, cache *riskcache.Cache
 		note := func(format string, a ...any) { r.notes = append(r.notes, "IRS Form 990: "+fmt.Sprintf(format, a...)) }
 
 		cacheKey := riskcache.Key("nonprofit", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 
@@ -289,8 +306,8 @@ func gatherACNCEntities(queries []string, limit int, cache *riskcache.Cache, cac
 		}
 
 		cacheKey := riskcache.Key("aucharity", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 
@@ -368,8 +385,8 @@ func gatherLittleSisEntities(queries []string, limit int, cache *riskcache.Cache
 		}
 
 		cacheKey := riskcache.Key("littlesis", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 		if breaker.Skip() {
@@ -451,8 +468,8 @@ func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, ca
 		}
 
 		cacheKey := riskcache.Key("gleif", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 
@@ -600,8 +617,8 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 		}
 
 		cacheKey := riskcache.Key("companieshouse-direct", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 
@@ -896,8 +913,8 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 		// into each cached entity's People field -- no separate
 		// Companies House cache entry needed.
 		cacheKey := riskcache.Key("ukcharity", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 
@@ -1518,22 +1535,24 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 		// Appointment-burst, resignation-burst, and mass-nominee checks
 		// all reuse this same fetch -- no extra API call needed for any
 		// of them.
-		if desc := appointmentBurst(appointments); desc != "" {
+		if desc, date := appointmentBurst(appointments); desc != "" {
 			extra = append(extra, risk.Indicator{
 				Code:        "officer_appointment_burst",
 				Description: "An officer of this entity was appointed to several other companies within a short span -- a known nominee-director/shelf-company-formation pattern (confirmed live against a real UK corporate nominee-director service with hundreds of register-wide appointments, several landing on the very same day), though bulk company-formation services also use this same pattern lawfully, so it's a lead to investigate rather than proof on its own",
 				Weight:      2,
 				Entities:    []string{entityLabel},
 				Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
+				Date:        date,
 			})
 		}
-		if desc := resignationBurst(appointments); desc != "" {
+		if desc, date := resignationBurst(appointments); desc != "" {
 			extra = append(extra, risk.Indicator{
 				Code:        "officer_resignation_burst",
 				Description: "An officer of this entity had their appointment at several other companies all end within a short span -- the bulk-handover signature of a shelf-company-formation service completing (or unwinding) a batch of companies at once (confirmed live against the same real UK corporate nominee-director service officer_appointment_burst cites, whose resignations cluster even more tightly than its appointments do), though this is also how a lawful bulk company-formation service normally operates, so it's a lead to investigate rather than proof on its own",
 				Weight:      2,
 				Entities:    []string{entityLabel},
 				Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
+				Date:        date,
 			})
 		}
 		if count := massNomineeOfficer(totalAppointments); count > 0 {
@@ -1564,13 +1583,14 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 					if wantName != "" && risk.NormalizeNameFuzzy(hit.Name) != wantName {
 						continue
 					}
-					if desc := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
+					if desc, date := sanctionsAdjacentChange(appointmentsToDatedRecords(appointments), hit); desc != "" {
 						extra = append(extra, risk.Indicator{
 							Code:        "sanctions_adjacent_officer_change",
 							Description: "An officer of this entity, separately matched against the UK Sanctions List (OFSI), had an appointment or resignation at another company within a few months of their own OFSI designation date -- OFAC's own 2026 guidance treats ownership/control changes timed close to a sanctions designation as worth extra scrutiny beyond a simple current-ownership check, since a designated person's corporate footprint often doesn't simply vanish on the designation date. Not proof of anything by itself: a lot of ordinary corporate activity happens to fall within any few-month window",
 							Weight:      4,
 							Entities:    []string{entityLabel},
 							Evidence:    fmt.Sprintf("%s -- %s", desc, hit.Regime),
+							Date:        date,
 						})
 					}
 				}
@@ -1659,8 +1679,8 @@ func gatherNZBNEntities(nzClient *nzbn.Client, queries []string, limit int, cach
 		}
 
 		cacheKey := riskcache.Key("nzbn", query, limit)
-		if cached, ok := cache.Get(cacheKey, cacheTTL); ok {
-			r.entities = cached
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
 			return r
 		}
 
@@ -1771,6 +1791,61 @@ func nzDirectorFanOut(nzClient *nzbn.Client, rootNZBN string, currentDirectors [
 		}
 	}
 	return fannedOut
+}
+
+// gatherIrelandEntities searches Ireland's Companies Registration
+// Office (CRO) Open Data Portal -- free and keyless, so unlike NZBN
+// above there's no missing-credential case to guard against. The
+// dataset carries company-record fields only (name, number, status,
+// type, formation/dissolution dates, address) -- no officer or
+// director data at all (confirmed against the CRO's own single
+// published resource for this dataset), so an Ireland entity's People
+// field is always nil, same limitation gatherACNCEntities already
+// documents for the same reason (ACNC's free data has no officer data
+// either): it can only ever contribute to shared_address and
+// formation_cluster, never shared_person -- so, like ACNC, it needs no
+// extra []risk.Indicator return of its own.
+func gatherIrelandEntities(queries []string, limit int, cache *riskcache.Cache, cacheTTL time.Duration, progress *progressReporter) (entities []risk.Entity, notes []string) {
+	irClient := ireland.NewClient()
+	results := runConcurrentQueries(queries, func(i int, query string) queryResult {
+		progress.report("Ireland CRO", "term %d/%d: %q", i+1, len(queries), query)
+		var r queryResult
+		note := func(format string, a ...any) {
+			r.notes = append(r.notes, "Ireland CRO: "+fmt.Sprintf(format, a...))
+		}
+
+		cacheKey := riskcache.Key("ireland", query, limit)
+		if cached, cachedAt, ok := cache.Get(cacheKey, cacheTTL); ok {
+			r.entities = withVerifiedAt(cached, cachedAt)
+			return r
+		}
+
+		companies, err := irClient.SearchByName(query, limit)
+		if err != nil {
+			note("%v", err)
+			return r
+		}
+		if len(companies) == 0 {
+			note("no match for %q", query)
+			cache.Set(cacheKey, nil)
+			return r
+		}
+		var termEntities []risk.Entity
+		for _, c := range companies {
+			var addrs []string
+			if c.Address != "" {
+				addrs = append(addrs, c.Address)
+			}
+			e := risk.NewEntity("ireland", c.Number, c.Name, addrs, nil)
+			e.FormedOn = c.RegisteredOn
+			termEntities = append(termEntities, e)
+		}
+		r.entities = termEntities
+		cache.Set(cacheKey, termEntities)
+		return r
+	})
+	entities, _, notes = flattenQueryResults(results)
+	return entities, notes
 }
 
 // followPSCChain follows a corporate PSC's own persons-with-
@@ -1979,10 +2054,17 @@ type datedCompany struct {
 // returning a human-readable description once that count reaches
 // appointmentBurstThreshold, or "" otherwise. verb is the leading word
 // of the description ("appointed to" or "resigned from").
-func burstDescription(dates []datedCompany, verb string) string {
+// Returns the description plus the burst's own start date (the first
+// appointment/resignation in the winning window, YYYY-MM-DD) for
+// risk.Indicator.Date -- both empty when no burst clears the
+// threshold. The start date is the meaningful timeline anchor here:
+// it's when the cluster began, and the window's length is already
+// stated in the description itself.
+func burstDescription(dates []datedCompany, verb string) (desc, date string) {
 	sort.Slice(dates, func(i, j int) bool { return dates[i].when.Before(dates[j].when) })
 
 	var bestNames []string
+	var bestStart time.Time
 	for i := range dates {
 		seen := map[string]bool{}
 		var names []string
@@ -1994,13 +2076,13 @@ func burstDescription(dates []datedCompany, verb string) string {
 			names = append(names, dates[j].name)
 		}
 		if len(names) > len(bestNames) {
-			bestNames = names
+			bestNames, bestStart = names, dates[i].when
 		}
 	}
 	if len(bestNames) < appointmentBurstThreshold {
-		return ""
+		return "", ""
 	}
-	return fmt.Sprintf("%s %d companies within %d days: %s", verb, len(bestNames), int(appointmentBurstWindow/(24*time.Hour)), strings.Join(bestNames, ", "))
+	return fmt.Sprintf("%s %d companies within %d days: %s", verb, len(bestNames), int(appointmentBurstWindow/(24*time.Hour)), strings.Join(bestNames, ", ")), bestStart.Format("2006-01-02")
 }
 
 // appointmentBurst scans one officer's full register-wide appointment
@@ -2012,7 +2094,7 @@ func burstDescription(dates []datedCompany, verb string) string {
 // Limited" above operates), but it's also how a nominee is used to
 // obscure who's actually behind a company, so it's worth surfacing as
 // a lead either way.
-func appointmentBurst(appointments []companieshouse.Appointment) string {
+func appointmentBurst(appointments []companieshouse.Appointment) (desc, date string) {
 	var dates []datedCompany
 	for _, a := range appointments {
 		t, err := time.Parse("2006-01-02", a.AppointedOn)
@@ -2039,7 +2121,7 @@ func appointmentBurst(appointments []companieshouse.Appointment) string {
 // the same officer's history shows. Only appointments that actually
 // record a resignation date are considered; a still-active appointment
 // has none.
-func resignationBurst(appointments []companieshouse.Appointment) string {
+func resignationBurst(appointments []companieshouse.Appointment) (desc, date string) {
 	var dates []datedCompany
 	for _, a := range appointments {
 		if a.ResignedOn == "" {
@@ -2133,15 +2215,21 @@ func appointmentsToDatedRecords(appointments []companieshouse.Appointment) []dat
 // are silently skipped rather than erroring -- same defensive posture
 // as appointmentBurst/resignationBurst -- since a malformed date
 // shouldn't take down the whole check for every other record.
-func sanctionsAdjacentChange(records []datedRecord, hit ofsi.Hit) string {
+// Returns the description plus the corporate change's own date
+// (YYYY-MM-DD) for risk.Indicator.Date -- both empty when nothing
+// falls inside the window. The change date, not the designation date,
+// is the timeline anchor: the designation is already stated in the
+// description, and it's the corporate event that belongs on this
+// entity's own timeline.
+func sanctionsAdjacentChange(records []datedRecord, hit ofsi.Hit) (desc, date string) {
 	designated, err := time.Parse("2006-01-02", hit.DateDesignated)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	for _, r := range records {
 		if t, err := time.Parse("2006-01-02", r.StartOn); err == nil {
 			if d := t.Sub(designated); d.Abs() <= sanctionsAdjacentWindow {
-				return fmt.Sprintf("%s: %s %s on %s, %s OFSI-designated on %s", hit.Name, r.StartVerb, r.CompanyName, r.StartOn, daysRelative(d), hit.DateDesignated)
+				return fmt.Sprintf("%s: %s %s on %s, %s OFSI-designated on %s", hit.Name, r.StartVerb, r.CompanyName, r.StartOn, daysRelative(d), hit.DateDesignated), r.StartOn
 			}
 		}
 		if r.EndOn == "" {
@@ -2149,11 +2237,11 @@ func sanctionsAdjacentChange(records []datedRecord, hit ofsi.Hit) string {
 		}
 		if t, err := time.Parse("2006-01-02", r.EndOn); err == nil {
 			if d := t.Sub(designated); d.Abs() <= sanctionsAdjacentWindow {
-				return fmt.Sprintf("%s: %s %s on %s, %s OFSI-designated on %s", hit.Name, r.EndVerb, r.CompanyName, r.EndOn, daysRelative(d), hit.DateDesignated)
+				return fmt.Sprintf("%s: %s %s on %s, %s OFSI-designated on %s", hit.Name, r.EndVerb, r.CompanyName, r.EndOn, daysRelative(d), hit.DateDesignated), r.EndOn
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // pscSanctionsAdjacentChange screens each of a company's PSCs (persons
@@ -2193,13 +2281,14 @@ func pscSanctionsAdjacentChange(pscs []companieshouse.PSC, companyName, entityLa
 				continue
 			}
 			records := []datedRecord{{CompanyName: companyName, StartOn: p.NotifiedOn, StartVerb: "notified as a PSC of", EndOn: p.CeasedOn, EndVerb: "ceased being a PSC of"}}
-			if desc := sanctionsAdjacentChange(records, hit); desc != "" {
+			if desc, date := sanctionsAdjacentChange(records, hit); desc != "" {
 				extra = append(extra, risk.Indicator{
 					Code:        "sanctions_adjacent_officer_change",
 					Description: "A person with significant control (PSC) of this entity, separately matched against the UK Sanctions List (OFSI), was notified as a PSC or ceased being one within a few months of their own OFSI designation date -- OFAC's own 2026 guidance treats ownership/control changes timed close to a sanctions designation as worth extra scrutiny beyond a simple current-ownership check, since a designated person's control over an entity often doesn't simply vanish on the designation date. Not proof of anything by itself: a lot of ordinary corporate activity happens to fall within any few-month window",
 					Weight:      4,
 					Entities:    []string{entityLabel},
 					Evidence:    fmt.Sprintf("%s -- %s", desc, hit.Regime),
+					Date:        date,
 				})
 			}
 		}

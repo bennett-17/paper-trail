@@ -15,7 +15,7 @@ func newTestCache(t *testing.T) *Cache {
 
 func TestGetMissesOnEmptyCache(t *testing.T) {
 	c := newTestCache(t)
-	if _, ok := c.Get(Key("nonprofit", "Example", 5), time.Hour); ok {
+	if _, _, ok := c.Get(Key("nonprofit", "Example", 5), time.Hour); ok {
 		t.Error("expected a miss on an empty cache")
 	}
 }
@@ -25,13 +25,28 @@ func TestSetThenGetHits(t *testing.T) {
 	entities := []risk.Entity{risk.NewEntity("nonprofit", "1", "Example Org", nil, nil)}
 	key := Key("nonprofit", "Example", 5)
 
+	before := time.Now()
 	c.Set(key, entities)
-	got, ok := c.Get(key, time.Hour)
+	got, cachedAt, ok := c.Get(key, time.Hour)
 	if !ok {
 		t.Fatal("expected a hit after Set")
 	}
 	if len(got) != 1 || got[0].Name != "Example Org" {
 		t.Errorf("got %+v, want the entity that was Set", got)
+	}
+	if cachedAt.Before(before) || cachedAt.After(time.Now()) {
+		t.Errorf("cachedAt = %v, want a time between Set's call and now", cachedAt)
+	}
+}
+
+func TestGetReturnsZeroCachedAtOnMiss(t *testing.T) {
+	c := newTestCache(t)
+	_, cachedAt, ok := c.Get(Key("nonprofit", "Example", 5), time.Hour)
+	if ok {
+		t.Fatal("expected a miss on an empty cache")
+	}
+	if !cachedAt.IsZero() {
+		t.Errorf("cachedAt = %v on a miss, want the zero Time", cachedAt)
 	}
 }
 
@@ -47,7 +62,7 @@ func TestGetMissesWhenExpired(t *testing.T) {
 	c.entries[key] = e
 	c.mu.Unlock()
 
-	if _, ok := c.Get(key, time.Hour); ok {
+	if _, _, ok := c.Get(key, time.Hour); ok {
 		t.Error("expected a miss for an entry older than the TTL")
 	}
 }
@@ -75,7 +90,7 @@ func TestSaveThenNewCacheLoadsPersistedEntry(t *testing.T) {
 	c1.Save()
 
 	c2 := &Cache{Dir: dir}
-	got, ok := c2.Get(key, time.Hour)
+	got, _, ok := c2.Get(key, time.Hour)
 	if !ok {
 		t.Fatal("expected a fresh Cache pointed at the same directory to see the saved entry")
 	}
@@ -90,7 +105,7 @@ func TestDisabledCacheAlwaysMisses(t *testing.T) {
 	c.Set(key, []risk.Entity{risk.NewEntity("nonprofit", "1", "Example Org", nil, nil)})
 	c.Save()
 
-	if _, ok := c.Get(key, time.Hour); ok {
+	if _, _, ok := c.Get(key, time.Hour); ok {
 		t.Error("a cache with an empty Dir should never hit, even right after Set")
 	}
 }

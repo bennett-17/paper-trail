@@ -104,19 +104,23 @@ func Key(source, query string, limit int) string {
 	return fmt.Sprintf("%s|%s|%d", source, strings.ToLower(strings.TrimSpace(query)), limit)
 }
 
-// Get returns cached entities for key if present and younger than ttl.
-func (c *Cache) Get(key string, ttl time.Duration) ([]risk.Entity, bool) {
+// Get returns cached entities for key if present and younger than ttl,
+// along with the time they were originally cached (the zero Time on a
+// miss) -- callers that want to show "verified as of ..." rather than
+// silently implying every entity is fresh this run (see
+// risk.Entity.VerifiedAt) need that timestamp, not just the entities.
+func (c *Cache) Get(key string, ttl time.Duration) ([]risk.Entity, time.Time, bool) {
 	if c.Dir == "" {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.load()
 	e, ok := c.entries[key]
 	if !ok || time.Since(e.CachedAt) > ttl {
-		return nil, false
+		return nil, time.Time{}, false
 	}
-	return e.Entities, true
+	return e.Entities, e.CachedAt, true
 }
 
 // Set stores entities under key, to be persisted on the next Save.

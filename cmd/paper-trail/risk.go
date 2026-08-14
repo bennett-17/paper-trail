@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -114,6 +115,12 @@ type riskReportJSON struct {
 	// default, omitted) unless one of those flags actually removed
 	// something.
 	ExcludedIndicators int `json:"excludedIndicators,omitempty"`
+	// ReviewedIndicators is how many indicators --reviewed-file marked
+	// Reviewed -- unlike ExcludedIndicators, these ARE still reflected
+	// in Score.Total/Score.Confidence (see markReviewed's doc comment
+	// for why). Zero (the default, omitted) unless --reviewed-file was
+	// set and actually matched something.
+	ReviewedIndicators int `json:"reviewedIndicators,omitempty"`
 	// HiddenCorroborations is how many corroborated pairs
 	// --min-corroboration left out of Score.Corroborations -- a
 	// separate count from HiddenIndicators since it's a different
@@ -305,6 +312,58 @@ func parseExcludeTerms(flagValue, filePath string) ([]string, error) {
 		terms = append(terms, fromFile...)
 	}
 	return terms, nil
+}
+
+// markReviewed implements --reviewed-file: sets Reviewed on every
+// indicator whose Evidence or any Entities label contains
+// (case-insensitively) any of the given terms, returning the updated
+// score and how many were marked. Unlike excludeIndicators, this never
+// removes anything or recomputes Total/Confidence/Corroborations --
+// weight, evidence, and everything else about the indicator stays
+// exactly as it was, only the Reviewed flag changes, since "I've
+// already looked at this" is a triage note, not a verdict that it
+// isn't a real finding (that's what --exclude is for). An empty terms
+// is a no-op (the default).
+func markReviewed(score risk.Score, terms []string) (risk.Score, int) {
+	if len(terms) == 0 {
+		return score, 0
+	}
+	lowerTerms := make([]string, len(terms))
+	for i, t := range terms {
+		lowerTerms[i] = strings.ToLower(t)
+	}
+	matches := func(ind risk.Indicator) bool {
+		haystack := strings.ToLower(ind.Evidence + " " + strings.Join(ind.Entities, " "))
+		for _, t := range lowerTerms {
+			if strings.Contains(haystack, t) {
+				return true
+			}
+		}
+		return false
+	}
+	marked := 0
+	for i, ind := range score.Indicators {
+		if !ind.Reviewed && matches(ind) {
+			score.Indicators[i].Reviewed = true
+			marked++
+		}
+	}
+	return score, marked
+}
+
+// parseReviewedTerms reads --reviewed-file's one-term-per-line file
+// (blank lines and #-prefixed comments ignored) -- the same reader
+// parseExcludeTerms itself calls for --exclude-file, reused directly
+// rather than duplicated. Unlike --exclude, there's no inline
+// --reviewed comma-flag counterpart: a "mark reviewed" list is
+// inherently something built up across many runs (see --reviewed-file
+// itself), not typed fresh each time the way a one-off --exclude term
+// often is.
+func parseReviewedTerms(filePath string) ([]string, error) {
+	if filePath == "" {
+		return nil, nil
+	}
+	return readQueryTermsFile(filePath)
 }
 
 // confidenceBandRank orders risk.Score's confidence bands (LOW <
@@ -606,6 +665,7 @@ type riskSummaryJSON struct {
 	IndicatorCount     int             `json:"indicatorCount"`
 	HiddenIndicators   int             `json:"hiddenIndicators,omitempty"`
 	ExcludedIndicators int             `json:"excludedIndicators,omitempty"`
+	ReviewedIndicators int             `json:"reviewedIndicators,omitempty"`
 	SourceHealth       sourceHealth    `json:"sourceHealth"`
 	Diff               *riskReportDiff `json:"diff,omitempty"`
 }
@@ -625,6 +685,7 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 			IndicatorCount:     len(report.Score.Indicators),
 			HiddenIndicators:   report.HiddenIndicators,
 			ExcludedIndicators: report.ExcludedIndicators,
+			ReviewedIndicators: report.ReviewedIndicators,
 			SourceHealth:       report.SourceHealth,
 			Diff:               diff,
 		})
@@ -639,6 +700,9 @@ func writeSummary(w io.Writer, report riskReportJSON, diff *riskReportDiff, asJS
 	}
 	if report.ExcludedIndicators > 0 {
 		extras = append(extras, fmt.Sprintf("%d excluded", report.ExcludedIndicators))
+	}
+	if report.ReviewedIndicators > 0 {
+		extras = append(extras, fmt.Sprintf("%d reviewed", report.ReviewedIndicators))
 	}
 	if len(report.SourceHealth.Degraded) > 0 {
 		extras = append(extras, fmt.Sprintf("%d source(s) degraded: %s", len(report.SourceHealth.Degraded), strings.Join(report.SourceHealth.Degraded, ", ")))
@@ -665,6 +729,7 @@ func summaryFromReport(report riskReportJSON) riskSummaryJSON {
 		IndicatorCount:     len(report.Score.Indicators),
 		HiddenIndicators:   report.HiddenIndicators,
 		ExcludedIndicators: report.ExcludedIndicators,
+		ReviewedIndicators: report.ReviewedIndicators,
 	}
 }
 
@@ -817,6 +882,61 @@ func configFilePath() (string, error) {
 	return filepath.Join(home, ".paper-trailrc"), nil
 }
 
+// caseNameRE bounds what --case accepts: this value becomes a real
+// directory name under the user's home directory, so it's restricted
+// to plain letters/digits/dash/underscore/dot rather than sanitized
+// after the fact -- an unrestricted name could contain a path
+// separator or "..", turning "--case" into an arbitrary-directory
+// creator. Rejecting outright beats silently rewriting a name the
+// user would then have to guess at to reuse.
+var caseNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// caseFilePaths implements --case: resolves a case name to its own
+// exclude/reviewed file paths under ~/.paper-trail/cases/<name>/,
+// creating the directory and both files empty on first use so a fresh
+// case is immediately usable (and, just as importantly, immediately
+// visible/editable by hand -- there's nothing else to discover).
+//
+// This is deliberately pure convenience over machinery that already
+// works: pointing two scans at the same --exclude-file has always
+// grouped them, and --reviewed-file (above) works the same way. All
+// --case adds is not having to remember and retype one consistent path
+// per investigation across every sub-scan of it.
+func caseFilePaths(name string) (excludePath, reviewedPath string, err error) {
+	if !caseNameRE.MatchString(name) {
+		return "", "", fmt.Errorf("case name %q may only contain letters, digits, dot, dash, and underscore (it becomes a directory name under ~/.paper-trail/cases/)", name)
+	}
+	// "." and ".." clear the character check above (dot is allowed, for
+	// names like "case.2024") but are the two path elements that would
+	// escape or alias the cases directory itself -- rejected explicitly.
+	if name == "." || name == ".." {
+		return "", "", fmt.Errorf("case name %q is a path element, not a name", name)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", err
+	}
+	dir := filepath.Join(home, ".paper-trail", "cases", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", err
+	}
+	excludePath = filepath.Join(dir, "exclude.txt")
+	reviewedPath = filepath.Join(dir, "reviewed.txt")
+	for _, p := range []string{excludePath, reviewedPath} {
+		// O_EXCL so an existing file is never truncated -- this runs on
+		// every scan of the case, not just the first.
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", "", err
+		}
+		f.Close()
+	}
+	return excludePath, reviewedPath, nil
+}
+
 // parseConfigFileLines parses "key = value" pairs out of a config
 // file's contents, one per line (blank lines and #-prefixed comments
 // ignored, same format as --input-file/--exclude-file). Returns the
@@ -941,13 +1061,13 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	clClient := courtlistener.NewClient()
 
 	// Registered once, before any Phase 1/2 goroutine starts, so
-	// percent-complete is exact rather than guessed: 7 Phase-1 sources
+	// percent-complete is exact rather than guessed: 8 Phase-1 sources
 	// always run, plus EDGAR only if edgarClient is configured, plus
-	// the 15 Phase-2 screens (all unconditional -- each already
+	// the 16 Phase-2 screens (all unconditional -- each already
 	// handles a nil optional client internally the same way the
 	// gatherers above do). See progressReporter's own doc comment for
 	// why this is source-level granularity, not per-item.
-	totalUnits := 7 + 15
+	totalUnits := 8 + 16
 	if edgarClient != nil {
 		totalUnits++
 	}
@@ -965,9 +1085,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// mutex -- they're merged in a fixed order below, after every
 	// goroutine finishes, so output stays deterministic regardless of
 	// which source happens to finish first.
-	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, chDirectEntities, nzEntities, lsEntities []risk.Entity
+	var edgarEntities, npEntities, acncEntities, gleifEntities, ukEntities, chDirectEntities, nzEntities, lsEntities, irEntities []risk.Entity
 	var edgarExtra, npExtra, gleifExtra, ukExtra, chDirectExtra, nzExtra []risk.Indicator
-	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, chDirectNotes, nzNotes, lsNotes []string
+	var edgarNotes, npNotes, acncNotes, gleifNotes, ukNotes, chDirectNotes, nzNotes, lsNotes, irNotes []string
 	var wg sync.WaitGroup
 
 	if edgarClient != nil {
@@ -1052,6 +1172,16 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	} else {
 		progress.completeUnit()
 	}
+	if filter.allows("Ireland CRO") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer progress.completeUnit()
+			irEntities, irNotes = gatherIrelandEntities(queries, limit, cache, cacheTTL, progress)
+		}()
+	} else {
+		progress.completeUnit()
+	}
 	wg.Wait()
 
 	entities = append(entities, edgarEntities...)
@@ -1062,6 +1192,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	entities = append(entities, chDirectEntities...)
 	entities = append(entities, nzEntities...)
 	entities = append(entities, lsEntities...)
+	entities = append(entities, irEntities...)
 	extra = append(extra, edgarExtra...)
 	extra = append(extra, npExtra...)
 	extra = append(extra, gleifExtra...)
@@ -1076,6 +1207,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, chDirectNotes...)
 	notes = append(notes, nzNotes...)
 	notes = append(notes, lsNotes...)
+	notes = append(notes, irNotes...)
 
 	// Phase 2: every check below only reads the now-final entities pool
 	// (built above) -- it doesn't add to it -- so, like phase 1, these
@@ -1090,8 +1222,8 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	// organization; the RDAP domain-age screen checks every entity's
 	// own website, not a name at all. Merged in the same fixed order as
 	// before so output stays deterministic.
-	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, pepExtra, domainExtra, ctExtra, clExtra, fecExtra, usaExtra, gzExtra []risk.Indicator
-	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, pepNotes, domainNotes, ctNotes, clNotes, fecNotes, usaNotes, gzNotes []string
+	var usExtra, ukSanctionsExtra, unExtra, dqExtra, ftExtra, icijExtra, gdeltExtra, samExtra, ipExtra, pepExtra, domainExtra, ctExtra, clExtra, fecExtra, usaExtra, gzExtra []risk.Indicator
+	var usNotes, ukSanctionsNotes, unNotes, dqNotes, ftNotes, icijNotes, gdeltNotes, samNotes, ipNotes, pepNotes, domainNotes, ctNotes, clNotes, fecNotes, usaNotes, gzNotes []string
 	var wg2 sync.WaitGroup
 
 	// phase2 registers one Phase-2 screen, gated by filter under its own
@@ -1135,6 +1267,9 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	phase2("SAM.gov Exclusions", func() {
 		samExtra, samNotes = screenSAMExclusions(queries, entities, progress)
 	})
+	phase2("INTERPOL Red Notices", func() {
+		ipExtra, ipNotes = screenInterpolRedNotices(queries, entities, progress)
+	})
 	phase2("Wikidata", func() {
 		pepExtra, pepNotes = screenPoliticallyExposedPersons(entities, progress)
 	})
@@ -1166,6 +1301,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	extra = append(extra, icijExtra...)
 	extra = append(extra, gdeltExtra...)
 	extra = append(extra, samExtra...)
+	extra = append(extra, ipExtra...)
 	extra = append(extra, pepExtra...)
 	extra = append(extra, domainExtra...)
 	extra = append(extra, ctExtra...)
@@ -1181,6 +1317,7 @@ func gatherAndScore(queries []string, limit int, cache *riskcache.Cache, cacheTT
 	notes = append(notes, icijNotes...)
 	notes = append(notes, gdeltNotes...)
 	notes = append(notes, samNotes...)
+	notes = append(notes, ipNotes...)
 	notes = append(notes, pepNotes...)
 	notes = append(notes, domainNotes...)
 	notes = append(notes, ctNotes...)
@@ -1327,12 +1464,14 @@ func runRisk(args []string) {
 	minCorroboration := fs.Int("min-corroboration", 0, "show only corroborated pairs matched on at least this many distinct indicator codes (0 shows all, the default) -- Corroborations never contribute to Total, so this only limits which corroborated pairs are listed")
 	excludeFlag := fs.String("exclude", "", "comma-separated terms -- any indicator whose evidence or entity labels contain one of these (case-insensitive) is permanently removed from the report, including Total/Confidence, not just hidden from display -- for dismissing leads you've already reviewed and cleared")
 	excludeFile := fs.String("exclude-file", "", "read additional --exclude terms from this file too, one per line (blank lines and lines starting with # are ignored)")
+	reviewedFile := fs.String("reviewed-file", "", "mark any indicator whose evidence or entity labels contain (case-insensitively) a term from this file (one per line, blank lines and lines starting with # ignored) as reviewed -- unlike --exclude, a reviewed indicator keeps its full weight and still counts toward the score, it just renders dimmed and collapsed by default in the HTML report, for tracking 'I've already looked at this' separately from 'this isn't a real finding'")
+	caseName := fs.String("case", "", "group every scan of one investigation under a named case: sugar for pointing --exclude-file and --reviewed-file at ~/.paper-trail/cases/<name>/exclude.txt and reviewed.txt (both created empty on first use), so dismissals and reviewed marks carry across every sub-scan of that investigation without retyping one consistent path each time. Mutually exclusive with an explicit --exclude-file/--reviewed-file, since --case IS that path selection")
 	failOn := fs.String("fail-on", "", "exit with a non-zero status if the final confidence band reaches this level or higher (LOW, MEDIUM, or HIGH) -- lets a scan act as a gate in CI/cron/pre-merge automation instead of requiring someone to read the output")
 	summary := fs.Bool("summary", false, "print (or, with --json, encode) a compact one-line/one-object summary -- score, confidence, and entity/indicator counts -- instead of the full report, for scripting/dashboards/monitoring where the full indicator-by-indicator report is too verbose")
 	webhookURL := fs.String("webhook", "", "POST a JSON alert to this URL when --fail-on's threshold is met (requires --fail-on, unless --watch is also set -- see --watch) -- a hooks.slack.com or discord.com/api/webhooks URL gets that platform's own minimal message format, anything else gets the full compact summary as JSON")
 	watch := fs.Duration("watch", 0, "re-run this scan every this-long, forever, until interrupted (Ctrl+C) -- each run is automatically diffed against the previous one (no need to also pass --diff) and rewritten to the same --output/--json/--graph/etc. destinations. Minimum 1m, to stay polite to the public sources being queried. Mutually exclusive with --fail-on (a continuous monitor shouldn't exit the process); combine with --webhook instead to get alerted only when a run's diff shows new entities/indicators since the last check")
 	batch := fs.Bool("batch", false, "score every <query>/--input-file entry independently instead of cross-referencing them together -- one scorecard row per entity (query, entities found, score, confidence, indicator count, top indicator) written as CSV (or a JSON array with --json) to --output/stdout, for screening a list of vendors/donors/grantees where you want N separate verdicts, not one combined report. Mutually exclusive with --diff/--watch/--fail-on/--webhook (all assume a single overall score); --top/--min-weight/--indicator/--min-corroboration/--summary/--graph/--html/--graph-csv/--graph-graphml/--entities-csv are ignored in this mode")
-	servePort := fs.String("serve", "", "start a local web server at http://127.0.0.1:<port> (always loopback-only, regardless of what's passed) with a search form instead of running one scan -- type one name per line and get the same HTML report --report-html writes to a file, rendered in the browser instead, one independent scan per search. Runs until interrupted (Ctrl+C). Takes no <query>/--input-file/--batch/--diff/--watch/--fail-on/--webhook -- --limit/--cache-ttl/--exclude/--exclude-file still apply to every search")
+	servePort := fs.String("serve", "", "start a local web server at http://127.0.0.1:<port> (always loopback-only, regardless of what's passed) with a search form instead of running one scan -- type one name per line and get the same HTML report --report-html writes to a file, rendered in the browser instead, one independent scan per search. Runs until interrupted (Ctrl+C). Takes no <query>/--input-file/--batch/--diff/--watch/--fail-on/--webhook -- --limit/--cache-ttl/--exclude/--exclude-file/--reviewed-file/--case still apply to every search")
 	fast := fs.Bool("fast", false, "skip the sources confirmed slowest in real use -- OpenFEC, CourtListener, and GDELT -- for a quicker first pass; run again later without --fast to fill in the rest (--cache-ttl lets every other source's already-fetched results be reused instead of re-fetched)")
 	retryFailedPath := fs.String("retry-failed-sources", "", "re-run only the sources whose circuit breaker tripped (see the source-health summary) in a previous --output --json report at this path, and merge the results into it -- instead of a full re-scan of every source, including the ones that already succeeded. Ignores any <query>/--input-file given; uses that report's own queries. Mutually exclusive with --batch/--serve/--watch/--diff")
 	flagArgs, positional := splitPositional(fs, args)
@@ -1350,7 +1489,7 @@ func runRisk(args []string) {
 		}
 	}
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--reviewed-file <path>] [--case <name>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
 
 	if *servePort != "" && (len(positional) > 0 || *inputFile != "" || *batch) {
 		fmt.Fprintln(os.Stderr, "Error: --serve takes no <query>/--input-file/--batch -- queries come from the search form in the browser instead")
@@ -1397,9 +1536,32 @@ func runRisk(args []string) {
 		previousReport = &r
 	}
 
+	// --case resolves --exclude-file/--reviewed-file's paths for you, so
+	// giving it alongside either explicitly is a contradiction, not a
+	// combination -- rejected rather than silently picking a winner.
+	// --exclude's own inline comma-flag is NOT affected: a one-off term
+	// on the command line composes fine with a case's stored list.
+	if *caseName != "" {
+		if *excludeFile != "" || *reviewedFile != "" {
+			fmt.Fprintln(os.Stderr, "Error: --case is mutually exclusive with --exclude-file/--reviewed-file -- --case IS the path selection for both (~/.paper-trail/cases/<name>/), not an extra filter layered on top")
+			os.Exit(1)
+		}
+		casePathExclude, casePathReviewed, err := caseFilePaths(*caseName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --case %q: %v\n", *caseName, err)
+			os.Exit(1)
+		}
+		*excludeFile, *reviewedFile = casePathExclude, casePathReviewed
+	}
+
 	excludeTerms, err := parseExcludeTerms(*excludeFlag, *excludeFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: --exclude-file %q: %v\n", *excludeFile, err)
+		os.Exit(1)
+	}
+	reviewedTerms, err := parseReviewedTerms(*reviewedFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --reviewed-file %q: %v\n", *reviewedFile, err)
 		os.Exit(1)
 	}
 
@@ -1440,7 +1602,7 @@ func runRisk(args []string) {
 	}
 
 	if *servePort != "" {
-		runRiskServe(*servePort, *limit, cache, cacheTTL, excludeTerms, *quiet)
+		runRiskServe(*servePort, *limit, cache, cacheTTL, excludeTerms, reviewedTerms, *quiet)
 		return
 	}
 
@@ -1549,6 +1711,15 @@ func runRisk(args []string) {
 		// no longer reflect it.
 		score, excludedCount := excludeIndicators(score, excludeTerms)
 
+		// --reviewed-file runs after --exclude (nothing it marks should
+		// ever be an indicator --exclude already permanently removed)
+		// but before --diff/--top/--min-weight/--indicator below --
+		// unlike those, marking Reviewed never hides or removes
+		// anything, it only tags what's already there, so where exactly
+		// it runs relative to them doesn't change what's shown, only
+		// whether a still-shown indicator carries the flag.
+		score, reviewedCount := markReviewed(score, reviewedTerms)
+
 		// --diff always compares the (post-exclude) full indicator set,
 		// before any --top truncation below -- otherwise an indicator that
 		// just fell outside --top's cutoff in an earlier run could
@@ -1571,7 +1742,7 @@ func runRisk(args []string) {
 		hiddenIndicators := hiddenByFilter + hiddenByTop
 		score, hiddenCorroborations := filterCorroborations(score, *minCorroboration)
 
-		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, HiddenCorroborations: hiddenCorroborations, SourceHealth: parseSourceHealth(notes)}
+		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, ReviewedIndicators: reviewedCount, HiddenCorroborations: hiddenCorroborations, SourceHealth: parseSourceHealth(notes)}
 
 		var w io.Writer = os.Stdout
 		if *output != "" {
@@ -1622,6 +1793,9 @@ func runRisk(args []string) {
 			if excludedCount > 0 {
 				fmt.Fprintf(w, "\n%d indicator(s) permanently excluded (--exclude/--exclude-file) -- not counted in the score below at all.\n", excludedCount)
 			}
+			if reviewedCount > 0 {
+				fmt.Fprintf(w, "\n%d indicator(s) marked reviewed (--reviewed-file) -- still counted in full below, just flagged as already looked at.\n", reviewedCount)
+			}
 			colorOn := colorEnabled(w, *noColor)
 			coloredConfidence := colorize(score.Confidence, confidenceColor(score.Confidence), colorOn)
 			fmt.Fprintf(w, "\nRisk score: %d (confidence: %s -- %s)\n\n", score.Total, coloredConfidence, score.ConfidenceReason)
@@ -1630,7 +1804,11 @@ func runRisk(args []string) {
 			}
 			for _, ind := range score.Indicators {
 				weightStr := colorize(fmt.Sprintf("+%d", ind.Weight), weightColor(ind.Weight), colorOn)
-				fmt.Fprintf(w, "%s  %s\n", weightStr, ind.Description)
+				reviewedTag := ""
+				if ind.Reviewed {
+					reviewedTag = "  [reviewed]"
+				}
+				fmt.Fprintf(w, "%s  %s%s\n", weightStr, ind.Description, reviewedTag)
 				fmt.Fprintf(w, "     Entities: %s\n", strings.Join(ind.Entities, "; "))
 				fmt.Fprintf(w, "     Evidence: %s\n\n", ind.Evidence)
 			}

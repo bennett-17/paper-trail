@@ -111,13 +111,18 @@ func TestPossibleDuplicatesCrossReferencesWithoutMerging(t *testing.T) {
 		{Label: "companieshouse: WELLS FARGO LTD (14630695)"},
 		{Label: "gleif: Some Unrelated Bank"},
 	}
-	dups := possibleDuplicates(cards)
+	// No entities pool given -- resolves to "possible" confidence for
+	// every pairing, today's original unqualified behavior.
+	dups := possibleDuplicates(cards, nil)
 	if len(dups) != 2 {
 		t.Fatalf("possibleDuplicates() returned %d entries, want 2 (the two Wells Fargo cards)", len(dups))
 	}
 	edgar := dups["edgar: WELLS FARGO & COMPANY/MN (0000072971)"]
-	if len(edgar) != 1 || edgar[0] != "companieshouse: WELLS FARGO LTD (14630695)" {
+	if len(edgar) != 1 || edgar[0].Label != "companieshouse: WELLS FARGO LTD (14630695)" {
 		t.Errorf("edgar card's duplicates = %v, want the Companies House card only", edgar)
+	}
+	if edgar[0].Confidence != "possible" {
+		t.Errorf("edgar card's duplicate confidence = %q, want \"possible\" (no entities pool to compare addresses/people)", edgar[0].Confidence)
 	}
 	if _, ok := dups["gleif: Some Unrelated Bank"]; ok {
 		t.Errorf("unrelated card should not appear in duplicates map")
@@ -129,9 +134,41 @@ func TestPossibleDuplicatesIgnoresQueryPseudoEntities(t *testing.T) {
 		{Label: "search query: wells fargo"},
 		{Label: "search query: wells fargo bank"},
 	}
-	dups := possibleDuplicates(cards)
+	dups := possibleDuplicates(cards, nil)
 	if len(dups) != 0 {
 		t.Errorf("possibleDuplicates() with only query pseudo-entities = %v, want empty", dups)
+	}
+}
+
+func TestPossibleDuplicatesLikelyWhenSharingAddress(t *testing.T) {
+	cards := []entityCard{
+		{Label: "edgar: WELLS FARGO & COMPANY/MN (0000072971)"},
+		{Label: "companieshouse: WELLS FARGO LTD (14630695)"},
+	}
+	entities := []risk.Entity{
+		risk.NewEntity("edgar", "0000072971", "WELLS FARGO & COMPANY/MN", []string{"1 Front St, San Francisco"}, nil),
+		risk.NewEntity("companieshouse", "14630695", "WELLS FARGO LTD", []string{"1 Front St, San Francisco"}, nil),
+	}
+	dups := possibleDuplicates(cards, entities)
+	edgar := dups["edgar: WELLS FARGO & COMPANY/MN (0000072971)"]
+	if len(edgar) != 1 || edgar[0].Confidence != "likely" {
+		t.Errorf("edgar card's duplicates = %+v, want a single \"likely\" match (shared address)", edgar)
+	}
+}
+
+func TestPossibleDuplicatesPossibleWhenNoOtherOverlap(t *testing.T) {
+	cards := []entityCard{
+		{Label: "edgar: WELLS FARGO & COMPANY/MN (0000072971)"},
+		{Label: "companieshouse: WELLS FARGO LTD (14630695)"},
+	}
+	entities := []risk.Entity{
+		risk.NewEntity("edgar", "0000072971", "WELLS FARGO & COMPANY/MN", []string{"1 Front St, San Francisco"}, []string{"Jane Doe"}),
+		risk.NewEntity("companieshouse", "14630695", "WELLS FARGO LTD", []string{"9 Cheapside, London"}, []string{"John Smith"}),
+	}
+	dups := possibleDuplicates(cards, entities)
+	edgar := dups["edgar: WELLS FARGO & COMPANY/MN (0000072971)"]
+	if len(edgar) != 1 || edgar[0].Confidence != "possible" {
+		t.Errorf("edgar card's duplicates = %+v, want a single \"possible\" match (no shared address or person)", edgar)
 	}
 }
 

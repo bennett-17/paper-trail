@@ -301,8 +301,11 @@ func TestWriteReportHTMLRendersTieredSectionsDuplicatesAndPersonPanel(t *testing
 	if !strings.Contains(html, "Single weak signals") {
 		t.Error("expected a Single weak signals tier section (the lone gdelt_news_mention card)")
 	}
-	if !strings.Contains(html, "Possibly the same entity as: companieshouse: WELLS FARGO LTD (14630695)") {
-		t.Error("expected a cross-reference note linking the two same-named Wells Fargo cards, without merging them")
+	// Both Wells Fargo entities also share a person (Jane Doe), so the
+	// confidence-scored cross-reference should read "Likely," not the
+	// bare "Possibly" wording -- see duplicateConfidence.
+	if !strings.Contains(html, "Likely the same entity as: companieshouse: WELLS FARGO LTD (14630695)") {
+		t.Error("expected a \"likely\" cross-reference note (shared person Jane Doe) linking the two same-named Wells Fargo cards, without merging them")
 	}
 	if !strings.Contains(html, "WELLS FARGO &amp; COMPANY/MN (0000072971)") || !strings.Contains(html, "companieshouse: WELLS FARGO LTD (14630695)") {
 		t.Error("both distinct Wells Fargo cards must still be rendered separately -- a cross-reference is not a merge")
@@ -353,5 +356,151 @@ func TestConfidenceClassMapping(t *testing.T) {
 		if got := confidenceClass(c.band); got != c.want {
 			t.Errorf("confidenceClass(%q) = %q, want %q", c.band, got, c.want)
 		}
+	}
+}
+
+func TestBuildTimelineKeepsOnlyDatedIndicatorsInChronologicalOrder(t *testing.T) {
+	indicators := []risk.Indicator{
+		{Code: "officer_resignation_burst", Weight: 2, Entities: []string{"companieshouse: C (3)"}, Evidence: "later", Date: "2020-06-01"},
+		{Code: "shared_address", Weight: 2, Entities: []string{"edgar: A (1)"}, Evidence: "no date at all"},
+		{Code: "formation_cluster", Weight: 1, Entities: []string{"edgar: B (2)"}, Evidence: "earlier", Date: "2015-01-02"},
+		{Code: "gazette_insolvency_notice", Weight: 1, Entities: []string{"edgar: D (4)"}, Evidence: "middle", Date: "2018-03-04"},
+	}
+
+	got := buildTimeline(indicators)
+	if len(got) != 3 {
+		t.Fatalf("got %d entries, want 3 (the undated shared_address must be left out): %+v", len(got), got)
+	}
+	wantDates := []string{"2015-01-02", "2018-03-04", "2020-06-01"}
+	for i, want := range wantDates {
+		if got[i].Date != want {
+			t.Errorf("entry %d date = %q, want %q (oldest first)", i, got[i].Date, want)
+		}
+	}
+	if got[0].Entity != "edgar: B (2)" || got[0].Code != "formation_cluster" {
+		t.Errorf("entry 0 = %+v, want the formation_cluster entry carried through intact", got[0])
+	}
+}
+
+func TestBuildTimelineSkipsUnparseableDateWithoutCrashing(t *testing.T) {
+	indicators := []risk.Indicator{
+		{Code: "formation_cluster", Weight: 1, Evidence: "good", Date: "2015-01-02"},
+		{Code: "gazette_insolvency_notice", Weight: 1, Evidence: "bad", Date: "not-a-date"},
+		{Code: "officer_appointment_burst", Weight: 2, Evidence: "also bad", Date: "13/45/9999"},
+	}
+	got := buildTimeline(indicators)
+	if len(got) != 1 || got[0].Date != "2015-01-02" {
+		t.Errorf("got %+v, want only the one parseable-date entry", got)
+	}
+}
+
+func TestBuildTimelineNormalizesFullDatetimeToPlainDate(t *testing.T) {
+	// The Gazette sends a full ISO datetime; it must land on the
+	// timeline as a plain date, matching every other entry's format.
+	got := buildTimeline([]risk.Indicator{
+		{Code: "gazette_insolvency_notice", Weight: 1, Evidence: "notice", Date: "2015-03-05T13:56:21"},
+	})
+	if len(got) != 1 || got[0].Date != "2015-03-05" {
+		t.Errorf("got %+v, want a single entry dated 2015-03-05", got)
+	}
+}
+
+func TestBuildTimelineEmptyWhenNothingIsDated(t *testing.T) {
+	got := buildTimeline([]risk.Indicator{
+		{Code: "shared_address", Weight: 2, Evidence: "no date"},
+		{Code: "shared_person", Weight: 3, Evidence: "no date either"},
+	})
+	if len(got) != 0 {
+		t.Errorf("got %+v, want no timeline entries at all", got)
+	}
+}
+
+func TestWriteReportHTMLRendersTimelineSectionOnlyWhenDated(t *testing.T) {
+	dated := riskReportJSON{
+		Queries:  []string{"Example"},
+		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
+		Score: risk.Score{
+			Total: 1,
+			Indicators: []risk.Indicator{
+				{Code: "formation_cluster", Description: "formed together", Weight: 1, Entities: []string{"edgar: Example Corp (1)"}, Evidence: "2015-01-02 to 2015-01-09", Date: "2015-01-02"},
+			},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "dated.html")
+	if err := writeReportHTML(dated, nil, "", path); err != nil {
+		t.Fatalf("writeReportHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	if html := string(data); !strings.Contains(html, "<h2>Timeline</h2>") || !strings.Contains(html, "2015-01-02") {
+		t.Error("expected a Timeline section listing the dated indicator")
+	}
+
+	// Same report with the date removed: the section must vanish
+	// entirely rather than render empty.
+	undated := dated
+	undated.Score.Indicators = []risk.Indicator{{Code: "formation_cluster", Description: "formed together", Weight: 1, Entities: []string{"edgar: Example Corp (1)"}, Evidence: "no date"}}
+	path2 := filepath.Join(t.TempDir(), "undated.html")
+	if err := writeReportHTML(undated, nil, "", path2); err != nil {
+		t.Fatalf("writeReportHTML (undated): %v", err)
+	}
+	data2, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatalf("reading undated output: %v", err)
+	}
+	if strings.Contains(string(data2), "<h2>Timeline</h2>") {
+		t.Error("expected no Timeline section at all when no indicator carries a date")
+	}
+}
+
+func TestWriteReportHTMLRendersReviewedIndicatorCollapsed(t *testing.T) {
+	report := riskReportJSON{
+		Queries:  []string{"Example"},
+		Entities: []risk.Entity{risk.NewEntity("edgar", "1", "Example Corp", nil, nil)},
+		Score: risk.Score{
+			Total:      5,
+			Confidence: "MEDIUM",
+			Indicators: []risk.Indicator{
+				{Code: "sanctions_match", Description: "Already looked at this one", Weight: 3, Entities: []string{"edgar: Example Corp (1)"}, Evidence: "reviewed evidence", Reviewed: true},
+				{Code: "shared_address", Description: "Still needs a look", Weight: 2, Entities: []string{"edgar: Example Corp (1)"}, Evidence: "fresh evidence"},
+			},
+		},
+		ReviewedIndicators: 1,
+	}
+
+	path := filepath.Join(t.TempDir(), "report.html")
+	if err := writeReportHTML(report, nil, "", path); err != nil {
+		t.Fatalf("writeReportHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	html := string(data)
+
+	if !strings.Contains(html, "indicator-reviewed") {
+		t.Error("expected the reviewed indicator to render with the indicator-reviewed class (dimmed/collapsed)")
+	}
+	// A <details> element with no `open` attribute is collapsed by
+	// default -- that's the whole point of the reviewed treatment.
+	if !strings.Contains(html, `<details class="indicator indicator-reviewed`) {
+		t.Error("expected the reviewed indicator to render as a collapsed <details> element")
+	}
+	if !strings.Contains(html, "1 indicator(s) marked reviewed") {
+		t.Error("expected the reviewed count callout in the report header")
+	}
+	// The non-reviewed indicator must be completely untouched.
+	if !strings.Contains(html, "Still needs a look") {
+		t.Error("the non-reviewed indicator must still render normally")
+	}
+	if strings.Count(html, "indicator-reviewed") == 0 || strings.Contains(html, `<div class="indicator indicator-reviewed`) {
+		t.Error("only the reviewed indicator should get the reviewed treatment, and it should be a <details>, not a <div>")
+	}
+	// The score must still reflect the reviewed indicator in full --
+	// this is the visible half of markReviewed's own contract.
+	if !strings.Contains(html, "<strong>5</strong>") {
+		t.Error("expected the score to still count the reviewed indicator in full")
 	}
 }

@@ -196,6 +196,97 @@ func TestRecomputeEntityClusterKeepsValidComponentUnchanged(t *testing.T) {
 	}
 }
 
+func TestEntityClusterHubBreaksChainTieViaBetweenness(t *testing.T) {
+	// A-B-C-D-E, each consecutive pair linked by its own distinct
+	// indicator (so the pairwise graph is a true 5-node chain, not a
+	// clique): degree centrality alone ties B, C, and D at degree 2
+	// (A and E are the degree-1 endpoints) -- it can't tell them
+	// apart. Betweenness must break that tie in C's favor: C is the
+	// only member sitting on shortest paths between members on BOTH
+	// sides of it (A/B to D/E), while B only mediates paths reaching
+	// leftward-adjacent A and D only mediates paths reaching
+	// rightward-adjacent E.
+	indicators := []Indicator{
+		indicatorNaming("shared_person", "a", "b"),
+		indicatorNaming("shared_address", "b", "c"),
+		indicatorNaming("sequential_registration_numbers", "c", "d"),
+		indicatorNaming("shared_email_domain", "d", "e"),
+	}
+	out := EntityCluster(indicators)
+	if len(out) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(out), out)
+	}
+	if !strings.Contains(out[0].Evidence, "hub: c (degree 2)") {
+		t.Errorf("Evidence = %q, want betweenness to break the B/C/D degree-2 tie in favor of c, the true chain midpoint", out[0].Evidence)
+	}
+}
+
+func TestEntityClusterHubBetweennessTieInCliqueFallsBackToAlphabetical(t *testing.T) {
+	// A single indicator naming all 4 members together makes every
+	// pair directly connected (a clique) -- every member is tied at
+	// true degree 3, and betweenness ties too (0 for everyone: with
+	// every pair directly adjacent, no member ever sits "between" two
+	// others on a shortest path). Confirms betweenness isn't a silver
+	// bullet -- it's an honest tie here, not a bug -- and that the
+	// final fallback is the same deterministic alphabetical order used
+	// before betweenness existed.
+	indicators := []Indicator{
+		indicatorNaming("shared_person", "w", "x", "y", "z"),
+	}
+	out := EntityCluster(indicators)
+	if len(out) != 1 {
+		t.Fatalf("got %d indicators, want 1: %+v", len(out), out)
+	}
+	if !strings.Contains(out[0].Evidence, "hub: w (degree 3)") {
+		t.Errorf("Evidence = %q, want every member tied at true degree 3 and betweenness too, hub \"w\" only by alphabetical tie-break order", out[0].Evidence)
+	}
+}
+
+func TestBetweennessMatchesHandComputedChainValues(t *testing.T) {
+	// Direct unit test of betweenness() against a hand-computed
+	// 5-node chain A-B-C-D-E (10 total pairs; see this test's own
+	// comment history/PR for the by-hand derivation): endpoints A/E
+	// never mediate any pair (0), B mediates 3 pairs ((A,C) (A,D)
+	// (A,E)), D mediates 3 ((A,E) (B,E) (C,E)), and C -- the true
+	// midpoint -- mediates 4 ((A,D) (A,E) (B,D) (B,E)), strictly more
+	// than either B or D.
+	neighbors := map[string]map[string]bool{
+		"a": {"b": true},
+		"b": {"a": true, "c": true},
+		"c": {"b": true, "d": true},
+		"d": {"c": true, "e": true},
+		"e": {"d": true},
+	}
+	members := []string{"a", "b", "c", "d", "e"}
+	bc := betweenness(neighbors, members)
+
+	want := map[string]float64{"a": 0, "b": 3, "c": 4, "d": 3, "e": 0}
+	for m, w := range want {
+		if bc[m] != w {
+			t.Errorf("betweenness[%q] = %v, want %v (full result: %v)", m, bc[m], w, bc)
+		}
+	}
+}
+
+func TestBetweennessZeroInAClique(t *testing.T) {
+	members := []string{"w", "x", "y", "z"}
+	neighbors := map[string]map[string]bool{}
+	for _, a := range members {
+		neighbors[a] = map[string]bool{}
+		for _, b := range members {
+			if a != b {
+				neighbors[a][b] = true
+			}
+		}
+	}
+	bc := betweenness(neighbors, members)
+	for _, m := range members {
+		if bc[m] != 0 {
+			t.Errorf("betweenness[%q] = %v in a clique, want 0 (every pair is directly adjacent)", m, bc[m])
+		}
+	}
+}
+
 func TestUnionFindPathCompressionFindsCommonRoot(t *testing.T) {
 	uf := newUnionFind()
 	for _, x := range []string{"a", "b", "c", "d"} {

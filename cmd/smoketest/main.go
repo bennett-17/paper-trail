@@ -14,7 +14,8 @@
 //
 //	go run ./cmd/smoketest <source> <query>
 //
-// where <source> is one of: edgar, littlesis, openfec, usaspending, gazette
+// where <source> is one of: edgar, littlesis, openfec, usaspending,
+// gazette, samgov, ireland, interpol
 //
 //	export EDGAR_USER_AGENT="Your Name your.email@example.com"
 //	go run ./cmd/smoketest edgar AAPL
@@ -22,6 +23,9 @@
 //	go run ./cmd/smoketest openfec "Jane Doe"
 //	go run ./cmd/smoketest usaspending "Wells Fargo"
 //	go run ./cmd/smoketest gazette "Wells Fargo"
+//	go run ./cmd/smoketest samgov "Jane Doe" # requires SAM_GOV_API_KEY
+//	go run ./cmd/smoketest ireland "Wells Fargo"
+//	go run ./cmd/smoketest interpol "Smith"
 package main
 
 import (
@@ -41,6 +45,9 @@ var sources = map[string]func(query string) error{
 	"openfec":     runOpenFEC,
 	"usaspending": runUSASpending,
 	"gazette":     runGazette,
+	"samgov":      runSAMGov,
+	"ireland":     runIreland,
+	"interpol":    runInterpol,
 }
 
 func main() {
@@ -48,7 +55,7 @@ func main() {
 
 	if len(os.Args) != 3 || sources[os.Args[1]] == nil {
 		fmt.Println("Usage: go run ./cmd/smoketest <source> <query>")
-		fmt.Println("  <source> is one of: edgar, littlesis, openfec, usaspending, gazette")
+		fmt.Println("  <source> is one of: edgar, littlesis, openfec, usaspending, gazette, samgov, ireland, interpol")
 		os.Exit(1)
 	}
 	source, query := os.Args[1], os.Args[2]

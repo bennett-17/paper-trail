@@ -33,6 +33,23 @@ func parseFormationDate(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// NormalizeIndicatorDate is the single definition of what a valid
+// Indicator.Date looks like: plain YYYY-MM-DD, or "" if s isn't a date
+// this project's sources actually produce (see dateLayouts above,
+// which this reuses rather than accepting a second, looser set of
+// formats). Every construction site that populates Date should route
+// through this, so a consumer -- the HTML report's timeline section
+// today -- can parse Date with one layout and never has to guess.
+// Returns "" rather than an error: an indicator with no usable date is
+// simply absent from the timeline, never shown with a wrong one.
+func NormalizeIndicatorDate(s string) string {
+	t, ok := parseFormationDate(s)
+	if !ok {
+		return ""
+	}
+	return t.Format("2006-01-02")
+}
+
 // DefaultFormationClusterWindow is how close together entities need to
 // have been formed/registered to be flagged by FormationClusters. This
 // is a first-pass value, not tuned against real-world data: mass
@@ -93,6 +110,9 @@ func FormationClusters(entities []Entity, window time.Duration) []Indicator {
 				Weight:      1,
 				Entities:    labels(distinct),
 				Evidence:    fmt.Sprintf("%s to %s", withDates[i].date.Format("2006-01-02"), withDates[j].date.Format("2006-01-02")),
+				// The cluster's start date anchors it on the timeline;
+				// its span is already stated in Evidence above.
+				Date: withDates[i].date.Format("2006-01-02"),
 			})
 		}
 		i = j + 1

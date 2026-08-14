@@ -259,7 +259,7 @@ func TestServeScanSSENoQueryReturnsError(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/scan?q=", nil)
 	rec := httptest.NewRecorder()
-	serveScanSSE(rec, req, tmpl, 5, &riskcache.Cache{}, 0, nil)
+	serveScanSSE(rec, req, tmpl, 5, &riskcache.Cache{}, 0, nil, nil)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: scanerror") {
