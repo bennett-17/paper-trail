@@ -2012,41 +2012,47 @@ func resignationBurst(appointments []companieshouse.Appointment) (desc, date str
 // as a likely professional/corporate nominee rather than an ordinary
 // individual who happens to sit on a handful of boards.
 //
-// MEASURED, not reasoned. This was originally 10, described as a
-// "conservative floor" reasoned down from one real nominee service
-// with 540 appointments. Measuring the actual distribution across 492
-// officers of randomly sampled companies (paper-trail calibrate, three
-// seeds) showed 10 is not a floor on the tail at all -- it sits around
-// p85 and fired on 14.6% of officers:
+// MEASURED across 1,769 officers of 1,050 randomly sampled companies
+// (paper-trail calibrate, four seeds). This constant has now been
+// wrong twice, so the evidence is recorded in full rather than
+// summarized:
 //
-//	p50     2      p95      42
-//	p75     4      p97.5    93
-//	p90    15      p99     263      max  12,575
+//	p50      2        p97.5      342
+//	p75      4        p99      3,250
+//	p90     18        p99.5    6,474
+//	p95     61        p99.9   12,575     max 12,587
 //
-// The median director has TWO appointments and three-quarters have
-// four or fewer, so 10 was catching the ordinary busy end of normal.
-// 50 sits at roughly p95-p96 in that sample, flags ~4.7% of officers,
-// and is still an order of magnitude below the 540-appointment
-// reference case, preserving the original conservative-floor intent.
+// The distribution is BIMODAL, not a continuum, and that is the real
+// finding. Between p95 and p99 the count jumps 61 -> 3,250, a factor
+// of 53. Above roughly 150 the curve goes flat -- raising the cut from
+// 150 to 300 only moves the flagged share from 3.8% to 3.3% of
+// companies -- because there is nothing left to exclude: what remains
+// is a hard cluster of genuine professional nominees. Two populations
+// exist here (ordinary directors, median 2 and three-quarters at 4 or
+// fewer; and nominee services in the hundreds to thousands), with very
+// little in between.
 //
-// VALIDATION, and an honest correction. Re-measuring on 200 FRESH
-// companies the threshold was NOT derived from put
-// mass_nominee_officer at 10.0% (95% CI 5.8-14.2%), not the ~5.5% the
-// derivation sample predicted -- the prediction sat at the very bottom
-// edge of that interval. So 50 is a clear improvement on 10 (which
-// fired at 14.6%) but it is NOT the settled tail cut the percentiles
-// above imply: on unseen data it sits closer to the shoulder.
+// 150 is chosen as the point where the curve flattens: 3.8% of
+// companies, 3.1% of officers, everything above it inside the nominee
+// cluster. Pushing higher buys almost nothing and risks real misses.
 //
-// The cause is sample size, not method. Officer appointment counts are
-// heavy-tailed and a few hundred companies cannot pin the rate, which
-// the seed-to-seed spread on this indicator (10.8% vs 18.0%) already
-// hinted at. Treat 50 as PROVISIONAL; stabilizing it needs on the
-// order of a thousand-plus companies, not more reasoning.
+// History, kept deliberately. 10 was reasoned down from a single
+// 540-appointment reference case and fired on 14.6% of officers. 50 was
+// then set from a 492-officer sample where it looked like p95-p96; on
+// 1,769 officers it is about p94 and flags 6.3% of companies, and
+// validating against companies it was not derived from put the
+// indicator at 10.0%. Both errors came from sampling a heavy tail too
+// thinly, not from the method.
 //
-// Caveat carried with the number: 492 officers across 308 companies,
-// sampled from the company-NUMBER space (which skews toward older
-// companies). Right order of magnitude, not precision-tuned.
-const massNomineeOfficerThreshold = 50
+// KNOWN LIMITATION, worth more than another constant: a single count
+// threshold is a crude instrument for a bimodal distribution. An
+// officer with 3,250 appointments and one with 160 are qualitatively
+// different and are currently flagged identically at weight 2. Tiering
+// this -- 150+ as the signal, 1,000+ as something materially stronger
+// -- would fit the measured data far better than any single cut. That
+// is a design change rather than a constant change, which is why it is
+// documented here instead of guessed at.
+const massNomineeOfficerThreshold = 150
 
 // massNomineeOfficer reports whether totalAppointments (the true
 // register-wide total from GetOfficerAppointments -- deliberately not

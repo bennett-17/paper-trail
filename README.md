@@ -1288,6 +1288,20 @@ weight-sorted indicator list:
 
 #### Calibration: what a weight actually means
 
+Calibration has already changed real behaviour rather than just
+producing a report. Measuring base rates showed two thresholds were
+cutting the *middle* of their distributions instead of the tail:
+`mail_drop_address` fired on 1 in 6 random companies and
+`mass_nominee_officer` on 1 in 7, both far too common for what they
+claim to detect. Measuring the distributions those thresholds cut then
+set them from evidence -- and the officer-appointment distribution
+turned out to be **bimodal** (median 2 appointments, p95 61, p99 3,250),
+which is a finding about UK company directorships, not a tuning detail.
+The measured percentiles and sample sizes are recorded in each
+threshold's own comment, so the evidence and its limits travel with the
+number.
+
+
 Every weight in this tool is hand-tuned judgement. `shared_address` is
 "+2" because that felt right next to `shared_person`'s "+3" --
 defensible, but not measured. Asked *"why is this suspicious?"*, "it
