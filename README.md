@@ -1108,6 +1108,17 @@ does.
   judgement**: it shipped at 2, and `calibrate` then put it at ~1 in 9
   random companies, which is ordinary. Read it as timeline context, not
   a finding.
+- **mass_nominee_officer**: an officer with an unusually large number
+  of register-wide appointments -- the hallmark of a professional
+  nominee-director service. **Scored in two tiers**, because measuring
+  the distribution showed a single weight couldn't honestly represent
+  both ends: officers past the threshold form a cluster running from
+  ~150 appointments to over 12,000, and one at 157 is not the same
+  finding as one at 12,587. 150+ scores 2, 1,000+ scores 3. Neither
+  reaches the adjudicated-fact band, deliberately -- running a nominee
+  service at any scale is lawful, and this stays a structural
+  inference. The evidence line always states the raw count, which is
+  the number to judge on.
 - **short_lived_company_cluster**: several entities in one scan
   dissolved within 24 months of being formed -- the churn signature of
   a phoenix-company pattern (wound up and re-formed to shed

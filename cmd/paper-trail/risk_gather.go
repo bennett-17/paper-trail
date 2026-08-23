@@ -2054,6 +2054,40 @@ func resignationBurst(appointments []companieshouse.Appointment) (desc, date str
 // documented here instead of guessed at.
 const massNomineeOfficerThreshold = 150
 
+// industrialNomineeOfficerThreshold separates a professional nominee
+// from an industrial-scale one. Unlike massNomineeOfficerThreshold
+// above, this is NOT a boundary the data handed over: within the
+// nominee cluster the counts ramp smoothly from 157 to 12,587 with no
+// gap wider than about 1.4x, so there is no second mode to find. It is
+// a deliberate magnitude cut, and calling it anything else would
+// overstate the evidence.
+//
+// 1,000 is chosen because it is an order of magnitude above the signal
+// threshold, roughly twice the 540-appointment real nominee service
+// this indicator was originally built around, and flags 2.3% of
+// companies against 3.8% for the lower tier -- so the tiers are
+// meaningfully different populations rather than a distinction without
+// one.
+//
+// The reason to tier at all is that a single weight cannot honestly
+// represent both ends: on the measured sample an officer at 157
+// appointments and one at 12,587 were scored identically, and those
+// are not the same finding.
+const industrialNomineeOfficerThreshold = 1000
+
+// massNomineeWeight and industrialNomineeWeight are the two tiers'
+// weights. Neither reaches the 5+ "already-adjudicated" band, and
+// deliberately so: operating a nominee-director service at any scale
+// is a lawful business model, and this remains a structural
+// observation this project inferred rather than a finding any
+// regulator has made. The upper tier gets 3 -- the same as
+// shared_person -- because scale makes the observation stronger, not
+// because volume alone is evidence of wrongdoing.
+const (
+	massNomineeWeight       = 2
+	industrialNomineeWeight = 3
+)
+
 // massNomineeOfficer reports whether totalAppointments (the true
 // register-wide total from GetOfficerAppointments -- deliberately not
 // len(appointments), which paper-trail's own default --limit=5 would
@@ -2565,12 +2599,16 @@ func officerAppointmentIndicators(officerName string, appointments []companiesho
 		})
 	}
 	if count := massNomineeOfficer(totalAppointments); count > 0 {
+		weight, scale := massNomineeWeight, "professional nominee scale"
+		if count >= industrialNomineeOfficerThreshold {
+			weight, scale = industrialNomineeWeight, "industrial nominee scale"
+		}
 		extra = append(extra, risk.Indicator{
 			Code:        "mass_nominee_officer",
-			Description: "An officer of this entity has an unusually large number of appointment records register-wide, current and former combined -- the hallmark of a professional/corporate nominee-director service (the real one this project's officer_appointment_burst indicator cites separately has appointments numbering in the hundreds), a routine and often entirely lawful business model, but also a known technique for obscuring who is actually behind a company, since a professional nominee's own name reveals nothing about who they're acting for",
-			Weight:      2,
+			Description: "An officer of this entity has an unusually large number of appointment records register-wide, current and former combined -- the hallmark of a professional/corporate nominee-director service, a routine and often entirely lawful business model, but also a known technique for obscuring who is actually behind a company, since a professional nominee's own name reveals nothing about who they're acting for. Scored in two tiers, because measurement showed a single weight could not honestly represent both ends of this population: officers past the signal threshold sit in a cluster running from roughly 150 appointments to well over 12,000, and those are not the same finding. The evidence line states the actual count, which is the number to judge on",
+			Weight:      weight,
 			Entities:    []string{entityLabel},
-			Evidence:    fmt.Sprintf("%s: %d appointments register-wide", officerName, count),
+			Evidence:    fmt.Sprintf("%s: %d appointments register-wide (%s)", officerName, count, scale),
 		})
 	}
 	return extra

@@ -1413,3 +1413,63 @@ func TestDormantReactivatedIgnoresNonAccountsFilings(t *testing.T) {
 		t.Errorf("got %+v, want nothing from non-accounts filings", got)
 	}
 }
+
+func TestMassNomineeOfficerTiers(t *testing.T) {
+	cases := []struct {
+		name       string
+		total      int
+		wantFires  bool
+		wantWeight int
+		wantScale  string
+	}{
+		{"below signal threshold", 149, false, 0, ""},
+		{"at signal threshold", 150, true, massNomineeWeight, "professional nominee scale"},
+		{"mid professional range", 764, true, massNomineeWeight, "professional nominee scale"},
+		{"just below industrial", 999, true, massNomineeWeight, "professional nominee scale"},
+		{"at industrial threshold", 1000, true, industrialNomineeWeight, "industrial nominee scale"},
+		{"real observed maximum", 12587, true, industrialNomineeWeight, "industrial nominee scale"},
+	}
+	for _, c := range cases {
+		got := officerAppointmentIndicators("Test Officer", nil, c.total, "companieshouse: X (1)")
+		var found *risk.Indicator
+		for i := range got {
+			if got[i].Code == "mass_nominee_officer" {
+				found = &got[i]
+			}
+		}
+		if !c.wantFires {
+			if found != nil {
+				t.Errorf("%s (%d): fired when it should not: %+v", c.name, c.total, found)
+			}
+			continue
+		}
+		if found == nil {
+			t.Errorf("%s (%d): expected mass_nominee_officer, got none", c.name, c.total)
+			continue
+		}
+		if found.Weight != c.wantWeight {
+			t.Errorf("%s (%d): Weight = %d, want %d", c.name, c.total, found.Weight, c.wantWeight)
+		}
+		if !strings.Contains(found.Evidence, c.wantScale) {
+			t.Errorf("%s (%d): Evidence = %q, want it to name %q", c.name, c.total, found.Evidence, c.wantScale)
+		}
+		// The count itself is what a reader should judge on, so it must
+		// always be stated regardless of tier.
+		if !strings.Contains(found.Evidence, fmt.Sprintf("%d appointments", c.total)) {
+			t.Errorf("%s (%d): Evidence = %q, want the raw count stated", c.name, c.total, found.Evidence)
+		}
+	}
+}
+
+// TestNomineeTierWeightsStayBelowAdjudicatedBand guards the deliberate
+// ceiling: running a nominee service at any scale is lawful, and this
+// is a structural inference, not a regulator's finding.
+func TestNomineeTierWeightsStayBelowAdjudicatedBand(t *testing.T) {
+	if industrialNomineeWeight >= confirmedFactWeight {
+		t.Errorf("industrialNomineeWeight = %d reaches the adjudicated-fact band (%d); scale is not adjudication",
+			industrialNomineeWeight, confirmedFactWeight)
+	}
+	if massNomineeWeight >= industrialNomineeWeight {
+		t.Errorf("tiers are not ordered: %d >= %d", massNomineeWeight, industrialNomineeWeight)
+	}
+}
