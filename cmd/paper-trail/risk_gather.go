@@ -1150,14 +1150,8 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			if chClient != nil && detail.Postcode != "" {
 				if count, err := chClient.CountCompaniesAtLocation(detail.Postcode); err != nil {
 					chNote("%s address density check: %v", detail.Name, err)
-				} else if count >= mailDropAddressThreshold {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "mail_drop_address",
-						Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way)",
-						Weight:      2,
-						Entities:    []string{e.Label()},
-						Evidence:    fmt.Sprintf("%d companies registered at postcode %s", count, detail.Postcode),
-					})
+				} else {
+					r.extra = append(r.extra, mailDropIndicator(count, detail.Postcode, e.Label())...)
 				}
 			}
 

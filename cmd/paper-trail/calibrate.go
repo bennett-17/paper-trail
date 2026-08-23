@@ -39,6 +39,17 @@ type calibrationSample struct {
 	CompanyNumber string   `json:"companyNumber"`
 	Name          string   `json:"name"`
 	Codes         []string `json:"codes,omitempty"`
+
+	// Raw observations behind the threshold-governed indicators.
+	// Recorded because knowing an indicator fires on 1 in 6 companies
+	// tells you the threshold is wrong but not what to change it to --
+	// that needs the distribution the threshold cuts. PostcodeDensity
+	// is how many companies share this company's postcode
+	// (mailDropAddressThreshold); OfficerAppointments is each current
+	// officer's register-wide appointment count
+	// (massNomineeOfficerThreshold).
+	PostcodeDensity     int   `json:"postcodeDensity,omitempty"`
+	OfficerAppointments []int `json:"officerAppointments,omitempty"`
 }
 
 // CalibrationReport is what `calibrate` writes: per-indicator base
@@ -139,8 +150,10 @@ func runCalibrate(args []string) {
 		if filings, err := chClient.GetFilingHistory(entity.ID, filingHistoryLimit); err == nil {
 			extra = append(extra, dormantReactivated(filings, entity.Label())...)
 		}
+		postcodeDensity := 0
 		if pc := profile.RegisteredOffice.PostalCode; pc != "" {
 			if count, err := chClient.CountCompaniesAtLocation(pc); err == nil {
+				postcodeDensity = count
 				extra = append(extra, mailDropIndicator(count, pc, entity.Label())...)
 			}
 		}
@@ -150,6 +163,7 @@ func runCalibrate(args []string) {
 		// burst indicators are exactly the ones doing real work in
 		// shell-company detection, and their weights were pure guesswork
 		// until now.
+		var officerAppts []int
 		for _, o := range officers {
 			if o.OfficerID == "" {
 				continue // corporate officers often carry no linkable ID
@@ -158,6 +172,7 @@ func runCalibrate(args []string) {
 			if err != nil {
 				continue
 			}
+			officerAppts = append(officerAppts, total)
 			extra = append(extra, officerAppointmentIndicators(o.Name, appts, total, entity.Label())...)
 		}
 		score := risk.Assess([]risk.Entity{entity}, extra)
@@ -172,7 +187,10 @@ func runCalibrate(args []string) {
 			fired[ind.Code]++
 		}
 		sort.Strings(codes)
-		samples = append(samples, calibrationSample{CompanyNumber: number, Name: entity.Name, Codes: codes})
+		samples = append(samples, calibrationSample{
+			CompanyNumber: number, Name: entity.Name, Codes: codes,
+			PostcodeDensity: postcodeDensity, OfficerAppointments: officerAppts,
+		})
 	}
 	if !*quiet {
 		fmt.Fprintln(os.Stderr)
