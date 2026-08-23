@@ -749,14 +749,8 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				if company.RegisteredOffice.PostalCode != "" {
 					if count, err := chClient.CountCompaniesAtLocation(company.RegisteredOffice.PostalCode); err != nil {
 						note("%s address density check: %v", hit.Name, err)
-					} else if count >= mailDropAddressThreshold {
-						r.extra = append(r.extra, risk.Indicator{
-							Code:        "mail_drop_address",
-							Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way)",
-							Weight:      2,
-							Entities:    []string{entityLabel},
-							Evidence:    fmt.Sprintf("%d companies registered at postcode %s", count, company.RegisteredOffice.PostalCode),
-						})
+					} else {
+						r.extra = append(r.extra, mailDropIndicator(count, company.RegisteredOffice.PostalCode, entityLabel)...)
 					}
 				}
 			}
@@ -1444,38 +1438,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 			note("%s appointments: %v", o.Name, err)
 			continue
 		}
-		// Appointment-burst, resignation-burst, and mass-nominee checks
-		// all reuse this same fetch -- no extra API call needed for any
-		// of them.
-		if desc, date := appointmentBurst(appointments); desc != "" {
-			extra = append(extra, risk.Indicator{
-				Code:        "officer_appointment_burst",
-				Description: "An officer of this entity was appointed to several other companies within a short span -- a known nominee-director/shelf-company-formation pattern (confirmed live against a real UK corporate nominee-director service with hundreds of register-wide appointments, several landing on the very same day), though bulk company-formation services also use this same pattern lawfully, so it's a lead to investigate rather than proof on its own",
-				Weight:      2,
-				Entities:    []string{entityLabel},
-				Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
-				Date:        date,
-			})
-		}
-		if desc, date := resignationBurst(appointments); desc != "" {
-			extra = append(extra, risk.Indicator{
-				Code:        "officer_resignation_burst",
-				Description: "An officer of this entity had their appointment at several other companies all end within a short span -- the bulk-handover signature of a shelf-company-formation service completing (or unwinding) a batch of companies at once (confirmed live against the same real UK corporate nominee-director service officer_appointment_burst cites, whose resignations cluster even more tightly than its appointments do), though this is also how a lawful bulk company-formation service normally operates, so it's a lead to investigate rather than proof on its own",
-				Weight:      2,
-				Entities:    []string{entityLabel},
-				Evidence:    fmt.Sprintf("%s: %s", o.Name, desc),
-				Date:        date,
-			})
-		}
-		if count := massNomineeOfficer(totalAppointments); count > 0 {
-			extra = append(extra, risk.Indicator{
-				Code:        "mass_nominee_officer",
-				Description: "An officer of this entity has an unusually large number of appointment records register-wide, current and former combined -- the hallmark of a professional/corporate nominee-director service (the real one this project's officer_appointment_burst indicator cites separately has appointments numbering in the hundreds), a routine and often entirely lawful business model, but also a known technique for obscuring who is actually behind a company, since a professional nominee's own name reveals nothing about who they're acting for",
-				Weight:      2,
-				Entities:    []string{entityLabel},
-				Evidence:    fmt.Sprintf("%s: %d appointments register-wide", o.Name, count),
-			})
-		}
+		extra = append(extra, officerAppointmentIndicators(o.Name, appointments, totalAppointments, entityLabel)...)
 		if filter.allows("UK sanctions screen (officer fan-out)") && !ofsiBreaker.Skip() {
 			if result, err := officerCache.getOFSIHits(ofsiClient, o.Name); err != nil {
 				// Deliberately not routed through tripNote/parseSourceHealth
@@ -2540,4 +2503,63 @@ func companyProfileIndicators(company companieshouse.Company, companyType, entit
 		})
 	}
 	return out
+}
+
+// officerAppointmentIndicators computes every indicator derivable from
+// ONE officer's register-wide appointment history. All three reuse the
+// same fetch -- no extra API call between them.
+//
+// Extracted for the same reason companyProfileIndicators was: these
+// were inline in officerFanOut, so `paper-trail calibrate` could not
+// reach them, and their base rates went unmeasured while their weights
+// stayed pure guesswork. Both callers now run identical logic, so a
+// measured rate describes what a real scan actually produces.
+func officerAppointmentIndicators(officerName string, appointments []companieshouse.Appointment, totalAppointments int, entityLabel string) []risk.Indicator {
+	var extra []risk.Indicator
+	if desc, date := appointmentBurst(appointments); desc != "" {
+		extra = append(extra, risk.Indicator{
+			Code:        "officer_appointment_burst",
+			Description: "An officer of this entity was appointed to several other companies within a short span -- a known nominee-director/shelf-company-formation pattern (confirmed live against a real UK corporate nominee-director service with hundreds of register-wide appointments, several landing on the very same day), though bulk company-formation services also use this same pattern lawfully, so it's a lead to investigate rather than proof on its own",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    fmt.Sprintf("%s: %s", officerName, desc),
+			Date:        date,
+		})
+	}
+	if desc, date := resignationBurst(appointments); desc != "" {
+		extra = append(extra, risk.Indicator{
+			Code:        "officer_resignation_burst",
+			Description: "An officer of this entity had their appointment at several other companies all end within a short span -- the bulk-handover signature of a shelf-company-formation service completing (or unwinding) a batch of companies at once (confirmed live against the same real UK corporate nominee-director service officer_appointment_burst cites, whose resignations cluster even more tightly than its appointments do), though this is also how a lawful bulk company-formation service normally operates, so it's a lead to investigate rather than proof on its own",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    fmt.Sprintf("%s: %s", officerName, desc),
+			Date:        date,
+		})
+	}
+	if count := massNomineeOfficer(totalAppointments); count > 0 {
+		extra = append(extra, risk.Indicator{
+			Code:        "mass_nominee_officer",
+			Description: "An officer of this entity has an unusually large number of appointment records register-wide, current and former combined -- the hallmark of a professional/corporate nominee-director service (the real one this project's officer_appointment_burst indicator cites separately has appointments numbering in the hundreds), a routine and often entirely lawful business model, but also a known technique for obscuring who is actually behind a company, since a professional nominee's own name reveals nothing about who they're acting for",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    fmt.Sprintf("%s: %d appointments register-wide", officerName, count),
+		})
+	}
+	return extra
+}
+
+// mailDropIndicator reports a postcode shared by an unusually large
+// number of companies register-wide. Split out alongside the officer
+// indicators above so calibrate measures the same thing a scan does.
+func mailDropIndicator(count int, postcode, entityLabel string) []risk.Indicator {
+	if count < mailDropAddressThreshold {
+		return nil
+	}
+	return []risk.Indicator{{
+		Code:        "mail_drop_address",
+		Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way)",
+		Weight:      2,
+		Entities:    []string{entityLabel},
+		Evidence:    fmt.Sprintf("%d companies registered at postcode %s", count, postcode),
+	}}
 }

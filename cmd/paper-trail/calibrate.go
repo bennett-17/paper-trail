@@ -117,7 +117,7 @@ func runCalibrate(args []string) {
 		if !*quiet {
 			fmt.Fprintf(os.Stderr, "\r[%d/%d] sampling %s (%d usable)", i+1, *sampleSize, number, len(samples))
 		}
-		entity, profile, ok := calibrationEntity(chClient, number)
+		entity, profile, officers, ok := calibrationEntity(chClient, number)
 		if !ok {
 			failed++
 			continue
@@ -138,6 +138,27 @@ func runCalibrate(args []string) {
 		extra := companyProfileIndicators(profile, profile.Type, entity.Label())
 		if filings, err := chClient.GetFilingHistory(entity.ID, filingHistoryLimit); err == nil {
 			extra = append(extra, dormantReactivated(filings, entity.Label())...)
+		}
+		if pc := profile.RegisteredOffice.PostalCode; pc != "" {
+			if count, err := chClient.CountCompaniesAtLocation(pc); err == nil {
+				extra = append(extra, mailDropIndicator(count, pc, entity.Label())...)
+			}
+		}
+		// One appointments lookup per current officer. This is the
+		// expensive part of calibration -- a company with five directors
+		// costs five extra calls -- but mass_nominee_officer and the two
+		// burst indicators are exactly the ones doing real work in
+		// shell-company detection, and their weights were pure guesswork
+		// until now.
+		for _, o := range officers {
+			if o.OfficerID == "" {
+				continue // corporate officers often carry no linkable ID
+			}
+			appts, total, err := chClient.GetOfficerAppointments(o.OfficerID, officerAppointmentSampleLimit)
+			if err != nil {
+				continue
+			}
+			extra = append(extra, officerAppointmentIndicators(o.Name, appts, total, entity.Label())...)
 		}
 		score := risk.Assess([]risk.Entity{entity}, extra)
 		seen := map[string]bool{}
@@ -197,10 +218,10 @@ func runCalibrate(args []string) {
 // real gatherer does, so the indicators measured here are the ones a
 // scan would actually produce -- a base rate computed against a
 // different entity shape would not be comparable.
-func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, companieshouse.Company, bool) {
+func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, companieshouse.Company, []companieshouse.Officer, bool) {
 	company, err := c.GetCompany(number)
 	if err != nil || company.Name == "" {
-		return risk.Entity{}, companieshouse.Company{}, false
+		return risk.Entity{}, companieshouse.Company{}, nil, false
 	}
 	var addrs []string
 	if line := company.RegisteredOffice.AsSingleLine(); line != "" {
@@ -208,6 +229,7 @@ func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, co
 	}
 	var people []string
 	var details []risk.Person
+	current := []companieshouse.Officer{}
 	if officers, err := c.GetOfficers(number, 20); err == nil {
 		for _, o := range officers {
 			if o.ResignedOn != "" {
@@ -218,14 +240,23 @@ func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, co
 				Name: o.Name, BirthMonth: o.BirthMonth, BirthYear: o.BirthYear,
 				Address: o.Address.AsSingleLine(),
 			})
+			current = append(current, o)
 		}
 	}
 	e := risk.NewEntity("companieshouse", number, company.Name, addrs, people)
 	e.PersonDetails = details
 	e.FormedOn = company.IncorporatedOn
 	e.DissolvedOn = company.DissolvedOn
-	return e, company, true
+	return e, company, current, true
 }
+
+// officerAppointmentSampleLimit bounds the per-officer appointments
+// page during calibration. The register-wide TOTAL that
+// mass_nominee_officer keys on comes from the API's own total_results
+// and is unaffected by paging, so a small page is enough for it; the
+// burst checks see only this many appointments, which makes their
+// measured rates a floor rather than an exact figure.
+const officerAppointmentSampleLimit = 50
 
 func writeCalibrationTable(w *os.File, r CalibrationReport) {
 	fmt.Fprintf(w, "Indicator base rates over %d random companies (%d lookups failed)\n", r.Sampled, r.Failed)
