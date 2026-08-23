@@ -1072,7 +1072,17 @@ does.
   capped at 6, this tool's own ceiling) since the convergence itself,
   not just the sum of the parts it's built from, is treated as an
   independent finding worth calling out rather than a silent side
-  effect buried in the total. Still just a lead: a large,
+  effect buried in the total. Convergence is counted over distinct
+  **signals**, not raw indicator codes: some codes are facets of one
+  behaviour rather than independent observations, and counting both
+  would manufacture a convergence that isn't there. Measured, not
+  assumed -- across 430 randomly sampled companies, `accounts_overdue`
+  and `confirmation_statement_overdue` co-occurred at **14.5x** the
+  rate independence predicts (a company that stops filing stops filing
+  everything), and grouping them removed 75% of single-company
+  convergent_risk hits as artifacts of that double-count. Only that one
+  pair is grouped: the obvious next candidate, the two dormancy codes,
+  measured at 1.0x lift and so was left alone. Still just a lead: a large,
   well-documented entity can legitimately rack up several unrelated
   weak hits (say, a shared registered-agent address plus a common
   institutional director) with nothing improper going on.
