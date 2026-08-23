@@ -2010,15 +2010,30 @@ func resignationBurst(appointments []companieshouse.Appointment) (desc, date str
 // count (current and former combined, per GetOfficerAppointments' own
 // total_results -- see massNomineeOfficer) before an officer is flagged
 // as a likely professional/corporate nominee rather than an ordinary
-// individual who happens to sit on a handful of boards. Deliberately
-// well above appointmentBurstThreshold (3 within a week): this is a
-// lifetime-scope signal, not a time-clustered one, and this project's
-// own real reference case -- "Corporate Directors Limited"
-// (officer ID nEggfu04XePBqnRERobPjXjmHGk), cited by appointmentBurst's
-// doc comment -- has 540 appointments register-wide, so 10 is a
-// conservative floor meant to catch the pattern well before it reaches
-// that scale, not a tight fit against it.
-const massNomineeOfficerThreshold = 10
+// individual who happens to sit on a handful of boards.
+//
+// MEASURED, not reasoned. This was originally 10, described as a
+// "conservative floor" reasoned down from one real nominee service
+// with 540 appointments. Measuring the actual distribution across 492
+// officers of randomly sampled companies (paper-trail calibrate, three
+// seeds) showed 10 is not a floor on the tail at all -- it sits around
+// p85 and fired on 14.6% of officers:
+//
+//	p50     2      p95      42
+//	p75     4      p97.5    93
+//	p90    15      p99     263      max  12,575
+//
+// The median director has TWO appointments and three-quarters have
+// four or fewer, so 10 was catching the ordinary busy end of normal.
+// 50 sits at roughly p95-p96, flags ~4.7% of officers, and is still an
+// order of magnitude below the 540-appointment reference case -- which
+// preserves the original conservative-floor intent while placing the
+// floor on the tail rather than in the middle of the distribution.
+//
+// Caveat carried with the number: 492 officers across 308 companies,
+// sampled from the company-NUMBER space (which skews toward older
+// companies). Right order of magnitude, not precision-tuned.
+const massNomineeOfficerThreshold = 50
 
 // massNomineeOfficer reports whether totalAppointments (the true
 // register-wide total from GetOfficerAppointments -- deliberately not

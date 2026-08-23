@@ -29,13 +29,31 @@ import (
 
 // mailDropAddressThreshold is how many companies register-wide must
 // share a postcode before it's flagged as a likely company-formation-
-// agent mail-drop address, not a genuine operating address. Chosen
-// from live observation: ordinary single-business UK postcodes ran
-// 5-70 companies (with one small-business address at 637, likely a
-// shared office park), while a known mail-drop address ran ~190,000 --
-// 1,000 sits comfortably above any genuine single-business address
-// observed and well below actual mail-drop scale.
-const mailDropAddressThreshold = 1000
+// agent mail-drop address, not a genuine operating address.
+//
+// MEASURED, not reasoned. This was originally 1,000, picked from a
+// handful of live observations (ordinary single-business postcodes ran
+// 5-70, a known mail drop ran ~190,000) on the assumption that 1,000
+// sat comfortably between. Measuring the actual distribution across
+// 308 randomly sampled companies (paper-trail calibrate, three seeds)
+// showed otherwise -- 1,000 sits around the 88th percentile, inside
+// the shoulder rather than the tail, and fired on 17.2% of companies:
+//
+//	p25            9      p90      2,141
+//	p50           40      p95     25,202
+//	p75          410      p99    146,274
+//
+// Note the cliff between p90 (2,141) and p95 (25,202). That gap is the
+// real boundary between a genuine multi-tenant building and
+// formation-agent scale. 20,000 sits above it, flags ~5.5% of
+// companies, and is still an order of magnitude below the known mail
+// drop -- so it keeps the original "well below actual mail-drop scale"
+// intent while actually landing in the tail.
+//
+// Caveat carried with the number: 308 companies, sampled from the
+// company-NUMBER space (which skews toward older companies). Right
+// order of magnitude, not precision-tuned.
+const mailDropAddressThreshold = 20000
 
 // fewTrusteesThreshold is how few trustees a charity can have before
 // few_trustees fires. UK charity governance guidance (the Charity
