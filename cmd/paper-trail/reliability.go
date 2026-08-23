@@ -268,4 +268,5 @@ var fastModeSkipSources = map[string]bool{
 	"OpenFEC":                               true,
 	"UK sanctions screen (officer fan-out)": true,
 	"UK sanctions screen (PSC)":             true,
+	"Companies House filing history":        true,
 }

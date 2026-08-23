@@ -1473,6 +1473,7 @@ func runRisk(args []string) {
 	excludeFile := fs.String("exclude-file", "", "read additional --exclude terms from this file too, one per line (blank lines and lines starting with # are ignored)")
 	reviewedFile := fs.String("reviewed-file", "", "mark any indicator whose evidence or entity labels contain (case-insensitively) a term from this file (one per line, blank lines and lines starting with # ignored) as reviewed -- unlike --exclude, a reviewed indicator keeps its full weight and still counts toward the score, it just renders dimmed and collapsed by default in the HTML report, for tracking 'I've already looked at this' separately from 'this isn't a real finding'")
 	evidenceDir := fs.String("evidence-dir", "", "record the raw HTTP response behind every API call this scan makes into a dated evidence bundle at this path (responses/ plus a manifest.json with each response's URL, status, timestamp, and SHA-256). Public registers change: this is the contemporaneous receipt showing what a source actually said on the day you queried it. API keys are redacted from recorded URLs. Off by default -- it writes third-party data to disk, which should be a deliberate choice")
+	redact := fs.Bool("redact", false, "remove personal data from the report before writing it -- individual names reduced to initials, partial dates of birth dropped, officer service addresses reduced to a postcode district. Every structural finding and the score are untouched: \"these six companies share one director\" survives intact. A publication aid for circulating a report, NOT an anonymizer -- company names, numbers and registered offices are public register facts and are left alone, so anyone with register access can still re-derive who an initial refers to. Note also that an officer whose service address IS the registered office is not hidden by this, since that address stays on the public company record")
 	caseName := fs.String("case", "", "group every scan of one investigation under a named case: sugar for pointing --exclude-file and --reviewed-file at ~/.paper-trail/cases/<name>/exclude.txt and reviewed.txt (both created empty on first use), so dismissals and reviewed marks carry across every sub-scan of that investigation without retyping one consistent path each time. Mutually exclusive with an explicit --exclude-file/--reviewed-file, since --case IS that path selection")
 	failOn := fs.String("fail-on", "", "exit with a non-zero status if the final confidence band reaches this level or higher (LOW, MEDIUM, or HIGH) -- lets a scan act as a gate in CI/cron/pre-merge automation instead of requiring someone to read the output")
 	summary := fs.Bool("summary", false, "print (or, with --json, encode) a compact one-line/one-object summary -- score, confidence, and entity/indicator counts -- instead of the full report, for scripting/dashboards/monitoring where the full indicator-by-indicator report is too verbose")
@@ -1497,7 +1498,7 @@ func runRisk(args []string) {
 		}
 	}
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--reviewed-file <path>] [--case <name>] [--evidence-dir <path>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--reviewed-file <path>] [--case <name>] [--evidence-dir <path>] [--redact] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
 
 	if *servePort != "" && (len(positional) > 0 || *inputFile != "" || *batch) {
 		fmt.Fprintln(os.Stderr, "Error: --serve takes no <query>/--input-file/--batch -- queries come from the search form in the browser instead")
@@ -1778,7 +1779,26 @@ func runRisk(args []string) {
 			}
 		}
 
+		redactedCount := 0
+		applyRedaction := func(r riskReportJSON) riskReportJSON {
+			if !*redact {
+				return r
+			}
+			red, n := redactReport(r)
+			redactedCount = n
+			return red
+		}
+
 		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, ReviewedIndicators: reviewedCount, HiddenCorroborations: hiddenCorroborations, SourceHealth: parseSourceHealth(notes), ScreenCoverage: parseScreenCoverage(notes)}
+
+		// Applied last, after every filter and after the score is
+		// final: redaction changes how the report READS, never what it
+		// found. --output/--json/--report-html/--graph all render from
+		// this same value, so none can leak an unredacted copy.
+		report = applyRedaction(report)
+		if *redact && !*quiet {
+			fmt.Fprintf(os.Stderr, "Redacted personal data for %d individual(s) -- structural findings and score unchanged\n", redactedCount)
+		}
 
 		var w io.Writer = os.Stdout
 		if *output != "" {

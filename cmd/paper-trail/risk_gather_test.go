@@ -1365,3 +1365,51 @@ func TestNewEntityLeavesVerifiedAtEmpty(t *testing.T) {
 		t.Errorf("VerifiedAt = %q, want empty for a freshly-constructed (non-cached) entity", e.VerifiedAt)
 	}
 }
+
+func TestDormantReactivatedFiresOnTransition(t *testing.T) {
+	// API order is newest-first; the function must sort before deciding.
+	filings := []companieshouse.Filing{
+		{Date: "2024-06-01", Category: "accounts", Description: "accounts-with-accounts-type-small"},
+		{Date: "2022-06-01", Category: "accounts", Description: "accounts-with-accounts-type-dormant"},
+		{Date: "2021-06-01", Category: "accounts", Description: "accounts-with-accounts-type-dormant"},
+	}
+	got := dormantReactivated(filings, "companieshouse: Alpha Ltd (1)")
+	if len(got) != 1 || got[0].Code != "dormant_reactivated" {
+		t.Fatalf("got %+v, want one dormant_reactivated", got)
+	}
+	if got[0].Date != "2024-06-01" {
+		t.Errorf("Date = %q, want the reactivation date so it lands on the timeline", got[0].Date)
+	}
+}
+
+func TestDormantReactivatedIgnoresAlwaysTrading(t *testing.T) {
+	filings := []companieshouse.Filing{
+		{Date: "2024-06-01", Category: "accounts", Description: "accounts-with-accounts-type-small"},
+		{Date: "2023-06-01", Category: "accounts", Description: "accounts-with-accounts-type-small"},
+	}
+	if got := dormantReactivated(filings, "x"); len(got) != 0 {
+		t.Errorf("got %+v, want nothing -- never dormant", got)
+	}
+}
+
+// TestDormantReactivatedIgnoresStillDormant guards the direction: a
+// company that went trading THEN dormant has not been reactivated.
+func TestDormantReactivatedIgnoresStillDormant(t *testing.T) {
+	filings := []companieshouse.Filing{
+		{Date: "2024-06-01", Category: "accounts", Description: "accounts-with-accounts-type-dormant"},
+		{Date: "2022-06-01", Category: "accounts", Description: "accounts-with-accounts-type-small"},
+	}
+	if got := dormantReactivated(filings, "x"); len(got) != 0 {
+		t.Errorf("got %+v, want nothing -- it went dormant, it didn't reactivate", got)
+	}
+}
+
+func TestDormantReactivatedIgnoresNonAccountsFilings(t *testing.T) {
+	filings := []companieshouse.Filing{
+		{Date: "2024-06-01", Category: "officers", Description: "appoint-person-director-company"},
+		{Date: "2023-06-01", Category: "mortgage", Description: "mortgage-create-with-deed"},
+	}
+	if got := dormantReactivated(filings, "x"); len(got) != 0 {
+		t.Errorf("got %+v, want nothing from non-accounts filings", got)
+	}
+}

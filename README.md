@@ -48,6 +48,7 @@ registered-agent/address-based relationship mapping).
 | `samgov` | US SAM.gov Exclusions | firms, individuals, and vessels excluded from US federal contracts/assistance | `SAM_GOV_API_KEY` |
 | `ireland` | Ireland's Companies Registration Office (CRO) Open Data Portal | Irish company records (current + dissolved) | none |
 | `interpol` | INTERPOL public Red Notices | member-country wanted-person notices, worldwide | none |
+| `calibrate` | UK Companies House (random sample) | measures how often each indicator fires by chance | `COMPANIES_HOUSE_API_KEY` |
 | `risk` | all of the above, combined | structural red flags across sources | uses whichever of the above are configured |
 
 Seventeen independent public-data sources across five countries plus
@@ -1075,6 +1076,25 @@ does.
   well-documented entity can legitimately rack up several unrelated
   weak hits (say, a shared registered-agent address plus a common
   institutional director) with nothing improper going on.
+- **officer_service_address_cluster**: one address serving as the filed
+  correspondence address for officers of several otherwise-distinct
+  entities. Different from shared_address, which compares the
+  *companies'* registered offices -- this compares the addresses of the
+  *people*, a concentration a formation or nominee-director service
+  produces even while filing a different registered office per company.
+  Fires at three or more entities, not two: two companies sharing a
+  director necessarily share that director's address, which
+  shared_person already reports.
+- **officer_at_registered_office**: an officer's filed correspondence
+  address is the company's own registered office. Weight 1 and weak by
+  design -- for an owner-managed business run from one premises this is
+  the ordinary filing. It earns attention only in combination.
+- **dormant_reactivated**: the company filed dormant accounts and later
+  filed trading accounts -- a shelf company brought back into use.
+  Distinct from dormant_company, which reports only a point-in-time
+  status and cannot see the transition. Carries the reactivation date,
+  so it lands on the timeline where it can be checked against officer
+  and control changes.
 - **short_lived_company_cluster**: several entities in one scan
   dissolved within 24 months of being formed -- the churn signature of
   a phoenix-company pattern (wound up and re-formed to shed
@@ -1253,6 +1273,32 @@ weight-sorted indicator list:
   the report's own generated-at time, so a redundant per-entity
   timestamp there would be noise, not signal.
 
+#### Calibration: what a weight actually means
+
+Every weight in this tool is hand-tuned judgement. `shared_address` is
+"+2" because that felt right next to `shared_person`'s "+3" --
+defensible, but not measured. Asked *"why is this suspicious?"*, "it
+scored 7" is a much weaker answer than *"this fires on 1 in 300 random
+companies"*.
+
+`paper-trail calibrate` measures the base rate: how often each
+indicator fires on companies picked at **random**, with no reason to
+think anything is wrong with them. An indicator firing on 40% of random
+companies tells you almost nothing when it fires on your target; one
+firing on 0.3% tells you a great deal.
+
+```bash
+paper-trail calibrate --n 200 --seed 42     # reproducible with the same seed
+```
+
+A first real run already earned its keep: `officer_at_registered_office`
+fired on **10.5%** of sampled companies, confirming it belongs at weight
+1 rather than higher. Two honest caveats the report prints itself: the
+sample is drawn from the company-*number* space, so it skews toward
+older companies and is not a population statistic; and cross-entity
+indicators (`shared_address` and friends) cannot fire on a
+single-company pool, so they are absent by construction.
+
 #### Reliability: circuit breakers, source health, and partial re-scans
 
 - **Screen coverage (what came back clean)**: every report also states
@@ -1429,6 +1475,17 @@ weight-sorted indicator list:
   - Off by default. It writes third-party data (including personal data
     like officer names and addresses) to disk, which should be a
     deliberate choice and becomes your responsibility to handle.
+- `--redact` removes personal data before the report is written:
+  individual names reduced to initials, partial dates of birth dropped,
+  officer service addresses reduced to a postcode district. Every
+  structural finding and the score are untouched -- "these six companies
+  share one director" survives intact. A **publication aid, not an
+  anonymizer**: company names, numbers and registered offices are public
+  register facts and are deliberately preserved, so anyone with register
+  access can still re-derive who an initial refers to. One inherent
+  limit, confirmed live: an officer whose service address *is* the
+  registered office is not hidden by this, because that address stays on
+  the public company record.
 - `--fail-on <band>` (LOW, MEDIUM, or HIGH) makes the process exit
   non-zero if the final confidence band reaches that level or higher
   -- the report is still written/printed either way, only the exit

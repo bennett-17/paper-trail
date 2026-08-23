@@ -486,6 +486,27 @@ type Officer struct {
 	// acting as director/secretary) has no nationality at all.
 	Nationality        string `json:"nationality,omitempty"`
 	CountryOfResidence string `json:"countryOfResidence,omitempty"`
+
+	// BirthMonth/BirthYear are a PARTIAL date of birth: Companies House
+	// publishes only month and year for an individual officer, never the
+	// day (it redacts it deliberately). Both zero for a corporate
+	// officer, which has no date of birth at all -- confirmed live on a
+	// real record where a corporate-secretary returned
+	// "date_of_birth": null alongside an individual director returning
+	// {"month": 4, "year": 1956}.
+	//
+	// Even a partial DOB is a strong disambiguator: it cannot confirm
+	// two same-named people ARE the same person, but a *mismatch* is
+	// solid evidence they are not. See risk.PeopleConflict.
+	BirthMonth int `json:"birthMonth,omitempty"`
+	BirthYear  int `json:"birthYear,omitempty"`
+
+	// Address is the officer's SERVICE address as filed -- where they
+	// accept correspondence, which for many directors is their own
+	// home but for others is an agent's office. Not the company's
+	// registered office (that's on the company record), though the two
+	// are often the same value, which is itself a signal.
+	Address Address `json:"address,omitempty"`
 }
 
 type officersResponse struct {
@@ -496,13 +517,33 @@ type officersResponse struct {
 		ResignedOn         string `json:"resigned_on"`
 		Nationality        string `json:"nationality"`
 		CountryOfResidence string `json:"country_of_residence"`
-		Links              struct {
+		// Null for a corporate officer, hence a pointer: distinguishing
+		// "no DOB published" from a zero month/year matters, because the
+		// absent case must never be read as a mismatch.
+		DateOfBirth *dateOfBirthRaw `json:"date_of_birth"`
+		Address     addressRaw      `json:"address"`
+		Links       struct {
 			Officer struct {
 				Appointments string `json:"appointments"`
 			} `json:"officer"`
 		} `json:"links"`
 	} `json:"items"`
 	TotalResults int `json:"total_results"`
+}
+
+// dateOfBirthRaw is Companies House's own partial-DOB shape: month and
+// year only, never a day.
+type dateOfBirthRaw struct {
+	Month int `json:"month"`
+	Year  int `json:"year"`
+}
+
+// monthYear safely unpacks a possibly-nil raw DOB.
+func (d *dateOfBirthRaw) monthYear() (int, int) {
+	if d == nil {
+		return 0, 0
+	}
+	return d.Month, d.Year
 }
 
 // officerIDFromAppointmentsLink extracts the officer ID out of a
@@ -541,6 +582,7 @@ func (c *Client) GetOfficers(number string, limit int) ([]Officer, error) {
 
 	officers := make([]Officer, 0, len(resp.Items))
 	for _, item := range resp.Items {
+		birthMonth, birthYear := item.DateOfBirth.monthYear()
 		officers = append(officers, Officer{
 			Name:               item.Name,
 			Role:               item.OfficerRole,
@@ -549,6 +591,9 @@ func (c *Client) GetOfficers(number string, limit int) ([]Officer, error) {
 			OfficerID:          officerIDFromAppointmentsLink(item.Links.Officer.Appointments),
 			Nationality:        item.Nationality,
 			CountryOfResidence: item.CountryOfResidence,
+			BirthMonth:         birthMonth,
+			BirthYear:          birthYear,
+			Address:            item.Address.toAddress(),
 		})
 	}
 	return officers, nil
@@ -1053,4 +1098,83 @@ func (c *Client) GetOfficerAppointments(officerID string, limit int) (appointmen
 		})
 	}
 	return appointments, resp.TotalResults, nil
+}
+
+// Filing is one entry from a company's filing history -- the dated,
+// categorized record of everything the company has actually filed,
+// as opposed to the point-in-time status the company profile reports.
+//
+// The distinction matters: a profile says "dormant now", while the
+// filing history says "dormant for six years, then suddenly trading",
+// which is a different and more interesting fact. Confirmed live
+// against a real company with 273 filings.
+type Filing struct {
+	Date        string `json:"date"`     // YYYY-MM-DD
+	Category    string `json:"category"` // "accounts", "officers", "mortgage", "confirmation-statement", ...
+	Type        string `json:"type"`     // the form code, e.g. "AA", "CS01", "MR01"
+	Description string `json:"description"`
+}
+
+type filingHistoryResponse struct {
+	Items []struct {
+		Date        string `json:"date"`
+		Category    string `json:"category"`
+		Type        string `json:"type"`
+		Description string `json:"description"`
+	} `json:"items"`
+	TotalCount int `json:"total_count"`
+}
+
+// GetFilingHistory returns a company's filing history, most recent
+// first (the API's own order). limit caps how many entries come back;
+// 0 uses the API's default page size.
+func (c *Client) GetFilingHistory(companyNumber string, limit int) ([]Filing, error) {
+	params := url.Values{}
+	if limit > 0 {
+		params.Set("items_per_page", strconv.Itoa(limit))
+	}
+	u := c.BaseURL + "/company/" + url.PathEscape(companyNumber) + "/filing-history"
+	if q := params.Encode(); q != "" {
+		u += "?" + q
+	}
+	body, err := c.get(u)
+	if err != nil {
+		return nil, err
+	}
+	var resp filingHistoryResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing filing history for %s: %v", companyNumber, err)
+	}
+	filings := make([]Filing, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		filings = append(filings, Filing{
+			Date:        it.Date,
+			Category:    it.Category,
+			Type:        it.Type,
+			Description: it.Description,
+		})
+	}
+	return filings, nil
+}
+
+// accountsTypePrefix is how Companies House encodes the accounts type
+// inside a filing description, confirmed live (e.g.
+// "accounts-with-accounts-type-dormant",
+// "accounts-with-accounts-type-group").
+const accountsTypePrefix = "accounts-with-accounts-type-"
+
+// AccountsType extracts the accounts type from an accounts filing's
+// description, or "" if this filing isn't an accounts filing with a
+// recognizable type.
+func (f Filing) AccountsType() string {
+	if f.Category != "accounts" || !strings.HasPrefix(f.Description, accountsTypePrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(f.Description, accountsTypePrefix)
+}
+
+// IsDormantAccounts reports whether this filing is a dormant-accounts
+// filing.
+func (f Filing) IsDormantAccounts() bool {
+	return strings.Contains(f.AccountsType(), "dormant")
 }

@@ -80,6 +80,7 @@ func SharedPeopleFuzzy(entities []Entity) []Indicator {
 		exactKeys map[string]bool
 		variants  map[string]bool
 	}
+	byEntity := buildPersonIndex(entities)
 	byFuzzy := make(map[string]*group)
 	for _, e := range entities {
 		for _, p := range e.People {
@@ -110,6 +111,12 @@ func SharedPeopleFuzzy(entities []Entity) []Indicator {
 		if len(distinct) < 2 {
 			continue
 		}
+		// Same suppression as the exact check: a fuzzy name match with
+		// conflicting published dates of birth is a collision between two
+		// people, and fuzzy matching makes that MORE likely, not less.
+		if !samePersonAcross(anyKey(g.variants), distinct, byEntity) {
+			continue
+		}
 		variants := make([]string, 0, len(g.variants))
 		for v := range g.variants {
 			variants = append(variants, v)
@@ -124,4 +131,20 @@ func SharedPeopleFuzzy(entities []Entity) []Indicator {
 		})
 	}
 	return out
+}
+
+// anyKey returns one deterministic member of a name-variant set --
+// every variant in the set normalizes to the same fuzzy key, so any of
+// them looks the person up identically; sorting only keeps the choice
+// stable run to run.
+func anyKey(set map[string]bool) string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
 }

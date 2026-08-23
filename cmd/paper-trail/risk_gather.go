@@ -642,6 +642,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 			entityLabel := fmt.Sprintf("companieshouse: %s (%s)", hit.Name, hit.CompanyNumber)
 
 			var people []string
+			var personDetails []risk.Person
 			var chargees []string
 			var currentOfficers []companieshouse.Officer
 			var activePSCs []companieshouse.PSC
@@ -652,6 +653,16 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				for _, o := range officers {
 					if o.ResignedOn == "" { // current officers only
 						people = append(people, o.Name)
+						// Partial DOB and service address are both already
+						// in this response -- carried through so
+						// same-person checks can disprove a name
+						// collision, and so officer addresses can cluster.
+						personDetails = append(personDetails, risk.Person{
+							Name:       o.Name,
+							BirthMonth: o.BirthMonth,
+							BirthYear:  o.BirthYear,
+							Address:    o.Address.AsSingleLine(),
+						})
 						currentOfficers = append(currentOfficers, o)
 					}
 				}
@@ -860,11 +871,23 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 			for _, p := range activePSCs {
 				flagPersonJurisdiction(p.Name, p.Nationality, p.CountryOfResidence)
 			}
+			// Filing history is a separate request per company, so it
+			// sits behind the source filter like every other optional
+			// per-company call -- --fast skips it.
+			if filter.allows("Companies House filing history") {
+				if filings, err := chClient.GetFilingHistory(hit.CompanyNumber, filingHistoryLimit); err != nil {
+					note("%s (%s) filing history: %v", hit.Name, hit.CompanyNumber, err)
+				} else {
+					r.extra = append(r.extra, dormantReactivated(filings, entityLabel)...)
+				}
+			}
+
 			if filter.allows("UK sanctions screen (PSC)") {
 				r.extra = append(r.extra, pscSanctionsAdjacentChange(activePSCs, hit.Name, entityLabel, officerCache, note)...)
 			}
 
 			chEntity := risk.NewEntity("companieshouse", hit.CompanyNumber, hit.Name, addrs, people)
+			chEntity.PersonDetails = personDetails
 			chEntity.FormedOn = formedOn
 			chEntity.DissolvedOn = dissolvedOn
 			termEntities = append(termEntities, chEntity)
@@ -2503,6 +2526,60 @@ func dormantSICWithChargesIndicator(sicCodes []string, outstandingCharges int, e
 			Entities:    []string{entityLabel},
 			Evidence:    fmt.Sprintf("SIC code %s, %d outstanding charge(s)", code, outstandingCharges),
 		}
+	}
+	return nil
+}
+
+// filingHistoryLimit caps how much of a company's filing history is
+// pulled. 100 is generous enough to span the multi-year dormancy gaps
+// dormantReactivated looks for (a dormant company files roughly one
+// accounts return a year) without paging through the hundreds of
+// filings a long-lived active company accumulates.
+const filingHistoryLimit = 100
+
+// dormantReactivated flags a company that filed dormant accounts and
+// later filed trading accounts -- a shelf company brought back into
+// use. Distinct from the existing dormant_company indicator, which
+// only reports a point-in-time status and cannot see the transition.
+//
+// Reactivation is entirely legitimate on its own: a business restarts,
+// or a dormant subsidiary is put to work. Weighted 2 accordingly. What
+// makes it worth surfacing is a reactivation coinciding with the other
+// signals in a report -- new officers, a change of control, a sudden
+// charge -- which the timeline makes checkable, since this indicator
+// carries the reactivation date.
+func dormantReactivated(filings []companieshouse.Filing, entityLabel string) []risk.Indicator {
+	type acct struct{ date, kind string }
+	var accounts []acct
+	for _, f := range filings {
+		if k := f.AccountsType(); k != "" && f.Date != "" {
+			accounts = append(accounts, acct{date: f.Date, kind: k})
+		}
+	}
+	if len(accounts) < 2 {
+		return nil
+	}
+	// The API returns newest first; walk oldest first so a transition
+	// reads in the direction it actually happened.
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i].date < accounts[j].date })
+
+	lastDormant := ""
+	for _, a := range accounts {
+		if strings.Contains(a.kind, "dormant") {
+			lastDormant = a.date
+			continue
+		}
+		if lastDormant == "" {
+			continue // trading all along, never dormant first
+		}
+		return []risk.Indicator{{
+			Code:        "dormant_reactivated",
+			Description: "This company filed dormant accounts and later filed trading accounts -- a dormant or shelf company brought back into use. Legitimate on its own (a business restarts, or a dormant subsidiary is finally put to work), so this is weighted low and is not a finding by itself. It earns attention when the reactivation coincides with other changes in this report -- new officers, a change of control, a new charge -- which the timeline above makes checkable",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    fmt.Sprintf("dormant accounts to %s, then %s accounts on %s", lastDormant, a.kind, a.date),
+			Date:        a.date,
+		}}
 	}
 	return nil
 }

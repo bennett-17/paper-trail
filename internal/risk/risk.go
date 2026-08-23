@@ -70,6 +70,13 @@ type Entity struct {
 	// ShortLivedCompanies, which needs both dates to measure a lifespan.
 	DissolvedOn string `json:"dissolvedOn,omitempty"`
 
+	// PersonDetails carries what a source knows about the individuals
+	// named in People beyond their names -- partial date of birth and
+	// service address, currently only from UK Companies House. Purely
+	// additive: People stays the canonical name list every other check
+	// reads, and an entity with no details behaves exactly as before.
+	PersonDetails []Person `json:"personDetails,omitempty"`
+
 	// LinkedGroup is an explicit, source-asserted grouping key -- set
 	// only when the source itself says two records are part of one
 	// group (e.g. the UK Charity Commission's registered number, shared
@@ -431,13 +438,53 @@ func SharedAddresses(entities []Entity) []Indicator {
 // showing up in a governance role at more than one nominally-unrelated
 // entity, the classic "interlocking directorate" pattern.
 func SharedPeople(entities []Entity) []Indicator {
-	return sharedValueIndicators(entities,
-		func(e Entity) []string { return e.People },
-		normalizeText,
-		"shared_person",
-		"The same individual appears as an officer, director, or trustee of multiple entities",
-		3,
-	)
+	// Deliberately not sharedValueIndicators: people are the one shared
+	// value this project can sometimes disprove. Where two sides both
+	// publish a partial date of birth and those disagree, the shared
+	// name is a collision, not a person, and the match is dropped rather
+	// than reported with a caveat nobody reads. See samePersonAcross --
+	// entities that publish no DOB are never consulted, so this can only
+	// remove a false match, never manufacture a confident one.
+	byEntity := buildPersonIndex(entities)
+
+	type group struct {
+		original string
+		entities []Entity
+	}
+	byValue := make(map[string]*group)
+	for _, e := range entities {
+		for _, v := range e.People {
+			nv := normalizeText(v)
+			if nv == "" {
+				continue
+			}
+			g, ok := byValue[nv]
+			if !ok {
+				g = &group{original: strings.TrimSpace(v)}
+				byValue[nv] = g
+			}
+			g.entities = append(g.entities, e)
+		}
+	}
+
+	var out []Indicator
+	for _, g := range byValue {
+		distinct := distinctByIdentity(g.entities)
+		if len(distinct) < 2 {
+			continue
+		}
+		if !samePersonAcross(g.original, distinct, byEntity) {
+			continue // same name, irreconcilable dates of birth
+		}
+		out = append(out, Indicator{
+			Code:        "shared_person",
+			Description: "The same individual appears as an officer, director, or trustee of multiple entities",
+			Weight:      3,
+			Entities:    labels(distinct),
+			Evidence:    g.original,
+		})
+	}
+	return out
 }
 
 // SharedPhones flags groups of two or more distinct entities that list
@@ -615,6 +662,8 @@ func Assess(entities []Entity, extra []Indicator) Score {
 	indicators = append(indicators, NearDuplicateNames(entities)...)
 	indicators = append(indicators, FormationClusters(entities, DefaultFormationClusterWindow)...)
 	indicators = append(indicators, ShortLivedCompanies(entities)...)
+	indicators = append(indicators, SharedOfficerServiceAddresses(entities)...)
+	indicators = append(indicators, OfficerAtRegisteredOffice(entities)...)
 	indicators = append(indicators, extra...)
 	indicators = append(indicators, ConvergentRisk(indicators)...)
 	indicators = append(indicators, EntityCluster(indicators)...)
