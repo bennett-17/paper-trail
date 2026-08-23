@@ -2025,10 +2025,23 @@ func resignationBurst(appointments []companieshouse.Appointment) (desc, date str
 //
 // The median director has TWO appointments and three-quarters have
 // four or fewer, so 10 was catching the ordinary busy end of normal.
-// 50 sits at roughly p95-p96, flags ~4.7% of officers, and is still an
-// order of magnitude below the 540-appointment reference case -- which
-// preserves the original conservative-floor intent while placing the
-// floor on the tail rather than in the middle of the distribution.
+// 50 sits at roughly p95-p96 in that sample, flags ~4.7% of officers,
+// and is still an order of magnitude below the 540-appointment
+// reference case, preserving the original conservative-floor intent.
+//
+// VALIDATION, and an honest correction. Re-measuring on 200 FRESH
+// companies the threshold was NOT derived from put
+// mass_nominee_officer at 10.0% (95% CI 5.8-14.2%), not the ~5.5% the
+// derivation sample predicted -- the prediction sat at the very bottom
+// edge of that interval. So 50 is a clear improvement on 10 (which
+// fired at 14.6%) but it is NOT the settled tail cut the percentiles
+// above imply: on unseen data it sits closer to the shoulder.
+//
+// The cause is sample size, not method. Officer appointment counts are
+// heavy-tailed and a few hundred companies cannot pin the rate, which
+// the seed-to-seed spread on this indicator (10.8% vs 18.0%) already
+// hinted at. Treat 50 as PROVISIONAL; stabilizing it needs on the
+// order of a thousand-plus companies, not more reasoning.
 //
 // Caveat carried with the number: 492 officers across 308 companies,
 // sampled from the company-NUMBER space (which skews toward older
