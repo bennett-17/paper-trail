@@ -117,7 +117,7 @@ func runCalibrate(args []string) {
 		if !*quiet {
 			fmt.Fprintf(os.Stderr, "\r[%d/%d] sampling %s (%d usable)", i+1, *sampleSize, number, len(samples))
 		}
-		entity, ok := calibrationEntity(chClient, number)
+		entity, profile, ok := calibrationEntity(chClient, number)
 		if !ok {
 			failed++
 			continue
@@ -127,7 +127,19 @@ func runCalibrate(args []string) {
 		// single-entity pool by construction, which is correct: their
 		// base rate is a property of a pool, not of a company, and
 		// measuring them here would produce a meaningless zero.
-		score := risk.Assess([]risk.Entity{entity}, nil)
+		// Assess alone covers only internal/risk's own heuristics, and
+		// nearly all of those are cross-entity checks that cannot fire
+		// on a one-company pool. The single-company Companies House
+		// facts -- dormancy, overdue filings, renaming, ROE status --
+		// come from the gatherer, so they are computed here through the
+		// SAME function the gatherer calls. Without this the table
+		// looked like almost nothing ever fires, which was an artifact
+		// of the measurement, not a fact about the indicators.
+		extra := companyProfileIndicators(profile, profile.Type, entity.Label())
+		if filings, err := chClient.GetFilingHistory(entity.ID, filingHistoryLimit); err == nil {
+			extra = append(extra, dormantReactivated(filings, entity.Label())...)
+		}
+		score := risk.Assess([]risk.Entity{entity}, extra)
 		seen := map[string]bool{}
 		var codes []string
 		for _, ind := range score.Indicators {
@@ -185,10 +197,10 @@ func runCalibrate(args []string) {
 // real gatherer does, so the indicators measured here are the ones a
 // scan would actually produce -- a base rate computed against a
 // different entity shape would not be comparable.
-func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, bool) {
+func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, companieshouse.Company, bool) {
 	company, err := c.GetCompany(number)
 	if err != nil || company.Name == "" {
-		return risk.Entity{}, false
+		return risk.Entity{}, companieshouse.Company{}, false
 	}
 	var addrs []string
 	if line := company.RegisteredOffice.AsSingleLine(); line != "" {
@@ -212,7 +224,7 @@ func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, bo
 	e.PersonDetails = details
 	e.FormedOn = company.IncorporatedOn
 	e.DissolvedOn = company.DissolvedOn
-	return e, true
+	return e, company, true
 }
 
 func writeCalibrationTable(w *os.File, r CalibrationReport) {

@@ -725,55 +725,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				note("%s (%s) profile: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
 				formedOn, dissolvedOn = company.IncorporatedOn, company.DissolvedOn
-				if hit.Type == "registered-overseas-entity" {
-					evidence := "registered as an overseas entity (owns or controls UK land/property while incorporated abroad)"
-					if company.ForeignRegistryCountry != "" {
-						evidence = fmt.Sprintf("registered as an overseas entity, home registry: %s (%s)", company.ForeignRegistryName, company.ForeignRegistryCountry)
-					}
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "overseas_entity",
-						Description: "This entity is on the UK's Register of Overseas Entities (ROE) -- a company incorporated abroad that owns or controls land or property in the UK, required to disclose its beneficial owners since the Economic Crime (Transparency and Enforcement) Act 2022 closed a well-known property-based money-laundering loophole. Most ROE-registered entities are unremarkable offshore holding structures for perfectly legitimate property investment, so this is a fact worth surfacing, not a finding of anything improper on its own",
-						Weight:      2,
-						Entities:    []string{entityLabel},
-						Evidence:    evidence,
-					})
-				}
-				if desc := frequentRenaming(company.PreviousNames); desc != "" {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "frequent_renaming",
-						Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
-						Weight:      2,
-						Entities:    []string{entityLabel},
-						Evidence:    desc,
-					})
-				}
-				if company.LastAccountsType == "dormant" {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "dormant_company",
-						Description: "This company's last filed accounts declared no significant trading activity -- common and often innocuous for a genuine holding company, but worth a second look for an otherwise-active organization",
-						Weight:      1,
-						Entities:    []string{entityLabel},
-						Evidence:    "last accounts type: dormant",
-					})
-				}
-				if company.AccountsOverdue {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "accounts_overdue",
-						Description: "This company has overdue statutory accounts -- often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off and is itself a compliance red flag",
-						Weight:      1,
-						Entities:    []string{entityLabel},
-						Evidence:    "accounts overdue",
-					})
-				}
-				if company.ConfirmationStatementOverdue {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "confirmation_statement_overdue",
-						Description: "This company has an overdue confirmation statement -- the annual filing confirming current officers/PSCs/shareholders, not financials, so this can lag even for a company current on its accounts. Often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off",
-						Weight:      1,
-						Entities:    []string{entityLabel},
-						Evidence:    "confirmation statement overdue",
-					})
-				}
+				r.extra = append(r.extra, companyProfileIndicators(company, hit.Type, entityLabel)...)
 				if company.HasInsolvencyHistory {
 					if cases, err := chClient.GetInsolvency(hit.CompanyNumber); err != nil {
 						note("%s (%s) insolvency: %v", hit.Name, hit.CompanyNumber, err)
@@ -1056,79 +1008,8 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				} else {
 					companyLabel := fmt.Sprintf("companieshouse: %s (%s)", company.Name, company.CompanyNumber)
 
-					// Frequent renaming: a company's own dated name-
-					// change history (previous_company_names). A single
-					// rename decades ago is a normal rebrand; several
-					// within a few years is a known reputation-
-					// laundering/shell-company pattern.
-					if desc := frequentRenaming(company.PreviousNames); desc != "" {
-						r.extra = append(r.extra, risk.Indicator{
-							Code:        "frequent_renaming",
-							Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
-							Weight:      2,
-							Entities:    []string{companyLabel},
-							Evidence:    desc,
-						})
-					}
+					r.extra = append(r.extra, companyProfileIndicators(company, "", companyLabel)...)
 
-					// Dormant/overdue accounts: confirmed live that
-					// company_status stays "active" for a dormant
-					// company (dormancy only shows up in
-					// accounts.last_accounts.type), so status alone
-					// wouldn't catch this. Either signal on its own is
-					// common and often innocuous -- a legitimately
-					// dormant holding company, or accounts a few weeks
-					// late -- but an otherwise-active charity's linked
-					// company showing no real trading activity, or
-					// falling behind on statutory filings, is worth a
-					// second look, especially alongside other
-					// indicators.
-					if company.LastAccountsType == "dormant" {
-						r.extra = append(r.extra, risk.Indicator{
-							Code:        "dormant_company",
-							Description: "This entity's linked Companies House company's last filed accounts declared no significant trading activity -- common and often innocuous for a genuine holding company, but worth a second look for an otherwise-active organization",
-							Weight:      1,
-							Entities:    []string{companyLabel},
-							Evidence:    "last accounts type: dormant",
-						})
-					}
-					if company.AccountsOverdue {
-						r.extra = append(r.extra, risk.Indicator{
-							Code:        "accounts_overdue",
-							Description: "This entity's linked Companies House company has overdue statutory accounts -- often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off and is itself a compliance red flag",
-							Weight:      1,
-							Entities:    []string{companyLabel},
-							Evidence:    "accounts overdue",
-						})
-					}
-					// Confirmation statement overdue is a distinct
-					// compliance signal from accounts_overdue above --
-					// the confirmation statement is the annual filing
-					// that confirms who a company's current officers,
-					// PSCs, and shareholders are, not its financials, so
-					// a company can be current on one and overdue on
-					// the other.
-					if company.ConfirmationStatementOverdue {
-						r.extra = append(r.extra, risk.Indicator{
-							Code:        "confirmation_statement_overdue",
-							Description: "This entity's linked Companies House company has an overdue confirmation statement -- the annual filing confirming current officers/PSCs/shareholders, not financials, so this can lag even for a company current on its accounts. Often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off",
-							Weight:      1,
-							Entities:    []string{companyLabel},
-							Evidence:    "confirmation statement overdue",
-						})
-					}
-					// Insolvency history: HasInsolvencyHistory is cheap to
-					// check here (it's on the same profile fetched above),
-					// and only true when the dedicated insolvency endpoint
-					// actually has case data -- confirmed live that it
-					// 404s otherwise, so this avoids a wasted call for the
-					// common case. A liquidation/administration on an
-					// otherwise-active organization's linked company is
-					// worth a second look, though many perfectly legitimate
-					// companies wind up in solvent/voluntary liquidation
-					// too (e.g. as part of an ordinary corporate
-					// restructuring), so this alone isn't proof of
-					// anything wrong.
 					if company.HasInsolvencyHistory {
 						if cases, err := chClient.GetInsolvency(detail.CompaniesHouseNumber); err != nil {
 							chNote("%s (company %s) insolvency: %v", detail.Name, detail.CompaniesHouseNumber, err)
@@ -2582,4 +2463,74 @@ func dormantReactivated(filings []companieshouse.Filing, entityLabel string) []r
 		}}
 	}
 	return nil
+}
+
+// companyProfileIndicators computes every indicator derivable from a
+// Companies House company profile ALONE -- no further API calls.
+//
+// Extracted so the gatherer and `paper-trail calibrate` produce
+// literally the same indicators from the same input. Before this, these
+// were inline in the gatherer, which meant calibrate (which builds an
+// entity and calls risk.Assess) could not see them at all: risk.Assess
+// only runs internal/risk's own heuristics, and every single-company
+// Companies House fact lived out here. The base rates it reported were
+// therefore measured over a small subset of the indicators a real scan
+// produces, which made the output actively misleading rather than
+// merely incomplete.
+//
+// companyType is the search hit's type, which is how a Register of
+// Overseas Entities company is identified; pass "" when it isn't known.
+func companyProfileIndicators(company companieshouse.Company, companyType, entityLabel string) []risk.Indicator {
+	var out []risk.Indicator
+
+	if companyType == "registered-overseas-entity" {
+		evidence := "registered as an overseas entity (owns or controls UK land/property while incorporated abroad)"
+		if company.ForeignRegistryCountry != "" {
+			evidence = fmt.Sprintf("registered as an overseas entity, home registry: %s (%s)", company.ForeignRegistryName, company.ForeignRegistryCountry)
+		}
+		out = append(out, risk.Indicator{
+			Code:        "overseas_entity",
+			Description: "This entity is on the UK's Register of Overseas Entities (ROE) -- a company incorporated abroad that owns or controls land or property in the UK, required to disclose its beneficial owners since the Economic Crime (Transparency and Enforcement) Act 2022 closed a well-known property-based money-laundering loophole. Most ROE-registered entities are unremarkable offshore holding structures for perfectly legitimate property investment, so this is a fact worth surfacing, not a finding of anything improper on its own",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    evidence,
+		})
+	}
+	if desc := frequentRenaming(company.PreviousNames); desc != "" {
+		out = append(out, risk.Indicator{
+			Code:        "frequent_renaming",
+			Description: "This company has changed its registered name multiple times within a short span -- a single rebrand is routine, but several renames in quick succession is a known reputation-laundering/shell-company pattern, not itself proof of one",
+			Weight:      2,
+			Entities:    []string{entityLabel},
+			Evidence:    desc,
+		})
+	}
+	if company.LastAccountsType == "dormant" {
+		out = append(out, risk.Indicator{
+			Code:        "dormant_company",
+			Description: "This company's last filed accounts declared no significant trading activity -- common and often innocuous for a genuine holding company, but worth a second look for an otherwise-active organization",
+			Weight:      1,
+			Entities:    []string{entityLabel},
+			Evidence:    "last accounts type: dormant",
+		})
+	}
+	if company.AccountsOverdue {
+		out = append(out, risk.Indicator{
+			Code:        "accounts_overdue",
+			Description: "This company has overdue statutory accounts -- often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off and is itself a compliance red flag",
+			Weight:      1,
+			Entities:    []string{entityLabel},
+			Evidence:    "accounts overdue",
+		})
+	}
+	if company.ConfirmationStatementOverdue {
+		out = append(out, risk.Indicator{
+			Code:        "confirmation_statement_overdue",
+			Description: "This company has an overdue confirmation statement -- the annual filing confirming current officers/PSCs/shareholders, not financials, so this can lag even for a company current on its accounts. Often just an administrative lapse, but persistent non-filing can precede a compulsory strike-off",
+			Weight:      1,
+			Entities:    []string{entityLabel},
+			Evidence:    "confirmation statement overdue",
+		})
+	}
+	return out
 }
