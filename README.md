@@ -1094,7 +1094,10 @@ does.
   Distinct from dormant_company, which reports only a point-in-time
   status and cannot see the transition. Carries the reactivation date,
   so it lands on the timeline where it can be checked against officer
-  and control changes.
+  and control changes. **Weighted 1 on measured evidence, not
+  judgement**: it shipped at 2, and `calibrate` then put it at ~1 in 9
+  random companies, which is ordinary. Read it as timeline context, not
+  a finding.
 - **short_lived_company_cluster**: several entities in one scan
   dissolved within 24 months of being formed -- the churn signature of
   a phoenix-company pattern (wound up and re-formed to shed

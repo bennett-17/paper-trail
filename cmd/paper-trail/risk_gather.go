@@ -2424,11 +2424,18 @@ const filingHistoryLimit = 100
 // only reports a point-in-time status and cannot see the transition.
 //
 // Reactivation is entirely legitimate on its own: a business restarts,
-// or a dormant subsidiary is put to work. Weighted 2 accordingly. What
-// makes it worth surfacing is a reactivation coinciding with the other
-// signals in a report -- new officers, a change of control, a sudden
-// charge -- which the timeline makes checkable, since this indicator
-// carries the reactivation date.
+// or a dormant subsidiary is put to work. This shipped at weight 2 on
+// the assumption it was noteworthy; measuring it said otherwise. A
+// 138-company random sample (paper-trail calibrate, seed 20260814) put
+// it at 11.6% -- roughly 1 in 9 companies picked at random -- which is
+// ordinary, not remarkable. Lowered to 1 on that evidence, alongside
+// dormant_company (15.9%), which is the same kind of common-but-worth-
+// noting fact.
+//
+// What makes it worth surfacing is a reactivation coinciding with the
+// other signals in a report -- new officers, a change of control, a
+// sudden charge -- which the timeline makes checkable, since this
+// indicator carries the reactivation date.
 func dormantReactivated(filings []companieshouse.Filing, entityLabel string) []risk.Indicator {
 	type acct struct{ date, kind string }
 	var accounts []acct
@@ -2455,8 +2462,8 @@ func dormantReactivated(filings []companieshouse.Filing, entityLabel string) []r
 		}
 		return []risk.Indicator{{
 			Code:        "dormant_reactivated",
-			Description: "This company filed dormant accounts and later filed trading accounts -- a dormant or shelf company brought back into use. Legitimate on its own (a business restarts, or a dormant subsidiary is finally put to work), so this is weighted low and is not a finding by itself. It earns attention when the reactivation coincides with other changes in this report -- new officers, a change of control, a new charge -- which the timeline above makes checkable",
-			Weight:      2,
+			Description: "This company filed dormant accounts and later filed trading accounts -- a dormant or shelf company brought back into use. MEASURED as ordinary: `paper-trail calibrate` puts this at roughly 1 in 9 companies picked at random, so on its own it says very little, and it is weighted accordingly. Treat it as context on the timeline rather than a finding: what would make it worth pursuing is a reactivation landing close to other changes in this report -- new officers, a change of control, a new charge -- not the reactivation itself",
+			Weight:      1,
 			Entities:    []string{entityLabel},
 			Evidence:    fmt.Sprintf("dormant accounts to %s, then %s accounts on %s", lastDormant, a.kind, a.date),
 			Date:        a.date,
