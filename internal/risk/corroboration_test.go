@@ -97,3 +97,44 @@ func TestAssessPopulatesCorroborations(t *testing.T) {
 		t.Errorf("Codes = %v, want shared_address + shared_person", score.Corroborations[0].Codes)
 	}
 }
+
+// TestCorroborationExcludesSetLevelIndicators pins the fix for the
+// defect that made 98.9% of corroborated pairs artifacts.
+//
+// A corroborated pair is reported to the reader as "matched on 2+
+// independent kinds of evidence -- stronger than any single indicator".
+// entity_cluster is derived from the other indicators by union-find
+// over their entity lists, so it is not independent of them; counting
+// it promoted any pair holding one real indicator into that category.
+func TestCorroborationExcludesSetLevelIndicators(t *testing.T) {
+	const a, b, c = "companieshouse: A (1)", "companieshouse: B (2)", "companieshouse: C (3)"
+
+	// A and B share exactly one real indicator. C is dragged in only by
+	// the cluster, as a transitively-connected member would be.
+	indicators := []Indicator{
+		{Code: "shared_person", Weight: 3, Entities: []string{a, b}},
+		{Code: "entity_cluster", Weight: 2, Entities: []string{a, b, c}},
+	}
+
+	got := computeCorroborations(indicators)
+	if len(got) != 0 {
+		t.Fatalf("got %d corroborated pair(s), want 0 -- one real indicator plus a cluster the indicator itself produced is one kind of evidence, not two: %+v", len(got), got)
+	}
+
+	// The control: two genuinely independent indicators on the same
+	// pair must still corroborate, or the fix has broken the feature
+	// rather than corrected it.
+	indicators = append(indicators, Indicator{Code: "shared_address", Weight: 2, Entities: []string{a, b}})
+	got = computeCorroborations(indicators)
+	if len(got) != 1 {
+		t.Fatalf("got %d corroborated pair(s), want 1", len(got))
+	}
+	for _, code := range got[0].Codes {
+		if IsSetLevel(code) {
+			t.Errorf("corroboration lists set-level code %q as one of its independent kinds of evidence", code)
+		}
+	}
+	if len(got[0].Codes) != 2 {
+		t.Errorf("codes = %v, want exactly the two real ones", got[0].Codes)
+	}
+}

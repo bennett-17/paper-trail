@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/bennett-17/paper-trail/internal/risk"
 )
 
 // knownDuplicateIndicatorCodes are indicator codes still constructed in
@@ -127,3 +129,56 @@ func TestKnownDuplicatesAreStillDuplicated(t *testing.T) {
 		}
 	}
 }
+
+// TestSetLevelIndicatorsAreRealCodes keeps risk.IsSetLevel's registry
+// honest against the indicators that actually exist.
+//
+// The original plan for this guard was to flag any indicator built from
+// an unbounded Entities slice unless it was registered set-level. That
+// would fire on nearly every pairwise indicator in the project --
+// shared_person and shared_address build their entity lists from
+// variables too -- so it would have been noise, and a noisy guard gets
+// muted. What can actually go wrong here is narrower: the registry
+// naming a code that no longer exists (a rename or deletion leaves it
+// silently doing nothing) or being emptied. Both are checkable.
+//
+// The failure this protects against is expensive and quiet. An
+// unregistered set-level indicator is expanded to n(n-1)/2 graph edges
+// and corroborates every pair inside itself; at n=329 that was 53,956
+// fabricated edges and 31,474 fabricated corroborated pairs, none of
+// which looks like an error in the output -- it looks like a finding.
+func TestSetLevelIndicatorsAreRealCodes(t *testing.T) {
+	constructed := indicatorCodeSites(t)
+
+	// entity_cluster is the reason this mechanism exists; losing its
+	// registration silently restores the original defect.
+	if !risk.IsSetLevel("entity_cluster") {
+		t.Error("entity_cluster is no longer registered as set-level -- it is derived from the other indicators by union-find, so expanding it pairwise fabricates edges and corroboration")
+	}
+
+	// Every registered code must still be constructed somewhere, or the
+	// registration is dead weight pointing at a code that moved on.
+	for _, code := range knownSetLevelCodes {
+		if !risk.IsSetLevel(code) {
+			t.Errorf("%q is expected to be registered set-level but IsSetLevel says otherwise", code)
+		}
+		if constructed[code] == 0 {
+			t.Errorf("%q is registered set-level but no longer constructed anywhere -- rename or stale entry", code)
+		}
+	}
+
+	// A pairwise indicator must never be registered: doing so would
+	// silently delete real evidence from the graph rather than add
+	// noise to it, which is the harder direction to notice.
+	for _, code := range []string{"shared_person", "shared_address", "formation_cluster"} {
+		if risk.IsSetLevel(code) {
+			t.Errorf("%q is registered set-level, but its pairs are genuine evidence -- registering it drops real edges", code)
+		}
+	}
+}
+
+// knownSetLevelCodes mirrors risk.setLevelIndicators. Listed here
+// rather than exported from the risk package so that adding a code
+// there is a deliberate two-place change, the same shape
+// knownDuplicateIndicatorCodes above uses.
+var knownSetLevelCodes = []string{"entity_cluster"}

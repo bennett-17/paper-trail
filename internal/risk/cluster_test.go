@@ -312,3 +312,46 @@ func TestUnionFindKeepsUnrelatedEntitiesSeparate(t *testing.T) {
 		t.Error("a and b were never unioned but share a root")
 	}
 }
+
+// TestRecomputeEntityClusterUnderFiltering settles the question the
+// clique fix raised: entity_cluster's edges used to be what held its
+// members together in the graph, so once those edges are gone, a
+// cluster left standing after its underlying indicators were filtered
+// out would render as a group of isolated nodes claiming to be a
+// network.
+//
+// It cannot happen, because filtering recomputes the cluster from the
+// indicators that survived rather than carrying the old one forward.
+// This test exists so that property stays true -- it is now load-
+// bearing in a way it was not before.
+func TestRecomputeEntityClusterUnderFiltering(t *testing.T) {
+	labels := []string{
+		"companieshouse: A (1)", "companieshouse: B (2)",
+		"companieshouse: C (3)", "companieshouse: D (4)",
+	}
+	linked := []Indicator{
+		{Code: "shared_person", Weight: 3, Entities: []string{labels[0], labels[1]}, Evidence: "SMITH, John"},
+		{Code: "shared_address", Weight: 2, Entities: []string{labels[1], labels[2]}, Evidence: "1 High St"},
+		{Code: "formation_cluster", Weight: 1, Entities: []string{labels[2], labels[3]}, Evidence: "2019-01"},
+	}
+
+	full := RecomputeEntityCluster(linked)
+	var before int
+	for _, ind := range full {
+		if ind.Code == "entity_cluster" {
+			before = len(ind.Entities)
+		}
+	}
+	if before == 0 {
+		t.Fatal("no entity_cluster formed from four transitively linked entities -- this test's premise is wrong")
+	}
+
+	// Drop every indicator that did the linking, as --indicator or
+	// --min-weight filtering can.
+	got := RecomputeEntityCluster(nil)
+	for _, ind := range got {
+		if ind.Code == "entity_cluster" {
+			t.Errorf("entity_cluster survived with %d members after its underlying indicators were filtered out -- with the pairwise expansion gone these would render as isolated nodes presented as a network", len(ind.Entities))
+		}
+	}
+}

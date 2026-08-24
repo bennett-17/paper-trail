@@ -3,9 +3,20 @@ package graph
 import "github.com/bennett-17/paper-trail/internal/risk"
 
 // BuildFromRisk assembles a Graph from a risk assessment: every Entity
-// becomes a node, and every Indicator that connects two or more
-// entities becomes an edge between each pair of them, labeled with the
-// indicator's code (e.g. "shared_address") as RelationshipType. An
+// becomes a node, and every PAIRWISE Indicator that connects two or
+// more entities becomes an edge between each pair of them, labeled
+// with the indicator's code (e.g. "shared_address") as
+// RelationshipType.
+//
+// Set-level indicators (risk.IsSetLevel) are the exception and produce
+// no edges at all. They name a membership roll rather than asserting a
+// relationship between each pair, so expanding one to all pairs states
+// something the data never claimed -- and states it n^2 times. A single
+// real 329-member entity_cluster emitted 53,956 edges this way, 63% of
+// the whole graph, burying the ~32,000 edges that carry evidence. Such
+// an indicator lands on Node.Cluster instead, which is where membership
+// belongs; see that field for why dropping the edges loses no
+// structure. An
 // indicator naming only one participant (e.g. a sanctions_match or
 // filing_mention against the search query itself, not a resolved
 // Entity) contributes no edge -- there's no second node to connect it
@@ -34,12 +45,23 @@ func BuildFromRisk(entities []risk.Entity, score risk.Score) Graph {
 
 	edgeSeen := map[[3]string]bool{} // source, target, relationship_type
 	var edges []Edge
+	clusterByID := map[string]string{}
 	for _, ind := range score.Indicators {
 		ids := make([]string, 0, len(ind.Entities))
 		for _, label := range ind.Entities {
 			if id, ok := idByLabel[label]; ok {
 				ids = append(ids, id)
 			}
+		}
+		if risk.IsSetLevel(ind.Code) {
+			// Membership, not relationships. Recorded on the nodes and
+			// deliberately not expanded pairwise.
+			for _, id := range ids {
+				if clusterByID[id] == "" {
+					clusterByID[id] = ind.Evidence
+				}
+			}
+			continue
 		}
 		for i := 0; i < len(ids); i++ {
 			for j := i + 1; j < len(ids); j++ {
@@ -93,6 +115,7 @@ func BuildFromRisk(entities []risk.Entity, score risk.Score) Graph {
 	}
 	for i := range nodes {
 		nodes[i].MaxWeight = maxWeightByID[nodes[i].ID]
+		nodes[i].Cluster = clusterByID[nodes[i].ID]
 	}
 
 	return Graph{Nodes: nodes, Edges: edges}

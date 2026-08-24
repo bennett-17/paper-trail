@@ -928,7 +928,14 @@ separately calls out any two entities connected by two or more
 shared officer) -- that combination is materially stronger evidence
 than either alone, but scanning a flat list of indicators makes it easy
 to miss. This adds no weight of its own to the total; it's a
-reorganization of evidence already counted, not new evidence. The
+reorganization of evidence already counted, not new evidence.
+entity_cluster is excluded from it: that indicator is derived from the
+others, so counting it as independent corroboration promoted every pair
+inside a cluster on the strength of one real indicator plus a summary
+of that same indicator (98.9% of corroborated pairs on a benchmark
+scan). It contributes no graph edges either, landing on each member
+node as a cluster attribute instead -- it names a set, not a
+relationship between every pair in it. The
 single-entity version of that same idea gets its own real indicator
 instead: convergent_risk fires when one entity alone is independently
 named by three or more distinct indicator codes at once -- three weak

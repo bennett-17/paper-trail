@@ -23,6 +23,20 @@ type Node struct {
 	// nodes by priority, so the highest-weight leads are visually
 	// obvious without reading every edge label.
 	MaxWeight int `json:"maxWeight,omitempty"`
+	// Cluster is the evidence line of the set-level entity_cluster this
+	// node belongs to, or "" if none.
+	//
+	// Cluster membership is a property of a NODE, not a relationship
+	// between a pair of them, and encoding it as edges is what made one
+	// 329-member cluster emit 53,956 of the graph's 86,261 edges (see
+	// risk.IsSetLevel). Nothing is lost by dropping those edges: a
+	// cluster exists precisely because its members are already joined
+	// by the underlying indicators' edges, which remain, so the
+	// component still renders as a component. This attribute is what
+	// keeps the cluster *identifiable* -- letting a viewer colour or
+	// group by it -- without asserting pairwise links the data never
+	// claimed.
+	Cluster string `json:"cluster,omitempty"`
 }
 
 // Edge is a directed relationship between two nodes. EvidenceForm/

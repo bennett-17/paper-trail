@@ -54,6 +54,7 @@ func WriteGraphML(g Graph, path string) error {
 		Keys: []graphMLKey{
 			{ID: "label", For: "node", AttrName: "label", AttrType: "string"},
 			{ID: "node_type", For: "node", AttrName: "node_type", AttrType: "string"},
+			{ID: "cluster", For: "node", AttrName: "cluster", AttrType: "string"},
 			{ID: "relationship_type", For: "edge", AttrName: "relationship_type", AttrType: "string"},
 			{ID: "weight", For: "edge", AttrName: "weight", AttrType: "int"},
 			{ID: "evidence", For: "edge", AttrName: "evidence", AttrType: "string"},
@@ -70,6 +71,7 @@ func WriteGraphML(g Graph, path string) error {
 			Data: []graphMLDataOf{
 				{Key: "label", Value: n.Label},
 				{Key: "node_type", Value: n.Type},
+				{Key: "cluster", Value: n.Cluster},
 			},
 		})
 	}

@@ -178,10 +178,24 @@ func EntityCluster(indicators []Indicator) []Indicator {
 
 // betweenness computes, for every member of one component, how often
 // that member sits on a shortest path between two OTHER members --
-// via Brandes' algorithm (BFS-based, O(V*E), trivial at the cluster
-// sizes this package ever deals with: single digits to low tens of
-// entities per scan, confirmed against this project's own largest
-// real scans). Only called as EntityCluster's hub tiebreaker (see its
+// via Brandes' algorithm (BFS-based, O(V*E)).
+//
+// This comment used to claim clusters run "single digits to low tens of
+// entities per scan, confirmed against this project's own largest real
+// scans". That is no longer true and the confirmation had gone stale: a
+// routine benchmark scan produces a single component of 329 entities,
+// and larger scans go higher. It is measured here rather than asserted
+// because it is the justification for running an O(V*E) algorithm at
+// all.
+//
+// It remains affordable, for a reason worth stating: this is a
+// tiebreaker, reached only when two or more members tie for maximum
+// degree, and it runs over the component's REAL adjacency -- the
+// underlying pairwise indicators -- not over any dense expansion of
+// the cluster itself. Should this become hot, the fix is to bound the
+// tiebreaker's input, not to widen the claim about cluster sizes.
+//
+// Only called as EntityCluster's hub tiebreaker (see its
 // doc comment above), not as a standalone indicator of its own --
 // degree centrality stays the primary, cheaper signal for the
 // clear-cut star case, and this only runs when it's actually needed

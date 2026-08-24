@@ -12,6 +12,13 @@ import "sort"
 // *same* code (e.g. two different shared addresses) don't count --
 // that's just more of the same evidence, not independent corroboration.
 //
+// Set-level indicators are excluded outright (see IsSetLevel). A pair
+// must be corroborated by two independent *observations*; a summary of
+// those observations is not a third one. entity_cluster is derived from
+// the very indicators it would be corroborating, and counting it turned
+// any pair with a single real indicator into a "corroborated" one --
+// 98.9% of the corroborated pairs on a real benchmark scan.
+//
 // Corroborations carries no Weight of its own and doesn't add to
 // Score.Total: every point in Total already traces to a specific
 // Indicator, and a pair appearing here is already fully accounted for
@@ -30,6 +37,12 @@ func computeCorroborations(indicators []Indicator) []Corroboration {
 	codesByPair := make(map[pairKey]map[string]bool)
 
 	for _, ind := range indicators {
+		if IsSetLevel(ind.Code) {
+			// Names a membership roll, not a set of pairwise claims --
+			// expanding it would corroborate every pair in the set with
+			// evidence derived from the pairs themselves.
+			continue
+		}
 		participants := dedupeStrings(ind.Entities)
 		for i := 0; i < len(participants); i++ {
 			for j := i + 1; j < len(participants); j++ {

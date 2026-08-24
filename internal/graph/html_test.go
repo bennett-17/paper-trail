@@ -77,3 +77,36 @@ func TestWriteHTMLEscapesScriptTagBreakout(t *testing.T) {
 		t.Error("a literal </script> in node data was not escaped -- this would break out of the embedded data script tag")
 	}
 }
+
+// TestWriteHTMLSurfacesCluster guards against the cluster becoming
+// invisible. Dropping entity_cluster's fabricated edges removed the
+// only way it showed up in the viewer, so if the node attribute that
+// replaced them is not rendered, the fix trades a misleading hairball
+// for a silently missing finding.
+func TestWriteHTMLSurfacesCluster(t *testing.T) {
+	g := Graph{
+		Nodes: []Node{
+			{ID: "companieshouse:1", Label: "A", Type: "companieshouse", Cluster: "4 entities connected via shared_person; hub: A"},
+			{ID: "companieshouse:2", Label: "B", Type: "companieshouse"},
+		},
+		Edges: []Edge{{Source: "companieshouse:1", Target: "companieshouse:2", RelationshipType: "shared_person"}},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "graph.html")
+	if err := WriteHTML(g, path); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	html := string(data)
+
+	if !strings.Contains(html, "4 entities connected via shared_person") {
+		t.Error("the cluster's evidence is absent from the rendered graph -- the finding is not reaching the viewer")
+	}
+	if !strings.Contains(html, "n.cluster") {
+		t.Error("the viewer script never reads n.cluster, so the attribute is carried in the data but never shown")
+	}
+}

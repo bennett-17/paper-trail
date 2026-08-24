@@ -166,3 +166,63 @@ func TestMaxWeightIgnoresLabelsWithNoNode(t *testing.T) {
 		t.Errorf("MaxWeight = %d, want 0 -- the indicator named a query, not this entity", g.Nodes[0].MaxWeight)
 	}
 }
+
+// TestBuildFromRiskSkipsSetLevelIndicators pins the fix for the clique
+// expansion. A set-level indicator names a membership roll, not a set
+// of pairwise claims; expanding one produced n(n-1)/2 edges asserting
+// relationships the data never stated. On a real scan a single
+// 329-member entity_cluster emitted 53,956 edges -- 63% of the graph.
+func TestBuildFromRiskSkipsSetLevelIndicators(t *testing.T) {
+	entities := []risk.Entity{
+		{Source: "companieshouse", ID: "1", Name: "A"},
+		{Source: "companieshouse", ID: "2", Name: "B"},
+		{Source: "companieshouse", ID: "3", Name: "C"},
+		{Source: "companieshouse", ID: "4", Name: "D"},
+	}
+	labels := make([]string, len(entities))
+	for i, e := range entities {
+		labels[i] = e.Label()
+	}
+
+	score := risk.Score{Indicators: []risk.Indicator{
+		// One real pairwise link, plus a cluster naming all four.
+		{Code: "shared_person", Weight: 3, Entities: []string{labels[0], labels[1]}, Evidence: "SMITH, John"},
+		{Code: "entity_cluster", Weight: 2, Entities: labels, Evidence: "4 entities connected via shared_person; hub: A"},
+	}}
+
+	g := BuildFromRisk(entities, score)
+
+	// Without the fix this is 1 + 4*3/2 = 7 edges.
+	if len(g.Edges) != 1 {
+		t.Fatalf("got %d edges, want 1 -- the cluster must contribute none: %+v", len(g.Edges), g.Edges)
+	}
+	for _, e := range g.Edges {
+		if risk.IsSetLevel(e.RelationshipType) {
+			t.Errorf("edge carries set-level relationship_type %q", e.RelationshipType)
+		}
+	}
+
+	// The finding must survive as node membership rather than vanish.
+	var withCluster int
+	for _, n := range g.Nodes {
+		if n.Cluster != "" {
+			withCluster++
+		}
+	}
+	if withCluster != len(entities) {
+		t.Errorf("%d of %d nodes carry Cluster, want all -- dropping the edges must not drop the finding", withCluster, len(entities))
+	}
+
+	// The node named only by the cluster still exists, isolated. That
+	// is the honest rendering: nothing in the data links D to anything
+	// pairwise, and the clique previously hid that.
+	var foundD bool
+	for _, n := range g.Nodes {
+		if n.Label == "D" {
+			foundD = true
+		}
+	}
+	if !foundD {
+		t.Error("node D disappeared -- set-level members must still be nodes")
+	}
+}

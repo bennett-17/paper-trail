@@ -594,6 +594,7 @@ const nodes = graphData.nodes.map((n, i) =&gt; ({
   ...n,
   type: n.node_type, // the exported JSON field is &#34;node_type&#34;; normalize once here
   maxWeight: n.maxWeight || 0,
+  cluster: n.cluster || &#39;&#39;,
   x: width / 2 &#43; Math.cos(i) * 100 &#43; (Math.random() - 0.5) * 50,
   y: height / 2 &#43; Math.sin(i) * 100 &#43; (Math.random() - 0.5) * 50,
   vx: 0, vy: 0,
@@ -723,7 +724,14 @@ const nodeEls = nodes.map(n =&gt; {
   text.setAttribute(&#39;y&#39;, 4);
   text.textContent = n.label;
   const title = document.createElementNS(NS, &#39;title&#39;);
-  title.textContent = n.label &#43; &#39; (&#39; &#43; n.type &#43; &#39;)&#39; &#43; (n.maxWeight ? &#39; -- highest indicator weight involved: &#39; &#43; n.maxWeight : &#39;&#39;);
+  // Cluster membership is a node property, not an edge: entity_cluster
+  // names a set of transitively-connected entities, and drawing it as
+  // one edge per pair produced a complete clique that buried every
+  // edge carrying real evidence. Surfacing it here keeps the finding
+  // legible without asserting links the data never claimed.
+  title.textContent = n.label &#43; &#39; (&#39; &#43; n.type &#43; &#39;)&#39;
+    &#43; (n.maxWeight ? &#39; -- highest indicator weight involved: &#39; &#43; n.maxWeight : &#39;&#39;)
+    &#43; (n.cluster ? &#39; -- cluster: &#39; &#43; n.cluster : &#39;&#39;);
   g.appendChild(circle);
   g.appendChild(text);
   g.appendChild(title);

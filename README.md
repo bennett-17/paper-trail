@@ -1112,7 +1112,15 @@ does.
   adds no weight of its own, since every point is already counted by
   the indicators that produced it; it's a reorganization of that
   evidence, surfacing a pattern a flat indicator list makes easy to
-  miss.
+  miss. **entity_cluster is deliberately excluded from this count.** It
+  is derived from the other indicators (by union-find over their entity
+  lists), so it is not independent of them, and counting it turned every
+  pair inside a cluster into a "corroborated" one on the strength of a
+  single real indicator plus a summary of that same indicator. On a
+  benchmark scan that inflated 341 genuinely corroborated pairs to
+  31,815 -- 98.9% of them artifacts. Same principle as the indicator
+  families in convergent_risk: correlated signals must not be counted
+  as independent ones.
 - **convergent_risk**: the single-entity version of that same idea
   gets its own real indicator instead -- fires when one entity alone
   is independently named by three or more *distinct* indicator codes
@@ -1193,7 +1201,15 @@ does.
   intermediate entities. A-B connected via one indicator and B-C via a
   completely different one still puts A and C in the same network, even
   though the two of them may never co-occur in any single indicator
-  together -- exactly the shape a purely pairwise view can miss (this
+  together. Because it names a *set* rather than asserting a
+  relationship between each pair in it, it contributes **no graph
+  edges**: it lands on each member node as a `cluster` attribute
+  instead. Expanding it pairwise used to emit one edge per pair --
+  53,956 of a graph's 86,261 edges came from a single 329-member
+  cluster, burying the edges that carried real evidence under a
+  complete clique asserting links the data never claimed. Nothing is
+  lost by dropping them, since a cluster exists precisely because its
+  members are already joined by the underlying indicators' edges -- exactly the shape a purely pairwise view can miss (this
   project's own live scans have turned up an 11-company web chained
   together this way through a single nominee director, invisible from
   any one shared_person hit alone). Fires once per connected network of
