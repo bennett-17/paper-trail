@@ -312,9 +312,16 @@ code, just a different final render target.
   framing as officer_appointment_burst -- common in lawful bulk
   formation services, but also how a nominee is unwound, so a lead to
   investigate either way.
+- Both burst thresholds are **measured, not reasoned**: across 1,202
+  officers of randomly sampled companies, 78% join companies one at a
+  time and sizes 2-4 are the ordinary tail of that, so the original
+  threshold of 3 fired on 13.8% of companies. The distribution hits a
+  floor at 5 and then goes flat out to 50 (the API's page ceiling) --
+  that flat tail is the nominee population. The threshold is 6, the
+  first value on it, firing on 7.3%.
 - **mass_nominee_officer**: a different failure mode from the two burst
   checks above -- not several appointments in one tight window, but an
-  unusually large *total* appointment count register-wide (10 or more,
+  unusually large *total* appointment count register-wide (150 or more,
   current and former combined), the hallmark of a professional/corporate
   nominee-director service rather than a time-clustered event. Uses
   Companies House's own `total_results` count for the officer's full
