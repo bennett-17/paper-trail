@@ -1894,19 +1894,52 @@ func frequentRenaming(previousNames []companieshouse.PreviousName) string {
 	return fmt.Sprintf("%d name changes between %s and %s (~%.0f days)", len(previousNames), oldest.Format("2006-01-02"), mostRecent.Format("2006-01-02"), span.Hours()/24)
 }
 
-// appointmentBurstWindow and appointmentBurstThreshold are calibrated
-// against a real UK corporate nominee-director service confirmed live
-// on Companies House (officer ID nEggfu04XePBqnRERobPjXjmHGk,
-// "Corporate Directors Limited", 540 appointments register-wide over
-// its history): three separate companies (Dronsdale Ltd, Roundstone
-// Network Ltd, and Drummand Ltd) all gained this same corporate
-// director on 2014-12-09 alone, one of several same-day or
-// same-week clusters in its real appointment history. Three or more
-// distinct companies within a week is a real, recurring pattern for a
-// bulk shelf-company-formation/nominee-director (or -secretary)
-// service, not a hypothetical threshold.
+// appointmentBurstWindow and appointmentBurstThreshold govern "did this
+// officer join (or leave) N distinct companies inside one week?".
+//
+// The window comes from a real UK corporate nominee-director service
+// confirmed live on Companies House (officer ID
+// nEggfu04XePBqnRERobPjXjmHGk, "Corporate Directors Limited", 540
+// appointments register-wide): three separate companies (Dronsdale Ltd,
+// Roundstone Network Ltd, Drummand Ltd) all gained this same corporate
+// director on 2014-12-09, one of several same-day clusters in its real
+// history. A week is the right window; that much held up.
+//
+// The THRESHOLD did not. It was 3, reasoned from that same case, and
+// measuring the distribution across 1,202 officers of 725 randomly
+// sampled companies (paper-trail calibrate, three seeds) showed why 3
+// is too low -- it fired on 13.8% of companies, about 1 in 7:
+//
+//	burst 1: 78.0% of officers    burst 4:  2.0%
+//	burst 2:  8.0%                burst 5:  0.3%   <- the floor
+//	burst 3:  3.5%                burst 6+: flat tail out to 50
+//
+// 78% of officers join companies one at a time. Sizes 2-4 are the
+// ordinary tail of that -- a director incorporating a few related
+// companies in one week is unremarkable. The distribution then hits a
+// floor at 5 (four officers in the whole sample) and the tail goes FLAT
+// and stays flat to 50, which is the nominee population: seven officers
+// sit at exactly 50, the API page ceiling, so their true bursts are
+// larger still.
+//
+// 6 is the first value on that flat tail, past the floor, and flags
+// 7.3% of companies. 5 measures almost identically (7.4%) but rests on
+// a four-officer bucket, which is too thin to draw a boundary through.
+//
+// Known trade-off, stated rather than buried: at 6 the reference case
+// above -- a burst of exactly 3 -- would no longer fire THIS indicator.
+// That officer has 540 register-wide appointments and is caught by
+// mass_nominee_officer regardless. This indicator's job is the pattern
+// the lifetime count misses, and at a threshold of 3 it was mostly
+// catching ordinary directors instead.
+//
+// Measured AFTER the --limit truncation fix (see
+// officerAppointmentPageSize): before it, burst detection judged
+// against five appointments out of hundreds, so any earlier
+// measurement would have described that bug rather than this
+// distribution.
 const appointmentBurstWindow = 7 * 24 * time.Hour
-const appointmentBurstThreshold = 3
+const appointmentBurstThreshold = 6
 
 // officerAppointmentPageSize is how much of ONE officer's register-wide
 // appointment history to fetch when looking for bursts.

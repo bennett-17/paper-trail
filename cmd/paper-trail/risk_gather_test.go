@@ -334,12 +334,61 @@ func TestAppointmentBurstFlagsRealCorporateNomineeDirectorPattern(t *testing.T) 
 		{CompanyNumber: "00000003", CompanyName: "DRUMMAND LTD", AppointedOn: "2014-12-09"},
 		{CompanyNumber: "00000004", CompanyName: "EASTBROOKE DEVELOPMENT LIMITED", AppointedOn: "2014-11-17"},
 	}
-	desc, _ := appointmentBurst(appointments)
-	if desc == "" {
-		t.Fatal("got no flag, want a burst flagged for 3 companies on the same day")
+	// This 3-company cluster deliberately no longer fires. The threshold
+	// was 3, reasoned from exactly this case; measuring 1,202 officers
+	// showed burst sizes of 2-4 are the ordinary tail of normal
+	// behaviour (78% of officers sit at 1) and firing at 3 flagged 13.8%
+	// of companies. The trade-off is real and accepted: this officer has
+	// 540 register-wide appointments and is caught by
+	// mass_nominee_officer regardless, so nothing about the reference
+	// case goes unreported -- see appointmentBurstThreshold's comment.
+	if desc, _ := appointmentBurst(appointments); desc != "" {
+		t.Errorf("desc = %q, want no burst -- 3 companies is inside the ordinary range at the measured threshold", desc)
 	}
-	if !strings.Contains(desc, "3 companies") {
-		t.Errorf("desc = %q, want it to report 3 companies", desc)
+
+	// The same officer's real history also contains larger clusters,
+	// which are what the indicator now exists to catch.
+	bigger := append(appointments,
+		companieshouse.Appointment{CompanyNumber: "00000005", CompanyName: "FIFTH LTD", AppointedOn: "2014-12-09"},
+		companieshouse.Appointment{CompanyNumber: "00000006", CompanyName: "SIXTH LTD", AppointedOn: "2014-12-10"},
+		companieshouse.Appointment{CompanyNumber: "00000007", CompanyName: "SEVENTH LTD", AppointedOn: "2014-12-11"},
+	)
+	desc, _ := appointmentBurst(bigger)
+	if desc == "" {
+		t.Fatal("got no flag, want a burst for 6 companies inside one week")
+	}
+	if !strings.Contains(desc, "6 companies") {
+		t.Errorf("desc = %q, want it to report 6 companies", desc)
+	}
+}
+
+// TestAppointmentBurstSizeMatchesThreshold guards that the measured
+// quantity and the threshold that cuts it stay in agreement -- they are
+// computed by different functions (largestBurst vs burstDescription)
+// and a drift between them would silently invalidate any future
+// calibration of this threshold.
+func TestAppointmentBurstSizeMatchesThreshold(t *testing.T) {
+	mk := func(n int) []companieshouse.Appointment {
+		var out []companieshouse.Appointment
+		for i := 0; i < n; i++ {
+			out = append(out, companieshouse.Appointment{
+				CompanyNumber: fmt.Sprintf("%08d", i+1),
+				CompanyName:   fmt.Sprintf("CO %d LTD", i+1),
+				AppointedOn:   "2014-12-09",
+			})
+		}
+		return out
+	}
+	for n := 1; n <= 8; n++ {
+		size := appointmentBurstSize(mk(n))
+		if size != n {
+			t.Errorf("appointmentBurstSize(%d same-day) = %d, want %d", n, size, n)
+		}
+		desc, _ := appointmentBurst(mk(n))
+		fired := desc != ""
+		if want := n >= appointmentBurstThreshold; fired != want {
+			t.Errorf("n=%d: fired=%v, want %v (threshold %d)", n, fired, want, appointmentBurstThreshold)
+		}
 	}
 }
 
