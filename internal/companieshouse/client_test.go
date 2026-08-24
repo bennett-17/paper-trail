@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -800,5 +801,111 @@ func TestZeroResultSearchReturnsCleanEmptyResult(t *testing.T) {
 	}
 	if result.Total != 0 || len(result.Companies) != 0 {
 		t.Errorf("result = %+v, want a clean empty result", result)
+	}
+}
+
+// appointmentPageServer serves a paginated appointments endpoint with
+// `total` synthetic appointments, honouring start_index/items_per_page
+// the way the real API does (confirmed live: 50 max per page, distinct
+// results per start_index).
+func appointmentPageServer(t *testing.T, total int, failAfter int) (*httptest.Server, *int) {
+	t.Helper()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if failAfter > 0 && calls > failAfter {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		start, _ := strconv.Atoi(r.URL.Query().Get("start_index"))
+		per, _ := strconv.Atoi(r.URL.Query().Get("items_per_page"))
+		if per <= 0 || per > 50 {
+			per = 50 // the API's own ceiling
+		}
+		var items []string
+		for i := start; i < start+per && i < total; i++ {
+			items = append(items, fmt.Sprintf(
+				`{"appointed_to":{"company_number":"%08d","company_name":"CO %d"},"officer_role":"director","appointed_on":"2014-12-09"}`, i, i))
+		}
+		fmt.Fprintf(w, `{"total_results": %d, "start_index": %d, "items": [%s]}`, total, start, strings.Join(items, ","))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+func TestGetOfficerAppointmentsPagesPastTheAPICeiling(t *testing.T) {
+	srv, calls := appointmentPageServer(t, 137, 0)
+	c := newTestClient(t, srv)
+
+	appts, total, err := c.GetOfficerAppointments("someid", 200)
+	if err != nil {
+		t.Fatalf("GetOfficerAppointments: %v", err)
+	}
+	if total != 137 {
+		t.Errorf("total = %d, want 137", total)
+	}
+	// 137 appointments cannot be reached in one request: the API caps a
+	// page at 50, which is the whole reason pagination exists here.
+	if len(appts) != 137 {
+		t.Errorf("got %d appointments, want all 137", len(appts))
+	}
+	if *calls != 3 {
+		t.Errorf("made %d requests, want 3 (50+50+37)", *calls)
+	}
+	// Pages must not repeat -- a start_index bug would silently return
+	// the first page over and over and inflate burst detection.
+	seen := map[string]bool{}
+	for _, a := range appts {
+		if seen[a.CompanyNumber] {
+			t.Fatalf("duplicate company %s: pages are repeating", a.CompanyNumber)
+		}
+		seen[a.CompanyNumber] = true
+	}
+}
+
+func TestGetOfficerAppointmentsRespectsLimit(t *testing.T) {
+	srv, calls := appointmentPageServer(t, 1000, 0)
+	c := newTestClient(t, srv)
+
+	appts, total, err := c.GetOfficerAppointments("someid", 120)
+	if err != nil {
+		t.Fatalf("GetOfficerAppointments: %v", err)
+	}
+	if total != 1000 {
+		t.Errorf("total = %d, want the API's own 1000 regardless of limit", total)
+	}
+	if len(appts) != 120 {
+		t.Errorf("got %d appointments, want exactly the 120 requested", len(appts))
+	}
+	if *calls != 3 {
+		t.Errorf("made %d requests, want 3 (50+50+20) -- it must stop at the limit, not fetch all 1000", *calls)
+	}
+}
+
+// TestGetOfficerAppointmentsKeepsPartialHistoryOnMidPageFailure: a
+// partial history is still usable for burst detection, so a failure
+// partway through paging must not discard what was already collected.
+func TestGetOfficerAppointmentsKeepsPartialHistoryOnMidPageFailure(t *testing.T) {
+	srv, _ := appointmentPageServer(t, 500, 2) // first two pages succeed
+	c := newTestClient(t, srv)
+
+	appts, total, err := c.GetOfficerAppointments("someid", 500)
+	if err != nil {
+		t.Fatalf("expected partial success, got error: %v", err)
+	}
+	if len(appts) != 100 {
+		t.Errorf("got %d appointments, want the 100 collected before the failure", len(appts))
+	}
+	if total != 500 {
+		t.Errorf("total = %d, want the API's own figure from the first page", total)
+	}
+}
+
+func TestGetOfficerAppointmentsFirstPageFailureIsAnError(t *testing.T) {
+	srv, _ := appointmentPageServer(t, 500, 0)
+	srv.Close() // nothing collected, so this must surface as an error
+	c := newTestClient(t, srv)
+	if _, _, err := c.GetOfficerAppointments("someid", 100); err == nil {
+		t.Error("expected an error when the very first page fails")
 	}
 }

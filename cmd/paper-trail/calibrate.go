@@ -171,7 +171,7 @@ func runCalibrate(args []string) {
 			if o.OfficerID == "" {
 				continue // corporate officers often carry no linkable ID
 			}
-			appts, total, err := chClient.GetOfficerAppointments(o.OfficerID, officerAppointmentPageSize)
+			appts, total, err := chClient.GetOfficerAppointments(o.OfficerID, officerAppointmentFetchLimit)
 			if err != nil {
 				continue
 			}

@@ -1427,7 +1427,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 		if o.OfficerID == "" {
 			continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
 		}
-		appointments, totalAppointments, err := officerCache.getAppointments(chClient, o.OfficerID, officerAppointmentPageSize)
+		appointments, totalAppointments, err := officerCache.getAppointments(chClient, o.OfficerID, officerAppointmentFetchLimit)
 		if err != nil {
 			note("%s appointments: %v", o.Name, err)
 			continue
@@ -1494,7 +1494,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 				continue
 			}
 			hop2Officers[o2.OfficerID] = true
-			appointments2, _, err := officerCache.getAppointments(chClient, o2.OfficerID, officerAppointmentPageSize)
+			appointments2, _, err := officerCache.getAppointments(chClient, o2.OfficerID, officerAppointmentFetchLimit)
 			if err != nil {
 				note("%s appointments (hop 2) for %s: %v", o2.Name, hop1.CompanyName, err)
 				continue
@@ -1934,36 +1934,39 @@ func frequentRenaming(previousNames []companieshouse.PreviousName) string {
 // catching ordinary directors instead.
 //
 // Measured AFTER the --limit truncation fix (see
-// officerAppointmentPageSize): before it, burst detection judged
+// officerAppointmentFetchLimit): before it, burst detection judged
 // against five appointments out of hundreds, so any earlier
 // measurement would have described that bug rather than this
 // distribution.
 const appointmentBurstWindow = 7 * 24 * time.Hour
 const appointmentBurstThreshold = 6
 
-// officerAppointmentPageSize is how much of ONE officer's register-wide
-// appointment history to fetch when looking for bursts.
+// officerAppointmentFetchLimit is how much of ONE officer's
+// register-wide appointment history to examine when looking for bursts.
 //
 // This is deliberately NOT the scan's --limit. --limit means "max
 // candidates to pull per source, per query term" -- a search-BREADTH
-// control -- and it was being passed straight through as this page
-// size, which is a measure of DEPTH into a single officer's history.
-// Two unrelated knobs, conflated by accident. At the default --limit=5
-// that meant appointmentBurst and resignationBurst judged "3 or more
-// companies within a week" against just five appointments out of a
-// possible several hundred, so detecting a genuine burst was largely
-// accidental, and lowering --limit to speed a scan up silently blinded
-// both detectors.
+// control -- and it was previously passed straight through as this
+// value, which is DEPTH into a single officer's history. At the default
+// --limit=5 that meant appointmentBurst and resignationBurst judged
+// "6 or more companies within a week" against five appointments out of
+// possibly hundreds, so a genuine burst was almost undetectable.
 //
-// 50 is the Companies House ceiling for this endpoint, confirmed live:
-// requesting items_per_page=100 or 500 against a real 540-appointment
-// officer returns 50 either way. The client does not paginate, so 50
-// is the most one request can see, and burst detection remains a lower
-// bound for officers with longer histories -- stated here rather than
-// left for someone to rediscover.
+// 250 rather than the API's 50-per-page ceiling because
+// GetOfficerAppointments now paginates via start_index. The cost is
+// far smaller than it looks: paging stops as soon as the officer's own
+// total_results is reached, so the ~78% of officers with a handful of
+// appointments still cost exactly one request. Extra requests are paid
+// only for officers with long histories -- which are precisely the ones
+// where burst detection needs the depth, so the cost lands where the
+// value is.
 //
-// Costs nothing: five items or fifty is the same single GET.
-const officerAppointmentPageSize = 50
+// Bounded rather than unlimited because the tail is extreme: the
+// longest history measured in a random sample was 12,587 appointments,
+// which unbounded would be 252 requests for ONE officer. 250 caps that
+// at five while still covering the overwhelming majority of real
+// histories in full.
+const officerAppointmentFetchLimit = 250
 
 // datedCompany is one (date, company) pair used by burstDescription --
 // shared by appointmentBurst (AppointedOn dates) and resignationBurst

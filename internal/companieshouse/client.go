@@ -1070,12 +1070,53 @@ type appointmentsResponse struct {
 // exactly like an officer with only limit's worth -- silently
 // undercounting the one case a mass-nominee check most needs to catch.
 func (c *Client) GetOfficerAppointments(officerID string, limit int) (appointments []Appointment, totalResults int, err error) {
-	u := c.BaseURL + "/officers/" + url.PathEscape(officerID) + "/appointments"
-	if limit > 0 {
-		params := url.Values{}
-		params.Set("items_per_page", strconv.Itoa(limit))
-		u += "?" + params.Encode()
+	appointments = make([]Appointment, 0, limit)
+	for start := 0; ; start += MaxAppointmentPageSize {
+		page, total, err := c.officerAppointmentsPage(officerID, start, limit-len(appointments))
+		if err != nil {
+			// A failure partway through paging returns what was already
+			// collected rather than discarding it: a partial history is
+			// still usable for burst detection, and the total is the
+			// API's own figure from the first page, unaffected.
+			if len(appointments) > 0 {
+				return appointments, totalResults, nil
+			}
+			return nil, 0, err
+		}
+		if start == 0 {
+			totalResults = total
+		}
+		appointments = append(appointments, page...)
+		if len(page) < MaxAppointmentPageSize || len(appointments) >= total {
+			break // last page
+		}
+		if limit > 0 && len(appointments) >= limit {
+			break
+		}
 	}
+	return appointments, totalResults, nil
+}
+
+// MaxAppointmentPageSize is the API's own per-request ceiling for this
+// endpoint, confirmed live: requesting items_per_page=100 or 500
+// against a real 540-appointment officer returns 50 either way. Paging
+// past it requires start_index, which GetOfficerAppointments does.
+const MaxAppointmentPageSize = 50
+
+// officerAppointmentsPage fetches one page. remaining <= 0 means "no
+// caller-imposed cap", in which case a full page is requested.
+func (c *Client) officerAppointmentsPage(officerID string, start, remaining int) (appointments []Appointment, totalResults int, err error) {
+	perPage := MaxAppointmentPageSize
+	if remaining > 0 && remaining < perPage {
+		perPage = remaining
+	}
+	params := url.Values{}
+	params.Set("items_per_page", strconv.Itoa(perPage))
+	if start > 0 {
+		params.Set("start_index", strconv.Itoa(start))
+	}
+	u := c.BaseURL + "/officers/" + url.PathEscape(officerID) + "/appointments?" + params.Encode()
+
 	body, err := c.get(u)
 	if err != nil {
 		return nil, 0, err
