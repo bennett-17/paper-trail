@@ -191,6 +191,9 @@ type riskReportJSON struct {
 	// distinguish "checked and clean" from "never checked", and the two
 	// mean very different things to anyone acting on it.
 	ScreenCoverage []screenCoverage `json:"screenCoverage,omitempty"`
+	// AsOf is set only when --as-of rewound the pool, and records how
+	// much of that reconstruction actually rested on dates.
+	AsOf *risk.AsOfCoverage `json:"asOf,omitempty"`
 }
 
 // riskReportDiff summarizes what changed between a previous risk
@@ -1520,6 +1523,7 @@ func runRisk(args []string) {
 	excludeFile := fs.String("exclude-file", "", "read additional --exclude terms from this file too, one per line (blank lines and lines starting with # are ignored)")
 	reviewedFile := fs.String("reviewed-file", "", "mark any indicator whose evidence or entity labels contain (case-insensitively) a term from this file (one per line, blank lines and lines starting with # ignored) as reviewed -- unlike --exclude, a reviewed indicator keeps its full weight and still counts toward the score, it just renders dimmed and collapsed by default in the HTML report, for tracking 'I've already looked at this' separately from 'this isn't a real finding'")
 	evidenceDir := fs.String("evidence-dir", "", "record the raw HTTP response behind every API call this scan makes into a dated evidence bundle at this path (responses/ plus a manifest.json with each response's URL, status, timestamp, and SHA-256). Public registers change: this is the contemporaneous receipt showing what a source actually said on the day you queried it. API keys are redacted from recorded URLs. Off by default -- it writes third-party data to disk, which should be a deliberate choice")
+	asOf := fs.String("as-of", "", "reconstruct the network as it stood on this date (YYYY-MM-DD) instead of today, and score THAT. Companies House publishes officer appointment/resignation and PSC notification/cessation dates, so a tenure spanning the date can be rebuilt from current data. Important: this is the CURRENT register's account of what was true then, not what the register said at the time -- records get amended and a long-dissolved company may not be findable by a present-day name search at all. Records carrying no date are kept rather than guessed at, and the report states how many")
 	redact := fs.Bool("redact", false, "remove personal data from the report before writing it -- individual names reduced to initials, partial dates of birth dropped, officer service addresses reduced to a postcode district. Every structural finding and the score are untouched: \"these six companies share one director\" survives intact. A publication aid for circulating a report, NOT an anonymizer -- company names, numbers and registered offices are public register facts and are left alone, so anyone with register access can still re-derive who an initial refers to. Note also that an officer whose service address IS the registered office is not hidden by this, since that address stays on the public company record")
 	caseName := fs.String("case", "", "group every scan of one investigation under a named case: sugar for pointing --exclude-file and --reviewed-file at ~/.paper-trail/cases/<name>/exclude.txt and reviewed.txt (both created empty on first use), so dismissals and reviewed marks carry across every sub-scan of that investigation without retyping one consistent path each time. Mutually exclusive with an explicit --exclude-file/--reviewed-file, since --case IS that path selection")
 	failOn := fs.String("fail-on", "", "exit with a non-zero status if the final confidence band reaches this level or higher (LOW, MEDIUM, or HIGH) -- lets a scan act as a gate in CI/cron/pre-merge automation instead of requiring someone to read the output")
@@ -1545,7 +1549,7 @@ func runRisk(args []string) {
 		}
 	}
 
-	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--reviewed-file <path>] [--case <name>] [--evidence-dir <path>] [--redact] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
+	const usage = "usage: paper-trail risk [<query> ...] [--input-file <path>] [--batch] [--serve <port>] [--fast] [--retry-failed-sources <path>] [--limit <n>] [--output <path>] [--graph <path>] [--html <path>] [--report-html <path>] [--graph-csv <path>] [--entities-csv <path>] [--graph-graphml <path>] [--cache-ttl <duration>] [--diff <path>] [--watch <duration>] [--top <n>] [--min-weight <n>] [--indicator <codes>] [--min-corroboration <n>] [--exclude <terms>] [--exclude-file <path>] [--reviewed-file <path>] [--case <name>] [--evidence-dir <path>] [--redact] [--as-of <date>] [--fail-on <band>] [--webhook <url>] [--summary] [--no-color] [--quiet] [--json]"
 
 	if *servePort != "" && (len(positional) > 0 || *inputFile != "" || *batch) {
 		fmt.Fprintln(os.Stderr, "Error: --serve takes no <query>/--input-file/--batch -- queries come from the search form in the browser instead")
@@ -1779,6 +1783,34 @@ func runRisk(args []string) {
 			score = risk.Assess(mergedEntities, combinedExtra)
 		}
 
+		// --as-of rewinds the entity pool BEFORE scoring, so every
+		// indicator -- shared_person, formation_cluster, the clusters
+		// and the convergence meta-signals alike -- is computed against
+		// the network as it stood then. Filtering the report afterwards
+		// would leave indicators that were derived from people who
+		// weren't there.
+		var asOfCoverage *risk.AsOfCoverage
+		if *asOf != "" {
+			when, err := time.Parse("2006-01-02", *asOf)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: --as-of %q: want a date like 2019-06-30: %v\n", *asOf, err)
+				os.Exit(1)
+			}
+			if when.After(time.Now()) {
+				fmt.Fprintf(os.Stderr, "Error: --as-of %q is in the future\n", *asOf)
+				os.Exit(1)
+			}
+			rewound, cov := risk.AsOf(entities, when)
+			entities, asOfCoverage = rewound, &cov
+			score = risk.Assess(entities, nil)
+			if !*quiet {
+				fmt.Fprintln(os.Stderr, cov.Summary())
+				if !cov.Reliable() {
+					fmt.Fprintln(os.Stderr, "Warning: most of this reconstruction rests on records that carry no date, so it is weak evidence about that date.")
+				}
+			}
+		}
+
 		// --exclude/--exclude-file apply before everything else below,
 		// including --diff: unlike --top/--min-weight/--indicator, which
 		// only limit what's *shown*, an excluded indicator is treated as
@@ -1836,7 +1868,7 @@ func runRisk(args []string) {
 			return red
 		}
 
-		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, ReviewedIndicators: reviewedCount, HiddenCorroborations: hiddenCorroborations, SourceHealth: parseSourceHealth(notes), ScreenCoverage: parseScreenCoverage(notes)}
+		report := riskReportJSON{Queries: queries, Entities: entities, Notes: notes, Score: score, HiddenIndicators: hiddenIndicators, ExcludedIndicators: excludedCount, ReviewedIndicators: reviewedCount, HiddenCorroborations: hiddenCorroborations, SourceHealth: parseSourceHealth(notes), ScreenCoverage: parseScreenCoverage(notes), AsOf: asOfCoverage}
 
 		// Applied last, after every filter and after the score is
 		// final: redaction changes how the report READS, never what it

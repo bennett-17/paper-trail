@@ -1527,6 +1527,28 @@ single-company pool, so they are absent by construction.
   - Off by default. It writes third-party data (including personal data
     like officer names and addresses) to disk, which should be a
     deliberate choice and becomes your responsibility to handle.
+- `--as-of <YYYY-MM-DD>` reconstructs the network as it stood on a past
+  date and scores **that**, rather than today. Companies House publishes
+  officer appointment/resignation and PSC notification/cessation dates,
+  so a tenure spanning the target date can be rebuilt from current data
+  -- the officer who has since resigned reappears, and the one appointed
+  last year vanishes. The rewind happens *before* scoring, so every
+  indicator (shared_person, formation_cluster, the clusters and the
+  convergence signals) is computed against the network as it was, not
+  filtered afterwards.
+  - **This is the current register's account of what was true then, not
+    what the register said at the time.** Records get amended and
+    corrected, and a company struck off years ago may not be findable by
+    a present-day name search at all, so the reconstruction is bounded
+    by what the register still publishes today. For a contemporaneous
+    record of what a source actually said when queried, `--evidence-dir`
+    is the mechanism; these answer different questions.
+  - Records carrying **no** date are kept, never dropped -- a person
+    with no tenure cannot be shown to have been *absent*, and treating
+    unknown as absent would manufacture a cleaner past than the data
+    supports. Every run reports how many entities and person-links were
+    undatable, and warns outright when most of the reconstruction rests
+    on them.
 - `--redact` removes personal data before the report is written:
   individual names reduced to initials, partial dates of birth dropped,
   officer service addresses reduced to a postcode district. Every

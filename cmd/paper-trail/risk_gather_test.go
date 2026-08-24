@@ -1572,3 +1572,52 @@ func TestMailDropTierWeightsStayBelowAdjudicatedBand(t *testing.T) {
 		t.Errorf("tiers are not ordered: %d >= %d", mailDropWeight, industrialMailDropWeight)
 	}
 }
+
+// TestFannedOutEntityCarriesTenure guards the fix that makes --as-of
+// meaningful on a real scan. Fan-out entities -- companies discovered
+// through an officer's appointment history -- are the bulk of a large
+// scan, and they were being built with no dates at all. A real
+// reconstruction reported 396 of 411 person-links as undated because of
+// it, which triggered the weak-evidence warning: the feature worked but
+// had almost nothing to work with.
+//
+// The appointment's own dates ARE the tenure of the link between that
+// officer and that company, and they are already in hand, so carrying
+// them costs nothing.
+func TestFannedOutEntityCarriesTenure(t *testing.T) {
+	appt := companieshouse.Appointment{
+		CompanyNumber: "01234567",
+		CompanyName:   "FANNED OUT LTD",
+		AppointedOn:   "2014-03-01",
+		ResignedOn:    "2018-09-30",
+	}
+	e := fannedOutEntity(appt, "Jane Doe")
+
+	if len(e.PersonDetails) != 1 {
+		t.Fatalf("PersonDetails = %+v, want one entry carrying the appointment tenure", e.PersonDetails)
+	}
+	p := e.PersonDetails[0]
+	if p.AppointedOn != "2014-03-01" || p.ResignedOn != "2018-09-30" {
+		t.Errorf("tenure = %s..%s, want 2014-03-01..2018-09-30", p.AppointedOn, p.ResignedOn)
+	}
+	if !p.HasTenure() {
+		t.Error("HasTenure() = false -- this entity would count as undatable in an as-of reconstruction")
+	}
+	// The present-day People list is unchanged in shape.
+	if len(e.People) != 1 || e.People[0] != "Jane Doe" {
+		t.Errorf("People = %v, want the officer name", e.People)
+	}
+
+	// And it must actually reconstruct: present in 2016, absent in 2020.
+	in, _ := risk.AsOf([]risk.Entity{e}, time.Date(2016, 6, 1, 0, 0, 0, 0, time.UTC))
+	if len(in) != 1 || len(in[0].People) != 1 {
+		t.Errorf("2016 reconstruction = %+v, want the officer present", in)
+	}
+	out, cov := risk.AsOf([]risk.Entity{e}, time.Date(2020, 6, 1, 0, 0, 0, 0, time.UTC))
+	if len(out) == 1 && len(out[0].People) != 0 {
+		t.Errorf("2020 reconstruction = %+v, want the officer gone (resigned 2018)", out[0].People)
+	}
+	if cov.PeopleUndatable != 0 {
+		t.Errorf("PeopleUndatable = %d, want 0 -- the whole point is that this link is datable", cov.PeopleUndatable)
+	}
+}

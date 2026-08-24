@@ -27,8 +27,16 @@ import (
 )
 
 // cacheVersion guards against loading a cache file written by an
-// incompatible future format; bump it if the value shape ever changes.
-const cacheVersion = 1
+// incompatible format; bump it whenever risk.Entity's shape changes.
+//
+// Bumped to 2 when Person gained tenure (AppointedOn/ResignedOn) and
+// PersonDetails began carrying former officers as well as current ones.
+// Entities cached under version 1 lack both, and --as-of silently
+// produced a reconstruction resting entirely on undated records when
+// fed them -- the numbers looked plausible and were wrong, which is the
+// failure mode this constant exists to prevent. Caught only because the
+// coverage warning was there to notice it.
+const cacheVersion = 2
 
 type entry struct {
 	Entities []risk.Entity `json:"entities"`

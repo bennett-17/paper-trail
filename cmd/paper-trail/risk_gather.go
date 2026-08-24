@@ -651,18 +651,27 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				note("%s (%s) officers: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
 				for _, o := range officers {
-					if o.ResignedOn == "" { // current officers only
+					// PersonDetails carries the FULL officer history,
+					// current and former alike, with each tenure. People
+					// stays the present-day view. That split is what makes
+					// risk.AsOf possible: reconstructing 2019 needs the
+					// officers who have since resigned, and a
+					// current-only list throws away exactly those.
+					//
+					// Partial DOB and service address ride along here too
+					// -- already in this response -- so same-person checks
+					// can disprove a name collision and officer addresses
+					// can cluster.
+					personDetails = append(personDetails, risk.Person{
+						Name:        o.Name,
+						BirthMonth:  o.BirthMonth,
+						BirthYear:   o.BirthYear,
+						Address:     o.Address.AsSingleLine(),
+						AppointedOn: o.AppointedOn,
+						ResignedOn:  o.ResignedOn,
+					})
+					if o.ResignedOn == "" {
 						people = append(people, o.Name)
-						// Partial DOB and service address are both already
-						// in this response -- carried through so
-						// same-person checks can disprove a name
-						// collision, and so officer addresses can cluster.
-						personDetails = append(personDetails, risk.Person{
-							Name:       o.Name,
-							BirthMonth: o.BirthMonth,
-							BirthYear:  o.BirthYear,
-							Address:    o.Address.AsSingleLine(),
-						})
 						currentOfficers = append(currentOfficers, o)
 					}
 				}
@@ -1454,7 +1463,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 				continue // former appointments, the root company itself, and dupes across officers
 			}
 			fannedOut[appt.CompanyNumber] = true
-			fannedOutEntities = append(fannedOutEntities, risk.NewEntity("companieshouse", appt.CompanyNumber, appt.CompanyName, nil, []string{o.Name}))
+			fannedOutEntities = append(fannedOutEntities, fannedOutEntity(appt, o.Name))
 			hop1Companies = append(hop1Companies, appt)
 		}
 	}
@@ -1488,7 +1497,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 					continue
 				}
 				fannedOut[appt2.CompanyNumber] = true
-				fannedOutEntities = append(fannedOutEntities, risk.NewEntity("companieshouse", appt2.CompanyNumber, appt2.CompanyName, nil, []string{o2.Name}))
+				fannedOutEntities = append(fannedOutEntities, fannedOutEntity(appt2, o2.Name))
 			}
 		}
 	}
@@ -2764,4 +2773,30 @@ func trustControlledPSCIndicators(p companieshouse.PSC, entityLabel string) []ri
 		Entities:    []string{entityLabel},
 		Evidence:    fmt.Sprintf("%s -- %s", p.Name, strings.Join(natures, ", ")),
 	}}
+}
+
+// fannedOutEntity builds an entity discovered through an officer's
+// appointment history, carrying that appointment's OWN dates as the
+// person's tenure.
+//
+// Those dates are already in the appointment record, and discarding
+// them made --as-of far weaker than it looks: a real reconstruction
+// reported 396 of 411 person-links as undated, because fan-out
+// entities are the bulk of a large scan and every one of them arrived
+// with no tenure at all. The link between this officer and this
+// company is precisely the thing a temporal reconstruction needs to
+// know the timing of, and it costs nothing to carry.
+//
+// The company's own formation date is deliberately NOT fetched here:
+// that would be one extra request per fanned-out company, which on a
+// large scan is hundreds. The person-link tenure is the part that
+// matters for reconstructing who was connected to whom, and it is free.
+func fannedOutEntity(appt companieshouse.Appointment, officerName string) risk.Entity {
+	e := risk.NewEntity("companieshouse", appt.CompanyNumber, appt.CompanyName, nil, []string{officerName})
+	e.PersonDetails = []risk.Person{{
+		Name:        officerName,
+		AppointedOn: appt.AppointedOn,
+		ResignedOn:  appt.ResignedOn,
+	}}
+	return e
 }

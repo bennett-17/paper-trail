@@ -1,6 +1,9 @@
 package risk
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Person is what a source knows about a named individual beyond the
 // name itself. Carried alongside Entity.People (which stays a plain
@@ -30,6 +33,43 @@ type Person struct {
 	// agent's office; the latter, shared across many nominally
 	// unrelated companies' officers, is a formation-agent signature.
 	Address string `json:"address,omitempty"`
+
+	// AppointedOn/ResignedOn are this person's tenure at the entity, in
+	// whatever raw format the source returns. ResignedOn is empty for
+	// someone still serving. Only Companies House publishes these.
+	//
+	// They are what makes AsOf possible: without a tenure, a person can
+	// only ever be reported as "linked now", and the question "who
+	// controlled this in 2019?" has no answer. Note that PersonDetails
+	// deliberately carries FORMER officers too, unlike Entity.People
+	// which is the present-day view -- a reconstruction of 2019 needs
+	// the people who have since resigned, who are exactly the ones a
+	// current-officers-only list throws away.
+	AppointedOn string `json:"appointedOn,omitempty"`
+	ResignedOn  string `json:"resignedOn,omitempty"`
+}
+
+// ActiveOn reports whether this person's tenure covers the given date.
+// A person with no appointment date at all is treated as active: the
+// source published no tenure, and silently dropping them would turn
+// "unknown" into "absent", which is a much stronger claim than the data
+// supports. AsOf counts those separately so a report can say so.
+func (p Person) ActiveOn(t time.Time) bool {
+	from, hasFrom := parseFormationDate(p.AppointedOn)
+	if hasFrom && t.Before(from) {
+		return false
+	}
+	until, hasUntil := parseFormationDate(p.ResignedOn)
+	if hasUntil && !t.Before(until) {
+		return false
+	}
+	return true
+}
+
+// HasTenure reports whether this person carries any usable tenure date.
+func (p Person) HasTenure() bool {
+	_, ok := parseFormationDate(p.AppointedOn)
+	return ok
 }
 
 // HasBirthDate reports whether a partial DOB is present at all.
