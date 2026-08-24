@@ -685,15 +685,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 							Evidence:    fmt.Sprintf("%s: flagged sanctioned by Companies House", p.Name),
 						})
 					}
-					if natures := trustControlledNatures(p.NaturesOfControl); len(natures) > 0 {
-						r.extra = append(r.extra, risk.Indicator{
-							Code:        "trust_controlled_psc",
-							Description: "This beneficial owner's control is exercised through a trust rather than directly -- Companies House's own data, not an inference. Trusts are a known technique for obscuring who ultimately benefits from an entity (the disclosed name here is a trustee, not necessarily the person actually benefiting), though trusts are also routine for entirely lawful estate planning, so this is a lead to investigate rather than proof of anything improper",
-							Weight:      2,
-							Entities:    []string{entityLabel},
-							Evidence:    fmt.Sprintf("%s -- %s", p.Name, strings.Join(natures, ", ")),
-						})
-					}
+					r.extra = append(r.extra, trustControlledPSCIndicators(p, entityLabel)...)
 					activePSCs = append(activePSCs, p)
 				}
 			}
@@ -1243,15 +1235,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			// a trust can hold the controlling stake regardless of
 			// whether the disclosed PSC is a person or a company.
 			for _, p := range activePSCs {
-				if natures := trustControlledNatures(p.NaturesOfControl); len(natures) > 0 {
-					r.extra = append(r.extra, risk.Indicator{
-						Code:        "trust_controlled_psc",
-						Description: "This beneficial owner's control is exercised through a trust rather than directly -- Companies House's own data, not an inference. Trusts are a known technique for obscuring who ultimately benefits from an entity (the disclosed name here is a trustee, not necessarily the person actually benefiting), though trusts are also routine for entirely lawful estate planning, so this is a lead to investigate rather than proof of anything improper",
-						Weight:      2,
-						Entities:    []string{e.Label()},
-						Evidence:    fmt.Sprintf("%s -- %s", p.Name, strings.Join(natures, ", ")),
-					})
-				}
+				r.extra = append(r.extra, trustControlledPSCIndicators(p, e.Label())...)
 			}
 			for _, o := range currentOfficers {
 				flagPersonJurisdiction(o.Name, o.Nationality, o.CountryOfResidence)
@@ -2746,11 +2730,38 @@ func mailDropIndicator(count int, postcode, entityLabel string) []risk.Indicator
 	if count < mailDropAddressThreshold {
 		return nil
 	}
+	weight, scale := mailDropWeight, "large shared address"
+	if count >= industrialMailDropThreshold {
+		weight, scale = industrialMailDropWeight, "industrial mail-drop scale"
+	}
 	return []risk.Indicator{{
 		Code:        "mail_drop_address",
-		Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way)",
+		Description: "This entity's postcode is shared by an unusually large number of companies register-wide -- consistent with a company-formation-agent mail-drop address rather than a genuine operating address, not itself evidence of wrongdoing (some legitimate registered-agent services and large office buildings also cluster this way). Scored in two tiers, because measurement showed a single weight could not represent both ends: above the signal threshold the population runs from ~20,000 companies at a postcode to nearly 200,000, and those are not the same finding. The evidence line states the actual count, which is the number to judge on",
+		Weight:      weight,
+		Entities:    []string{entityLabel},
+		Evidence:    fmt.Sprintf("%d companies registered at postcode %s (%s)", count, postcode, scale),
+	}}
+}
+
+// trustControlledPSCIndicators reports a beneficial owner whose control
+// runs through a trust rather than directly -- Companies House's own
+// nature-of-control data, not an inference this project makes.
+//
+// Extracted from two byte-identical copies that differed only in which
+// entity label they used. That is precisely the shape that let
+// mail_drop_address's two copies diverge, and it also blocked
+// `calibrate` from measuring this indicator at all, since there was no
+// function to call.
+func trustControlledPSCIndicators(p companieshouse.PSC, entityLabel string) []risk.Indicator {
+	natures := trustControlledNatures(p.NaturesOfControl)
+	if len(natures) == 0 {
+		return nil
+	}
+	return []risk.Indicator{{
+		Code:        "trust_controlled_psc",
+		Description: "This beneficial owner's control is exercised through a trust rather than directly -- Companies House's own data, not an inference. Trusts are a known technique for obscuring who ultimately benefits from an entity (the disclosed name here is a trustee, not necessarily the person actually benefiting), though trusts are also routine for entirely lawful estate planning, so this is a lead to investigate rather than proof of anything improper",
 		Weight:      2,
 		Entities:    []string{entityLabel},
-		Evidence:    fmt.Sprintf("%d companies registered at postcode %s", count, postcode),
+		Evidence:    fmt.Sprintf("%s -- %s", p.Name, strings.Join(natures, ", ")),
 	}}
 }

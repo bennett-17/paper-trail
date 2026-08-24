@@ -179,6 +179,16 @@ func runCalibrate(args []string) {
 			burstSizes = append(burstSizes, appointmentBurstSize(appts))
 			extra = append(extra, officerAppointmentIndicators(o.Name, appts, total, entity.Label())...)
 		}
+		// PSC-derived indicators: one extra request, now reachable
+		// because trustControlledPSCIndicators exists as a function.
+		if pscs, err := chClient.GetPersonsWithSignificantControl(entity.ID, companyPSCFetchLimit); err == nil {
+			for _, psc := range pscs {
+				if psc.CeasedOn == "" {
+					extra = append(extra, trustControlledPSCIndicators(psc, entity.Label())...)
+				}
+			}
+		}
+
 		score := risk.Assess([]risk.Entity{entity}, extra)
 		seen := map[string]bool{}
 		var codes []string
@@ -209,7 +219,11 @@ func runCalibrate(args []string) {
 			"Skews toward older companies (low numbers were allocated first, and dissolved companies keep " +
 			"their numbers), so this is NOT a uniform sample of active companies. Adequate for separating " +
 			"a common indicator from a rare one; not a population statistic. Cross-entity indicators " +
-			"(shared_address and friends) cannot fire on a single-company pool and are absent by construction.",
+			"(shared_address and friends) cannot fire on a single-company pool and are absent by construction. " +
+			"Measuring THOSE is a different exercise, not an extension of this one: their base rate is a property " +
+			"of a POOL rather than of a company, so it would mean sampling random PAIRS and asking how often two " +
+			"unrelated companies happen to share an address or an officer -- a different sampling design with a " +
+			"different unit of analysis. Reported here as a known gap rather than left looking like an oversight.",
 		Samples: samples,
 	}
 	for code, n := range fired {

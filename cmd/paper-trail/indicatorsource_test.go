@@ -35,7 +35,6 @@ var knownDuplicateIndicatorCodes = map[string]bool{
 	"ownership_loop":                    true,
 	"person_jurisdiction_risk":          true,
 	"sanctions_adjacent_officer_change": true,
-	"trust_controlled_psc":              true,
 }
 
 // indicatorCodeSites parses this package plus internal/risk and returns

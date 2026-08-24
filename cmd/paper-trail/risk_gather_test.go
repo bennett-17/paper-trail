@@ -1522,3 +1522,53 @@ func TestNomineeTierWeightsStayBelowAdjudicatedBand(t *testing.T) {
 		t.Errorf("tiers are not ordered: %d >= %d", massNomineeWeight, industrialNomineeWeight)
 	}
 }
+
+func TestMailDropTiers(t *testing.T) {
+	cases := []struct {
+		count      int
+		wantFires  bool
+		wantWeight int
+		wantScale  string
+	}{
+		{19999, false, 0, ""},
+		{20000, true, mailDropWeight, "large shared address"},
+		{99999, true, mailDropWeight, "large shared address"},
+		{100000, true, industrialMailDropWeight, "industrial mail-drop scale"},
+		{192358, true, industrialMailDropWeight, "industrial mail-drop scale"},
+	}
+	for _, c := range cases {
+		got := mailDropIndicator(c.count, "EC1A 1AA", "companieshouse: X (1)")
+		if !c.wantFires {
+			if len(got) != 0 {
+				t.Errorf("count %d: fired when it should not: %+v", c.count, got)
+			}
+			continue
+		}
+		if len(got) != 1 {
+			t.Errorf("count %d: got %d indicators, want 1", c.count, len(got))
+			continue
+		}
+		if got[0].Weight != c.wantWeight {
+			t.Errorf("count %d: Weight = %d, want %d", c.count, got[0].Weight, c.wantWeight)
+		}
+		if !strings.Contains(got[0].Evidence, c.wantScale) {
+			t.Errorf("count %d: Evidence = %q, want it to name %q", c.count, got[0].Evidence, c.wantScale)
+		}
+		// The raw count is what a reader judges on and must always show.
+		if !strings.Contains(got[0].Evidence, fmt.Sprintf("%d companies", c.count)) {
+			t.Errorf("count %d: Evidence = %q, want the raw count stated", c.count, got[0].Evidence)
+		}
+	}
+}
+
+// TestMailDropTierWeightsStayBelowAdjudicatedBand mirrors the nominee
+// guard: running a registered-office service is lawful at any scale.
+func TestMailDropTierWeightsStayBelowAdjudicatedBand(t *testing.T) {
+	if industrialMailDropWeight >= confirmedFactWeight {
+		t.Errorf("industrialMailDropWeight = %d reaches the adjudicated-fact band (%d)",
+			industrialMailDropWeight, confirmedFactWeight)
+	}
+	if mailDropWeight >= industrialMailDropWeight {
+		t.Errorf("tiers are not ordered: %d >= %d", mailDropWeight, industrialMailDropWeight)
+	}
+}

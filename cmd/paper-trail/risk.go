@@ -55,6 +55,35 @@ import (
 // order of magnitude, not precision-tuned.
 const mailDropAddressThreshold = 20000
 
+// industrialMailDropThreshold separates a large shared address from a
+// formation-agent operation at industrial scale, the same two-tier
+// treatment mass_nominee_officer uses and for the same reason: a
+// postcode shared by 20,000 companies and one shared by 190,000 are not
+// the same finding, and scoring them identically wastes the difference.
+//
+// Measured across 2,467 randomly sampled companies. Above the 20,000
+// signal threshold (5.6% of companies) the distribution is:
+//
+//	p25  27,890    p75 192,358
+//	p50 116,302    max 197,572
+//
+// 100,000 is the top of a flat region -- 75,000 and 100,000 both flag
+// 3.4% of all companies, so nothing sits between them -- and above it
+// the count drops away to 1.5% by 150,000. It also sits just below the
+// above-threshold median, so the upper tier is genuinely the larger
+// half of that population rather than a sliver.
+const industrialMailDropThreshold = 100000
+
+// mailDropWeight and industrialMailDropWeight mirror the nominee tiers:
+// neither reaches the 5+ adjudicated band, because operating a
+// registered-office service is lawful and this remains a structural
+// observation rather than a regulator's finding. Scale strengthens the
+// observation; it is not evidence of wrongdoing.
+const (
+	mailDropWeight           = 2
+	industrialMailDropWeight = 3
+)
+
 // fewTrusteesThreshold is how few trustees a charity can have before
 // few_trustees fires. UK charity governance guidance (the Charity
 // Commission's own CC3 guidance) generally recommends a minimum of
