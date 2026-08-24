@@ -373,7 +373,14 @@ code, just a different final render target.
 - **mail_drop_address**: each UK charity's own registered postcode
   (and, for a direct Companies House hit, the company's own postcode)
   is checked against Companies House's advanced search for how many
-  companies register-wide share it -- fires when that count is
+  companies register-wide share it. **Two tiers, both measured**:
+  20,000+ companies at the postcode scores 2 ("large shared address"),
+  100,000+ scores 3 ("industrial mail-drop scale"). Across 2,467
+  randomly sampled companies the tiers split 2.2% / 3.4%; above the
+  signal threshold the population runs from ~20,000 to nearly 200,000
+  companies at one postcode, which are not the same finding. Neither
+  tier reaches the adjudicated band -- running a registered-office
+  service is lawful at any scale. Fires when the count is
   unusually high, consistent with a company-formation-agent mail-drop
   address rather than a genuine operating address (confirmed live: a
   known mail-drop address had roughly 190,000 companies registered at
