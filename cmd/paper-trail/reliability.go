@@ -269,4 +269,10 @@ var fastModeSkipSources = map[string]bool{
 	"UK sanctions screen (officer fan-out)": true,
 	"UK sanctions screen (PSC)":             true,
 	"Companies House filing history":        true,
+	// One extra request per company each. Exemptions is additionally
+	// self-limiting -- it only runs on a company that already has
+	// outstanding charges and a "no PSC identified" statement -- but
+	// --fast means fewest requests, so it is skipped there too.
+	"Companies House UK establishments": true,
+	"Companies House exemptions":        true,
 }

@@ -909,3 +909,47 @@ func TestGetOfficerAppointmentsFirstPageFailureIsAnError(t *testing.T) {
 		t.Error("expected an error when the very first page fails")
 	}
 }
+
+// TestGetPersonsWithSignificantControlDateOfBirth pins the partial-DOB
+// parsing against the exact response shape a real company returned:
+// individual PSCs carry {"month":..,"year":..}, the corporate PSC on the
+// same company carries null. Beneficial owners were previously matched
+// on name alone, so this field is the only thing that can disprove a
+// name collision between two of them -- and a corporate PSC must land as
+// zeroes rather than as a spurious month/year that would then "conflict"
+// with every individual it is compared against.
+func TestGetPersonsWithSignificantControlDateOfBirth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[
+			{"name":"Acme Holdings Ltd","kind":"corporate-entity-person-with-significant-control","notified_on":"2019-05-15","ceased_on":"2021-03-25"},
+			{"name":"Mr A Example","kind":"individual-person-with-significant-control","nationality":"British","notified_on":"2019-05-15","date_of_birth":{"month":12,"year":1987}},
+			{"kind":"persons-with-significant-control-statement","statement":"no-individual-or-entity-with-signficant-control"}
+		]}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, APIKey: "k", HTTPClient: srv.Client()}
+	pscs, err := c.GetPersonsWithSignificantControl("00000001", 10)
+	if err != nil {
+		t.Fatalf("GetPersonsWithSignificantControl: %v", err)
+	}
+	if len(pscs) != 2 {
+		t.Fatalf("got %d PSCs, want 2 (the unnamed statement row is not a PSC)", len(pscs))
+	}
+
+	corporate := pscs[0]
+	if corporate.BirthMonth != 0 || corporate.BirthYear != 0 {
+		t.Errorf("corporate PSC DOB = %d/%d, want 0/0 -- a company has no date of birth and a fabricated one would falsely conflict with every individual it is compared against", corporate.BirthMonth, corporate.BirthYear)
+	}
+	if corporate.CeasedOn != "2021-03-25" {
+		t.Errorf("corporate PSC CeasedOn = %q, want 2021-03-25 -- ceased tenure is what --as-of needs to reconstruct an earlier date", corporate.CeasedOn)
+	}
+
+	individual := pscs[1]
+	if individual.BirthMonth != 12 || individual.BirthYear != 1987 {
+		t.Errorf("individual PSC DOB = %d/%d, want 12/1987", individual.BirthMonth, individual.BirthYear)
+	}
+	if individual.NotifiedOn != "2019-05-15" {
+		t.Errorf("individual PSC NotifiedOn = %q, want 2019-05-15", individual.NotifiedOn)
+	}
+}

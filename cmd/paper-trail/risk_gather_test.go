@@ -988,7 +988,7 @@ func TestPSCOpacityIndicatorsFlagsActiveStatementWithCharges(t *testing.T) {
 	statements := []companieshouse.PSCStatement{
 		{Statement: companieshouse.NoSignificantControlStatement, NotifiedOn: "2017-01-14"},
 	}
-	got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (NI017574)")
+	got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (NI017574)", nil)
 	if len(got) != 1 {
 		t.Fatalf("got %d indicators, want 1: %+v", len(got), got)
 	}
@@ -1004,7 +1004,7 @@ func TestPSCOpacityIndicatorsRequiresOutstandingCharges(t *testing.T) {
 	statements := []companieshouse.PSCStatement{
 		{Statement: companieshouse.NoSignificantControlStatement, NotifiedOn: "2017-01-14"},
 	}
-	if got := pscOpacityIndicators(statements, 0, "companieshouse: Example Ltd (1)"); len(got) != 0 {
+	if got := pscOpacityIndicators(statements, 0, "companieshouse: Example Ltd (1)", nil); len(got) != 0 {
 		t.Errorf("got %d indicators, want 0 (no outstanding charges at all)", len(got))
 	}
 }
@@ -1013,7 +1013,7 @@ func TestPSCOpacityIndicatorsIgnoresCeasedStatement(t *testing.T) {
 	statements := []companieshouse.PSCStatement{
 		{Statement: companieshouse.NoSignificantControlStatement, NotifiedOn: "2017-01-14", CeasedOn: "2020-01-01"},
 	}
-	if got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (1)"); len(got) != 0 {
+	if got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (1)", nil); len(got) != 0 {
 		t.Errorf("got %d indicators, want 0 (statement is no longer active)", len(got))
 	}
 }
@@ -1022,7 +1022,7 @@ func TestPSCOpacityIndicatorsIgnoresOtherStatementTypes(t *testing.T) {
 	statements := []companieshouse.PSCStatement{
 		{Statement: "psc-exists-but-not-identified", NotifiedOn: "2017-01-14"},
 	}
-	if got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (1)"); len(got) != 0 {
+	if got := pscOpacityIndicators(statements, 4, "companieshouse: Example Ltd (1)", nil); len(got) != 0 {
 		t.Errorf("got %d indicators, want 0 (a different statement type, not \"no PSC at all\")", len(got))
 	}
 }
@@ -1619,5 +1619,113 @@ func TestFannedOutEntityCarriesTenure(t *testing.T) {
 	}
 	if cov.PeopleUndatable != 0 {
 		t.Errorf("PeopleUndatable = %d, want 0 -- the whole point is that this link is datable", cov.PeopleUndatable)
+	}
+}
+
+// TestPSCOpacityExemptionSuppression pins the false-positive fix. A
+// company admitted to a regulated market is exempt from the PSC regime
+// because its ownership is already public through market disclosure
+// rules, so "no person with significant control identified" is the
+// filing the law requires of it. The tool used to read that as opacity
+// because it had no way to see the exemption.
+//
+// The two negative cases matter as much as the positive one: a LAPSED
+// PSC exemption explains nothing about today's filing, and the other
+// disclosure exemptions Companies House reports from the same endpoint
+// are unrelated reporting rules. Accepting either would excuse opacity
+// that has no excuse, which is the opposite of the accuracy this fix is
+// meant to buy.
+func TestPSCOpacityExemptionSuppression(t *testing.T) {
+	statements := []companieshouse.PSCStatement{
+		{Statement: companieshouse.NoSignificantControlStatement, NotifiedOn: "2017-06-07"},
+	}
+	const label = "companieshouse: Example PLC (00445790)"
+
+	tests := []struct {
+		name       string
+		exemptions []companieshouse.Exemption
+		want       int
+	}{
+		{
+			name: "live PSC exemption suppresses",
+			// The exact shape a real listed company returned.
+			exemptions: []companieshouse.Exemption{
+				{Type: "psc-exempt-as-trading-on-uk-regulated-market", ExemptFrom: "2018-06-18"},
+			},
+			want: 0,
+		},
+		{
+			name: "lapsed PSC exemption does not suppress",
+			exemptions: []companieshouse.Exemption{
+				{Type: "psc-exempt-as-trading-on-uk-regulated-market", ExemptFrom: "2018-06-18", ExemptTo: "2023-02-02"},
+			},
+			want: 1,
+		},
+		{
+			name: "unrelated disclosure exemption does not suppress",
+			exemptions: []companieshouse.Exemption{
+				{Type: "disclosure-transparency-rules-chapter-five-applies", ExemptFrom: "2017-06-07"},
+			},
+			want: 1,
+		},
+		{
+			name:       "no exemptions at all",
+			exemptions: nil,
+			want:       1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pscOpacityIndicators(statements, 4, label, tt.exemptions)
+			if len(got) != tt.want {
+				t.Errorf("got %d psc_opacity_with_active_charges indicator(s), want %d", len(got), tt.want)
+			}
+		})
+	}
+}
+
+// TestCoLocatedEntities pins the two properties that make co-located
+// records safe to inject at all.
+//
+// The density gate is the first: at a mail-drop postcode these records
+// are thousands of unrelated companies, and injecting them would bury
+// the report. The second is subtler and matters more -- the entities
+// must carry NO address. They were selected BECAUSE they share one, so
+// letting an address-based check fire on them would report the query
+// back as a discovery.
+func TestCoLocatedEntities(t *testing.T) {
+	companies := []companieshouse.LocatedCompany{
+		{Name: "Target Ltd", Number: "00000001", CreatedOn: "2011-01-05"},
+		{Name: "Neighbour Ltd", Number: "00000002", CreatedOn: "2012-03-09", CessatedOn: "2014-08-01"},
+		{Name: "Other Ltd", Number: "00000003", CreatedOn: "2013-06-30"},
+	}
+
+	got := coLocatedEntities(4, companies, "00000001")
+	if len(got) != 2 {
+		t.Fatalf("got %d entities, want 2 (the target's own record must not be duplicated)", len(got))
+	}
+	for _, e := range got {
+		if len(e.Addresses) != 0 {
+			t.Errorf("%s carries addresses %v -- co-located entities must carry none, or every address check fires on them by construction and reports the selection criterion as a finding", e.Name, e.Addresses)
+		}
+		if e.ID == "00000001" {
+			t.Errorf("target company %s was not excluded", e.ID)
+		}
+	}
+	// Formation and cessation dates are kept: unlike the address, they
+	// are independent evidence, and lifespan analysis needs the pair.
+	if got[0].DissolvedOn != "2014-08-01" || got[0].FormedOn != "2012-03-09" {
+		t.Errorf("formation/cessation dates = %q/%q, want 2012-03-09/2014-08-01", got[0].FormedOn, got[0].DissolvedOn)
+	}
+
+	if over := coLocatedEntities(coLocatedDensityLimit+1, companies, ""); over != nil {
+		t.Errorf("got %d entities just above the density limit, want none -- the gate is what keeps a mail-drop postcode from injecting thousands of unrelated companies", len(over))
+	}
+	if at := coLocatedEntities(coLocatedDensityLimit, companies, ""); len(at) != 3 {
+		t.Errorf("got %d entities exactly at the density limit, want 3 -- the limit is inclusive", len(at))
+	}
+	if zero := coLocatedEntities(0, companies, ""); zero != nil {
+		t.Errorf("got %d entities at zero density, want none", len(zero))
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -617,6 +618,19 @@ type PSC struct {
 	// the significant control) has no nationality at all.
 	Nationality        string `json:"nationality,omitempty"`
 	CountryOfResidence string `json:"countryOfResidence,omitempty"`
+	// BirthMonth/BirthYear are the same PARTIAL date of birth Companies
+	// House publishes for officers -- month and year, never the day.
+	// Both zero for a corporate PSC, which has no date of birth at all
+	// (confirmed live on a real company carrying both kinds: the
+	// individual PSCs returned {"month":12,"year":1987} and
+	// {"month":8,"year":1990}, the corporate one returned null).
+	//
+	// Carried for the same reason officers carry it: a matching partial
+	// DOB cannot prove two same-named records are one person, but a
+	// mismatch is solid evidence they are not, and beneficial owners
+	// previously had none of that protection.
+	BirthMonth int `json:"birthMonth,omitempty"`
+	BirthYear  int `json:"birthYear,omitempty"`
 	// CorporateRegistrationNumber and CorporateCountryRegistered are
 	// both confirmed live on a real corporate PSC record (e.g. Tesco
 	// Stores Limited's PSC, Tesco Holdings Limited, exposes its own
@@ -638,14 +652,15 @@ type PSC struct {
 
 type pscResponse struct {
 	Items []struct {
-		Name               string   `json:"name"`
-		Kind               string   `json:"kind"`
-		NaturesOfControl   []string `json:"natures_of_control"`
-		NotifiedOn         string   `json:"notified_on"`
-		CeasedOn           string   `json:"ceased_on"`
-		Nationality        string   `json:"nationality"`
-		CountryOfResidence string   `json:"country_of_residence"`
-		IsSanctioned       bool     `json:"is_sanctioned"`
+		Name               string          `json:"name"`
+		Kind               string          `json:"kind"`
+		NaturesOfControl   []string        `json:"natures_of_control"`
+		NotifiedOn         string          `json:"notified_on"`
+		CeasedOn           string          `json:"ceased_on"`
+		Nationality        string          `json:"nationality"`
+		CountryOfResidence string          `json:"country_of_residence"`
+		IsSanctioned       bool            `json:"is_sanctioned"`
+		DateOfBirth        *dateOfBirthRaw `json:"date_of_birth"`
 		Identification     struct {
 			RegistrationNumber string `json:"registration_number"`
 			CountryRegistered  string `json:"country_registered"`
@@ -689,6 +704,8 @@ func (c *Client) GetPersonsWithSignificantControl(number string, limit int) ([]P
 			Nationality:                 item.Nationality,
 			CountryOfResidence:          item.CountryOfResidence,
 			IsSanctioned:                item.IsSanctioned,
+			BirthMonth:                  pscBirthMonth(item.DateOfBirth),
+			BirthYear:                   pscBirthYear(item.DateOfBirth),
 			CorporateRegistrationNumber: item.Identification.RegistrationNumber,
 			CorporateCountryRegistered:  item.Identification.CountryRegistered,
 		})
@@ -994,36 +1011,91 @@ func (c *Client) GetCharges(number string, limit int) ([]Charge, error) {
 // (confirmed live: the API 404s rather than returning a clean empty
 // result, unlike its own /search/companies endpoint).
 func (c *Client) CountCompaniesAtLocation(location string) (int, error) {
+	count, _, err := c.CompaniesAtLocation(location, 0)
+	return count, err
+}
+
+// LocatedCompany is one company registered at a searched location.
+type LocatedCompany struct {
+	Name       string `json:"name"`
+	Number     string `json:"number"`
+	Status     string `json:"status,omitempty"`
+	CreatedOn  string `json:"createdOn,omitempty"`
+	CessatedOn string `json:"cessatedOn,omitempty"`
+}
+
+// CompaniesAtLocation returns how many companies are registered at a
+// location and, when maxRecords is greater than zero, up to that many
+// of the actual company records.
+//
+// The count and the records come from the SAME request -- the advanced
+// search response always carried the matching records, and
+// CountCompaniesAtLocation was throwing them away to read a single
+// integer. So the tool knew "20,000 companies share this postcode"
+// while discarding WHICH companies. Asking for records costs no extra
+// request, only a larger response body.
+//
+// Callers must decide whether records are meaningful at the returned
+// density before using them -- see the caller for why that judgement
+// cannot live here.
+func (c *Client) CompaniesAtLocation(location string, maxRecords int) (int, []LocatedCompany, error) {
+	size := "1" // the count alone needs exactly one row, not zero
+	if maxRecords > 0 {
+		size = strconv.Itoa(maxRecords)
+	}
 	u := c.BaseURL + "/advanced-search/companies?" + url.Values{
 		"location": {location},
-		"size":     {"1"}, // only the total count is needed, not the matches themselves
+		"size":     {size},
 	}.Encode()
 
 	status, body, err := c.doGetWithRetry(u)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	switch {
 	case status >= 200 && status < 300:
 		// fall through to parse below
 	case status == http.StatusNotFound:
-		return 0, nil
+		return 0, nil, nil
 	case status == http.StatusUnauthorized:
-		return 0, newClientError(
+		return 0, nil, newClientError(
 			"Companies House API returned 401 Unauthorized for %s -- check that "+
 				"COMPANIES_HOUSE_API_KEY is a valid, active REST key", u,
 		)
 	default:
-		return 0, newClientError("Companies House API returned HTTP %d for %s", status, u)
+		return 0, nil, newClientError("Companies House API returned HTTP %d for %s", status, u)
 	}
 
 	var resp struct {
-		Hits int `json:"hits"`
+		Hits  int `json:"hits"`
+		Items []struct {
+			CompanyName     string `json:"company_name"`
+			CompanyNumber   string `json:"company_number"`
+			CompanyStatus   string `json:"company_status"`
+			DateOfCreation  string `json:"date_of_creation"`
+			DateOfCessation string `json:"date_of_cessation"`
+		} `json:"items"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return 0, newClientError("parsing advanced search results: %v", err)
+		return 0, nil, newClientError("parsing advanced search results: %v", err)
 	}
-	return resp.Hits, nil
+	if maxRecords <= 0 {
+		return resp.Hits, nil, nil
+	}
+	out := make([]LocatedCompany, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		if it.CompanyNumber == "" {
+			continue
+		}
+		out = append(out, LocatedCompany{
+			Name:       it.CompanyName,
+			Number:     it.CompanyNumber,
+			Status:     it.CompanyStatus,
+			CreatedOn:  it.DateOfCreation,
+			CessatedOn: it.DateOfCessation,
+		})
+	}
+	return resp.Hits, out, nil
 }
 
 // Appointment is one company appointment held by a single officer,
@@ -1218,4 +1290,179 @@ func (f Filing) AccountsType() string {
 // filing.
 func (f Filing) IsDormantAccounts() bool {
 	return strings.Contains(f.AccountsType(), "dormant")
+}
+
+// pscBirthMonth and pscBirthYear read Companies House's partial DOB off
+// a PSC record. Both return 0 when absent, which is the common case:
+// corporate PSCs have no date of birth at all, and the zero value is
+// what risk.Person already treats as "unknown" rather than as a real
+// month or year to compare against.
+func pscBirthMonth(dob *dateOfBirthRaw) int {
+	if dob == nil {
+		return 0
+	}
+	return dob.Month
+}
+
+func pscBirthYear(dob *dateOfBirthRaw) int {
+	if dob == nil {
+		return 0
+	}
+	return dob.Year
+}
+
+// Exemption is one Companies House exemption record: a period during
+// which a company was excused from part of the disclosure regime.
+type Exemption struct {
+	// Type is Companies House's own exemption_type value, e.g.
+	// "psc-exempt-as-trading-on-uk-regulated-market".
+	Type string `json:"type"`
+	// ExemptFrom and ExemptTo bound the period. ExemptTo is empty while
+	// the exemption is still in force, which is the case that matters:
+	// an expired exemption does not explain a missing PSC today.
+	ExemptFrom string `json:"exemptFrom,omitempty"`
+	ExemptTo   string `json:"exemptTo,omitempty"`
+}
+
+// PSCExemptionTypes are the exemption types that actually excuse a
+// company from keeping a PSC register, as opposed to the other
+// disclosure exemptions the same endpoint reports. Only these explain
+// an absent beneficial owner; the rest are unrelated reporting rules
+// and treating them as an explanation would excuse opacity that has no
+// excuse.
+var PSCExemptionTypes = map[string]bool{
+	"psc-exempt-as-trading-on-regulated-market":        true,
+	"psc-exempt-as-trading-on-uk-regulated-market":     true,
+	"psc-exempt-as-shares-admitted-on-market":          true,
+	"psc-exempt-as-trading-on-eu-regulated-market":     true,
+	"psc-exempt-as-trading-on-uk-eea-regulated-market": true,
+}
+
+// IsActive reports whether the exemption is still in force. An
+// exemption with an end date has lapsed and explains nothing about the
+// company's disclosure position today.
+func (e Exemption) IsActive() bool { return e.ExemptTo == "" }
+
+// GetExemptions returns the company's disclosure exemption records.
+//
+// This is the answer to a question the tool previously had to infer.
+// psc_opacity_with_active_charges fires on "no person with significant
+// control identified", which reads as evasion but is the correct and
+// mandatory filing for a company listed on a regulated market -- such a
+// company is exempt from the PSC regime precisely because its ownership
+// is already public through market disclosure rules. Companies House
+// publishes that exemption directly, so the tool can stop treating a
+// legally required filing as a red flag.
+//
+// A company with no exemptions returns HTTP 404, which is not an error
+// here: it is the overwhelmingly common case (verified live -- none of
+// 40 sampled active companies had one, while every large listed company
+// checked did). Callers get an empty slice and a nil error.
+func (c *Client) GetExemptions(companyNumber string) ([]Exemption, error) {
+	u := c.BaseURL + "/company/" + url.PathEscape(companyNumber) + "/exemptions"
+	status, body, err := c.doGetWithRetry(u)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("Companies House API returned HTTP %d fetching exemptions for %s", status, companyNumber)
+	}
+
+	var resp struct {
+		Exemptions map[string]struct {
+			ExemptionType string `json:"exemption_type"`
+			Items         []struct {
+				ExemptFrom string `json:"exempt_from"`
+				ExemptTo   string `json:"exempt_to"`
+			} `json:"items"`
+		} `json:"exemptions"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing Companies House exemptions response: %v", err)
+	}
+
+	var out []Exemption
+	for key, ex := range resp.Exemptions {
+		// exemption_type is the canonical hyphenated value; the map key
+		// is the same thing underscored. Prefer the field, fall back to
+		// the key so an unfamiliar record still carries a usable type.
+		typ := ex.ExemptionType
+		if typ == "" {
+			typ = strings.ReplaceAll(key, "_", "-")
+		}
+		for _, item := range ex.Items {
+			out = append(out, Exemption{Type: typ, ExemptFrom: item.ExemptFrom, ExemptTo: item.ExemptTo})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		return out[i].ExemptFrom < out[j].ExemptFrom
+	})
+	return out, nil
+}
+
+// UKEstablishment is a UK branch of an overseas company -- a BR-numbered
+// registration attached to an SF-numbered oversea-company parent.
+type UKEstablishment struct {
+	Name     string `json:"name"`
+	Number   string `json:"number"`
+	Status   string `json:"status,omitempty"`
+	Locality string `json:"locality,omitempty"`
+}
+
+// GetUKEstablishments returns the UK branches registered under an
+// overseas company.
+//
+// These are entities the name search will not reliably surface on its
+// own -- a branch shares its parent's name but has a separate BR
+// company number and its own registered locality -- and they are the
+// concrete UK footprint of an entity the tool otherwise knows only as
+// "overseas". As with exemptions, HTTP 404 means "none", which is the
+// common case for any company that is not an oversea-company.
+func (c *Client) GetUKEstablishments(companyNumber string, limit int) ([]UKEstablishment, error) {
+	u := c.BaseURL + "/company/" + url.PathEscape(companyNumber) + "/uk-establishments"
+	status, body, err := c.doGetWithRetry(u)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("Companies House API returned HTTP %d fetching UK establishments for %s", status, companyNumber)
+	}
+
+	var resp struct {
+		Items []struct {
+			CompanyName   string `json:"company_name"`
+			CompanyNumber string `json:"company_number"`
+			CompanyStatus string `json:"company_status"`
+			Locality      string `json:"locality"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing Companies House UK establishments response: %v", err)
+	}
+
+	out := make([]UKEstablishment, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		if item.CompanyNumber == "" || item.CompanyNumber == companyNumber {
+			continue // an empty row, or the parent listing itself
+		}
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		out = append(out, UKEstablishment{
+			Name:     item.CompanyName,
+			Number:   item.CompanyNumber,
+			Status:   item.CompanyStatus,
+			Locality: item.Locality,
+		})
+	}
+	return out, nil
 }

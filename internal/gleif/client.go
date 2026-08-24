@@ -272,6 +272,69 @@ func (c *Client) UltimateParent(lei string) (*Record, error) {
 	return c.fetchRelationship(lei, "ultimate-parent")
 }
 
+// DirectChildren fetches the entities that report lei as their DIRECT
+// parent -- the level immediately beneath it in the ownership tree.
+//
+// This is the mirror of DirectParent, and its absence was a structural
+// blind spot rather than a missing convenience: this project walked
+// ownership only upward, so a scan of a group parent discovered none of
+// its subsidiaries, even though GLEIF names them directly, for free and
+// keylessly. Confirmed live: TESCO PLC reports 32 direct children,
+// BARCLAYS PLC 24.
+//
+// Unlike the parent lookups this returns a LIST and is paginated, so
+// limit matters: a large group has hundreds of children and pulling
+// all of them would swamp both the request budget and the report.
+// Callers should bound it deliberately.
+func (c *Client) DirectChildren(lei string, limit int) ([]Record, error) {
+	return c.fetchRelatedRecords(lei, "direct-children", limit)
+}
+
+// UltimateChildren fetches every entity anywhere beneath lei that
+// reports it as their ULTIMATE parent -- the whole tree flattened,
+// resolved server-side by GLEIF.
+//
+// Far broader than DirectChildren and correspondingly more likely to
+// dominate a report, so it is deliberately not what the gatherer
+// reaches for by default: one level down is an explainable boundary,
+// "every entity in the group" is a different kind of claim.
+func (c *Client) UltimateChildren(lei string, limit int) ([]Record, error) {
+	return c.fetchRelatedRecords(lei, "ultimate-children", limit)
+}
+
+// fetchRelatedRecords fetches a paginated list-shaped relationship. A
+// 404 means the relationship simply isn't reported, which is ordinary
+// rather than an error -- the same treatment fetchRelationship gives
+// the parent lookups.
+func (c *Client) fetchRelatedRecords(lei, relationship string, limit int) ([]Record, error) {
+	u := c.BaseURL + "/lei-records/" + url.PathEscape(lei) + "/" + relationship
+	if limit > 0 {
+		params := url.Values{}
+		params.Set("page[size]", strconv.Itoa(limit))
+		u += "?" + params.Encode()
+	}
+	status, body, err := c.get(u)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, newClientError("GLEIF API returned HTTP %d fetching %s for %s", status, relationship, lei)
+	}
+
+	var resp leiRecordListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, newClientError("parsing GLEIF %s response: %v", relationship, err)
+	}
+	records := make([]Record, 0, len(resp.Data))
+	for _, d := range resp.Data {
+		records = append(records, d.toRecord())
+	}
+	return records, nil
+}
+
 // ReportingException is GLEIF's own explanation for why an entity has
 // no reported parent at a given level -- distinct from simply getting
 // (nil, nil) back from DirectParent/UltimateParent, which only says a

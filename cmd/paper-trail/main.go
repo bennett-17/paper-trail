@@ -407,7 +407,13 @@ against. A psc_opacity_with_active_charges indicator fires when an
 active "no individual or entity with significant control has been
 identified" statement (Companies House's own wording) coincides with
 at least one live charge -- officially nobody controls the company,
-yet it's still borrowing against real assets. Confirmed live against a
+yet it's still borrowing against real assets. Suppressed when
+Companies House reports a live PSC exemption: a company admitted to a
+regulated market is exempt from the PSC regime because its ownership
+is already public, so that statement is the filing the law requires of
+it rather than concealment. For an overseas company, UK branches are
+also pulled from /uk-establishments -- a branch carries its parent's
+name but a separate BR number, so a name search never finds it. Confirmed live against a
 real example (Northern Ireland Association of Citizens Advice Bureaux
 Limited, NI017574: this exact statement alongside 4 outstanding
 mortgage charges) that this combination is entirely routine and

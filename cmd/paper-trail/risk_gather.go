@@ -498,6 +498,35 @@ func gatherGLEIFEntities(queries []string, limit int, cache *riskcache.Cache, ca
 			e := risk.NewEntity("gleif", rec.LEI, rec.Name, addrs, nil)
 			e.FormedOn = rec.CreationDate
 
+			// Subsidiaries: GLEIF names the entities that report this one
+			// as their direct parent. Walking ownership only upward left
+			// a scan of a group parent blind to its entire corporate
+			// tree, even though GLEIF publishes it directly and keylessly
+			// (confirmed live: TESCO PLC reports 32 direct children).
+			//
+			// One level only, and bounded. "Every entity in the group" is
+			// a different and much broader claim than "the companies
+			// directly beneath this one", and an unbounded walk of a
+			// large group would swamp both the request budget and the
+			// report.
+			if children, err := gleifClient.DirectChildren(rec.LEI, gleifChildrenFetchLimit); err != nil {
+				note("%s subsidiaries: %v", rec.Name, err)
+			} else {
+				for _, child := range children {
+					var childAddrs []string
+					if line := child.LegalAddress.AsSingleLine(); line != "" {
+						childAddrs = append(childAddrs, line)
+					}
+					ce := risk.NewEntity("gleif", child.LEI, child.Name, childAddrs, nil)
+					ce.FormedOn = child.CreationDate
+					// The parent link is a fact GLEIF states outright, so
+					// it feeds SharedUltimateParent exactly as a
+					// self-reported parent does.
+					ce.UltimateParentID = fmt.Sprintf("%s (%s)", rec.Name, rec.LEI)
+					r.entities = append(r.entities, ce)
+				}
+			}
+
 			if rec.Jurisdiction != "" {
 				parent, err := gleifClient.UltimateParent(rec.LEI)
 				if err != nil {
@@ -681,6 +710,29 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				note("%s (%s) beneficial owners: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
 				for _, p := range pscs {
+					// Recorded for EVERY PSC including ceased ones, and
+					// before the active-only filter below, for the same
+					// reason officers are: --as-of reconstructing 2019
+					// needs the beneficial owners who have since ceased,
+					// and an active-only list discards exactly those.
+					//
+					// The partial DOB is why this is worth doing at all.
+					// Beneficial owners were matched on name alone, so
+					// two unrelated people sharing a common name merged
+					// into one node. Companies House publishes month and
+					// year of birth on individual PSC records (verified
+					// live), which cannot confirm two records are one
+					// person but can disprove it outright -- the same
+					// protection officers have had and PSCs did not.
+					// Corporate PSCs carry no DOB and land as zeroes,
+					// which risk.Person already reads as "unknown".
+					personDetails = append(personDetails, risk.Person{
+						Name:        p.Name,
+						BirthMonth:  p.BirthMonth,
+						BirthYear:   p.BirthYear,
+						AppointedOn: p.NotifiedOn,
+						ResignedOn:  p.CeasedOn,
+					})
 					if p.CeasedOn != "" {
 						continue // active beneficial owners only
 					}
@@ -715,7 +767,25 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				if err != nil {
 					note("%s (%s) PSC statements: %v", hit.Name, hit.CompanyNumber, err)
 				}
-				r.extra = append(r.extra, pscOpacityIndicators(statements, outstandingCharges, entityLabel)...)
+				// An active PSC exemption is the regulator's own answer
+				// to the question this indicator asks. A company
+				// admitted to a regulated market is exempt from the PSC
+				// regime because its ownership is already public
+				// through market disclosure rules, so filing "no person
+				// with significant control identified" is the correct
+				// and required filing rather than evasion. Firing an
+				// opacity flag on it is a false positive the tool used
+				// to have no way to see. One extra request, and only on
+				// companies that already tripped the outstanding-charge
+				// condition, so it costs nothing on the common path.
+				var exemptions []companieshouse.Exemption
+				if filter.allows("Companies House exemptions") {
+					exemptions, err = chClient.GetExemptions(hit.CompanyNumber)
+					if err != nil {
+						note("%s (%s) exemptions: %v", hit.Name, hit.CompanyNumber, err)
+					}
+				}
+				r.extra = append(r.extra, pscOpacityIndicators(statements, outstandingCharges, entityLabel, exemptions)...)
 			}
 
 			// Captured out of the profile block below so they survive to
@@ -748,10 +818,13 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 					r.extra = append(r.extra, *ind)
 				}
 				if company.RegisteredOffice.PostalCode != "" {
-					if count, err := chClient.CountCompaniesAtLocation(company.RegisteredOffice.PostalCode); err != nil {
+					postcode := company.RegisteredOffice.PostalCode
+					count, colocated, err := chClient.CompaniesAtLocation(postcode, coLocatedFetchLimit)
+					if err != nil {
 						note("%s address density check: %v", hit.Name, err)
 					} else {
-						r.extra = append(r.extra, mailDropIndicator(count, company.RegisteredOffice.PostalCode, entityLabel)...)
+						r.extra = append(r.extra, mailDropIndicator(count, postcode, entityLabel)...)
+						termEntities = append(termEntities, coLocatedEntities(count, colocated, hit.CompanyNumber)...)
 					}
 				}
 			}
@@ -826,6 +899,24 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 					note("%s (%s) filing history: %v", hit.Name, hit.CompanyNumber, err)
 				} else {
 					r.extra = append(r.extra, dormantReactivated(filings, entityLabel)...)
+				}
+			}
+
+			// UK branches of an overseas company. A branch carries its
+			// parent's name but a separate BR company number, so the
+			// name search finds the parent and never the footprint --
+			// these are real registered entities the tool was blind to.
+			// Behind the source filter for the same reason filing
+			// history is: one more request per company.
+			if filter.allows("Companies House UK establishments") {
+				if branches, err := chClient.GetUKEstablishments(hit.CompanyNumber, ukEstablishmentFetchLimit); err != nil {
+					note("%s (%s) UK establishments: %v", hit.Name, hit.CompanyNumber, err)
+				} else {
+					for _, b := range branches {
+						be := risk.NewEntity("companieshouse", b.Number, b.Name, addressOrNone(b.Locality), nil)
+						be.UltimateParentID = fmt.Sprintf("%s (%s)", hit.Name, hit.CompanyNumber)
+						termEntities = append(termEntities, be)
+					}
 				}
 			}
 
@@ -993,7 +1084,11 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 						chNote("%s (company %s) PSC statements: %v", detail.Name, detail.CompaniesHouseNumber, err)
 					}
 					entityLabel := fmt.Sprintf("companieshouse: %s (%s)", detail.Name, detail.CompaniesHouseNumber)
-					r.extra = append(r.extra, pscOpacityIndicators(statements, outstandingCharges, entityLabel)...)
+					// No exemption lookup here: a PSC exemption requires
+					// admission to a regulated market, which a registered
+					// charity is not, so the request would be spent to
+					// confirm a foregone conclusion.
+					r.extra = append(r.extra, pscOpacityIndicators(statements, outstandingCharges, entityLabel, nil)...)
 				}
 				// One profile fetch covers two separate checks below --
 				// frequent renaming and dormant/overdue accounts -- so
@@ -2497,9 +2592,28 @@ func trustControlledNatures(natures []string) []string {
 // regardless of any statement found -- see the call site in
 // gatherUKCharityEntities for why that also avoids the API call
 // entirely in that case.
-func pscOpacityIndicators(statements []companieshouse.PSCStatement, outstandingCharges int, entityLabel string) []risk.Indicator {
+//
+// exemptions suppresses the indicator entirely when the company holds a
+// live PSC exemption. A company admitted to a regulated market is
+// exempt from the PSC regime because its ownership is already public
+// through market disclosure rules, so "no person with significant
+// control identified" is the filing the law requires of it, not
+// concealment. That is a first-party regulatory fact from Companies
+// House, and it is the difference between a lead and a false positive.
+// Pass nil where no exemption can apply.
+func pscOpacityIndicators(statements []companieshouse.PSCStatement, outstandingCharges int, entityLabel string, exemptions []companieshouse.Exemption) []risk.Indicator {
 	if outstandingCharges == 0 {
 		return nil
+	}
+	for _, ex := range exemptions {
+		// Only a live PSC exemption explains anything. A lapsed one
+		// (ExemptTo set) does not excuse today's filing, and the other
+		// disclosure exemptions the same endpoint reports are unrelated
+		// reporting rules -- accepting either would excuse opacity that
+		// has no excuse.
+		if ex.IsActive() && companieshouse.PSCExemptionTypes[ex.Type] {
+			return nil
+		}
 	}
 	var out []risk.Indicator
 	for _, st := range statements {
@@ -2799,4 +2913,94 @@ func fannedOutEntity(appt companieshouse.Appointment, officerName string) risk.E
 		ResignedOn:  appt.ResignedOn,
 	}}
 	return e
+}
+
+// gleifChildrenFetchLimit bounds how many direct subsidiaries are
+// pulled per LEI-bearing entity. GLEIF paginates this relationship and
+// a large group has hundreds: TESCO PLC reports 32 direct children,
+// but a major banking group reports far more, and every child becomes
+// an entity that then participates in every cross-entity check.
+//
+// 25 is a deliberate ceiling rather than a measured one, and the
+// distinction is worth stating: it caps the blast radius on a large
+// group while still surfacing the subsidiary structure of an ordinary
+// company in full. If subsidiaries prove valuable in real use, the
+// right follow-up is to measure how many a typical scanned entity
+// actually has and set this from that -- not to raise it on instinct.
+const gleifChildrenFetchLimit = 25
+
+// ukEstablishmentFetchLimit bounds how many UK branches one overseas
+// company contributes. This is a DEPTH bound on a single entity, not
+// the search-breadth --limit -- conflating the two has been a
+// recurring bug in this file, and the two have no reason to be equal.
+const ukEstablishmentFetchLimit = 50
+
+// addressOrNone wraps a single non-empty address string as the slice
+// risk.NewEntity expects, returning nil rather than a slice holding one
+// empty string -- a blank address would otherwise cluster every
+// address-less entity together under shared_address.
+func addressOrNone(addr string) []string {
+	if strings.TrimSpace(addr) == "" {
+		return nil
+	}
+	return []string{addr}
+}
+
+// coLocatedDensityLimit is the highest postcode density at which the
+// companies sharing an address are worth pulling in individually.
+//
+// Measured, not guessed, from the postcode densities calibrate already
+// records -- 2,667 distinct randomly sampled companies:
+//
+//	p25 = 10    p50 = 39    p75 = 478    p90 = 2,909    p95 = 23,092
+//
+// 20 sits at the 40th percentile and at the scale of a real UK postcode
+// unit, which covers roughly 15 addresses. Below it, "same postcode"
+// plausibly means the same building. Above it, the postcode is a
+// business park, a high street, or a formation agent, and the companies
+// sharing it have nothing to do with each other -- at the 20,000 that
+// trips mailDropIndicator, pulling records would bury a report under
+// thousands of unrelated companies. Two orders of magnitude separate
+// the two thresholds, so there is no grey zone between them.
+const coLocatedDensityLimit = 20
+
+// coLocatedFetchLimit bounds records requested per address. One more
+// than coLocatedDensityLimit so the density gate can be applied to a
+// true count rather than to a silently truncated one.
+const coLocatedFetchLimit = coLocatedDensityLimit + 1
+
+// coLocatedEntities turns companies registered at the same address into
+// entities, but only at a density where sharing an address plausibly
+// means sharing a building.
+//
+// These entities are deliberately created WITHOUT the address that
+// found them. Every address-based check in internal/risk would
+// otherwise fire on them by construction: they were selected BECAUSE
+// they share an address, so "these companies share an address" is the
+// query, not a discovery, and reporting it as a finding would be
+// circular. The co-location is already reported honestly by
+// mailDropIndicator and the density figure.
+//
+// What they are actually for is second-order: a co-located company that
+// turns out to share an OFFICER or a beneficial owner with the rest of
+// the graph is a genuine link the name search would never have found,
+// and one the existing fan-out and cross-source person matching can
+// find on its own once the entity exists. That link rests on evidence
+// independent of the address, which is exactly what the address-based
+// version lacks.
+func coLocatedEntities(density int, companies []companieshouse.LocatedCompany, excludeNumber string) []risk.Entity {
+	if density <= 0 || density > coLocatedDensityLimit {
+		return nil
+	}
+	var out []risk.Entity
+	for _, c := range companies {
+		if c.Number == excludeNumber {
+			continue // the company whose address this is
+		}
+		e := risk.NewEntity("companieshouse", c.Number, c.Name, nil, nil)
+		e.FormedOn = c.CreatedOn
+		e.DissolvedOn = c.CessatedOn
+		out = append(out, e)
+	}
+	return out
 }

@@ -128,7 +128,15 @@ Separately, for organizations that don't file with the SEC at all:
   scoped to one jurisdiction (an LEI is required for financial-market
   transaction reporting worldwide), so this is the only source that
   can surface an entity outside the UK/US/AU/NZ this project otherwise
-  covers. No API key needed.
+  covers. No API key needed. Ownership is walked in BOTH directions:
+  the parent lookups resolve an entity upward to its direct and
+  ultimate parent, and the direct-children lookup resolves it downward
+  to its subsidiaries. The downward direction closes a structural blind
+  spot -- a scan of a group parent previously discovered none of the
+  corporate tree beneath it, though GLEIF names those subsidiaries
+  directly and for free (Tesco PLC returns 32 direct children, Barclays
+  PLC 24). One level only, and bounded: N levels is a crawler with no
+  clear stopping rule, and one level is an explainable boundary.
 - Searches crt.sh's Certificate Transparency (CT) log index by domain
   -- every publicly-trusted certificate authority has had to publish
   every certificate it issues to public, append-only CT logs since
@@ -429,7 +437,36 @@ code, just a different final render target.
   innocuous for a guarantee company with no shares or shareholders at
   all -- a structure common to charities and membership organizations
   -- so it's a lead worth investigating, not proof of anything
-  improper.
+  improper. Suppressed entirely when Companies House reports a live PSC
+  exemption for the company (`/company/{n}/exemptions`): a company
+  admitted to a regulated market is exempt from the PSC regime because
+  its ownership is already public through market disclosure rules, so
+  "no person with significant control identified" is the filing the law
+  requires of it rather than concealment. Only a still-in-force PSC
+  exemption suppresses -- a lapsed one explains nothing about today's
+  filing, and the other disclosure exemptions the same endpoint reports
+  are unrelated reporting rules.
+- **UK establishments**: for an overseas company,
+  `/company/{n}/uk-establishments` lists its UK branches. A branch
+  carries its parent's name but a separate BR company number, so a name
+  search finds the parent and never the footprint. Each branch is added
+  as an entity with its parent recorded.
+- **co-located companies**: the advanced-search request that measures
+  postcode density already returns the matching company records, which
+  were previously discarded to read a single count. They are now kept,
+  but only when the density is 20 or below -- measured at the 40th
+  percentile across 2,667 randomly sampled companies (p50 = 39, p75 =
+  478, p95 = 23,092) and at the scale of a real UK postcode unit, which
+  covers roughly 15 addresses. Above that a postcode is a business park
+  or a formation agent, and at the 20,000 that trips
+  `mail_drop_address` this would bury a report under thousands of
+  unrelated companies. These entities deliberately carry **no address**:
+  they were selected *because* they share one, so letting an
+  address-based check fire on them would report the selection criterion
+  back as a discovery. Their value is second-order -- a co-located
+  company that turns out to share an officer or beneficial owner with
+  the rest of the graph is a genuine link resting on evidence
+  independent of the address.
 - **dormant_sic_with_charges**: the same outstanding-charge count also
   feeds a second, unrelated contradiction check -- fires when the
   company's own declared SIC code is one of Companies House's two
@@ -1532,7 +1569,14 @@ single-company pool, so they are absent by construction.
   officer appointment/resignation and PSC notification/cessation dates,
   so a tenure spanning the target date can be rebuilt from current data
   -- the officer who has since resigned reappears, and the one appointed
-  last year vanishes. The rewind happens *before* scoring, so every
+  last year vanishes. Beneficial owners are rewound the same way:
+  ceased PSCs are recorded alongside active ones for exactly this
+  reason, since an active-only list discards precisely the owners an
+  earlier date needs. Their partial date of birth (month and year, the
+  most Companies House publishes) is recorded too -- it cannot prove
+  two same-named records are one person, but a mismatch disproves it
+  outright, which is the collision protection officers already had and
+  beneficial owners, matched on name alone, did not. The rewind happens *before* scoring, so every
   indicator (shared_person, formation_cluster, the clusters and the
   convergence signals) is computed against the network as it was, not
   filtered afterwards.

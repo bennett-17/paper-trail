@@ -177,14 +177,68 @@ type gazetteSearchResponse struct {
 // category for the given text (typically a company or individual
 // name). limit caps how many results come back (0 uses The Gazette's
 // own default page size, confirmed live to be 10).
+// Category is one of The Gazette's notice categories. The tool searched
+// only insolvency for a long time, which turned out to be a small
+// fraction of what The Gazette actually publishes about a name --
+// confirmed live on one query: 190 insolvency notices against 2,593
+// across all notices, so roughly 7% of the available record.
+type Category string
+
+const (
+	// CategoryInsolvency is the original, narrow search: liquidation,
+	// administration, CVAs and personal bankruptcy.
+	CategoryInsolvency Category = "insolvency"
+	// CategoryCompanies covers company notices generally -- strike-off
+	// notices, name changes and other statutory publications. Confirmed
+	// live to return the same count as all-notices for a company name,
+	// so it is the useful superset for this project's subjects without
+	// pulling in unrelated categories.
+	CategoryCompanies Category = "companies"
+	// CategoryAll is every category The Gazette publishes.
+	CategoryAll Category = "all-notices"
+	//
+	// NOTHING IN THIS PROJECT CALLS THE BROADER CATEGORIES YET, and the
+	// measurement that was supposed to justify wiring them did the
+	// opposite. On an identical query the insolvency feed returned 190
+	// results and all-notices returned 2,593 -- a 13x difference that
+	// looked like the tool was seeing 7% of the available signal. It is
+	// not. Inspecting the extra rows showed they are overwhelmingly
+	// SCANNED PDF PAGES: empty category, a title like "The London
+	// Gazette, Supplement 825537, Page 1527", and OCR'd content listing
+	// dozens of unrelated company names that happen to share a page
+	// with the searched one. Matching on those would attach a company
+	// to every other company printed near it.
+	//
+	// The count was real and the inference from it was wrong -- more
+	// rows are not more signal, which is the same mistake the
+	// indicator-threshold calibration in this project exists to correct.
+	// The category plumbing is kept because it is correct and cheap, but
+	// a broader feed should be wired only once something distinguishes a
+	// structured notice from a scanned page.
+)
+
+// SearchNotices searches one Gazette category for the given text.
+// Deliberately kept separate from SearchInsolvencyNotices rather than
+// replacing it: an insolvency notice and a strike-off notice mean
+// different things, and collapsing every category into one "mentioned
+// in the Gazette" result would lose exactly the distinction that makes
+// the insolvency signal worth having.
+func (c *Client) SearchNotices(category Category, text string, limit int) ([]Notice, error) {
+	return c.searchNotices(category, text, limit)
+}
+
 func (c *Client) SearchInsolvencyNotices(text string, limit int) ([]Notice, error) {
+	return c.searchNotices(CategoryInsolvency, text, limit)
+}
+
+func (c *Client) searchNotices(category Category, text string, limit int) ([]Notice, error) {
 	params := url.Values{}
 	params.Set("text", text)
 	params.Set("results-page", "1")
 	if limit > 0 {
 		params.Set("results-page-size", strconv.Itoa(limit))
 	}
-	body, err := c.get(c.BaseURL + "/insolvency/notice/data.json?" + params.Encode())
+	body, err := c.get(c.BaseURL + "/" + string(category) + "/notice/data.json?" + params.Encode())
 	if err != nil {
 		return nil, err
 	}

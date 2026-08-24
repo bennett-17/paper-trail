@@ -36,7 +36,14 @@ import (
 // fed them -- the numbers looked plausible and were wrong, which is the
 // failure mode this constant exists to prevent. Caught only because the
 // coverage warning was there to notice it.
-const cacheVersion = 2
+//
+// Bumped to 3 when PSC records began populating PersonDetails (partial
+// DOB and notified/ceased tenure for beneficial owners). Version 2
+// entities carry officer person-links but no PSC ones, so serving them
+// would silently understate --as-of coverage and skip the DOB check
+// that now disproves beneficial-owner name collisions -- the same
+// failure that prompted the bump to 2, one field-set later.
+const cacheVersion = 3
 
 type entry struct {
 	Entities []risk.Entity `json:"entities"`
