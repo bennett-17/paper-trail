@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paper-trail risk report</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --panel-bg: #f5f5f5;
+    --panel-border: #dddddd;
+    --high: #e15759;
+    --med: #f0ad4e;
+    --low: #59a14f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121212;
+      --fg: #e8e8e8;
+      --muted: #999999;
+      --panel-bg: #1e1e1e;
+      --panel-border: #333333;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121212;
+    --fg: #e8e8e8;
+    --muted: #999999;
+    --panel-bg: #1e1e1e;
+    --panel-border: #333333;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --panel-bg: #f5f5f5;
+    --panel-border: #dddddd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.4em; margin-bottom: 4px; }
+  h2 { font-size: 1.1em; margin-top: 2em; border-bottom: 1px solid var(--panel-border); padding-bottom: 4px; }
+  .meta { color: var(--muted); font-size: 0.9em; }
+  .score-line { font-size: 1.2em; margin: 1em 0; }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-weight: 600;
+    color: #fff;
+  }
+  .sev-high { background: var(--high); color: #fff; }
+  .sev-med { background: var(--med); color: #1a1a1a; }
+  .sev-low { background: var(--low); color: #fff; }
+  .indicator {
+    border: 1px solid var(--panel-border);
+    border-left-width: 5px;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    background: var(--panel-bg);
+  }
+  .indicator.sev-high { border-left-color: var(--high); }
+  .indicator.sev-med { border-left-color: var(--med); }
+  .indicator.sev-low { border-left-color: var(--low); }
+  .indicator .desc { font-weight: 600; }
+  .indicator .field { font-size: 0.92em; color: var(--muted); margin-top: 4px; }
+  .indicator .weight-tag {
+    float: right;
+    font-weight: 700;
+  }
+  .entity-card {
+    border: 1px solid var(--panel-border);
+    border-left-width: 6px;
+    border-radius: 4px;
+    padding: 12px 14px 4px;
+    margin-bottom: 14px;
+  }
+  .entity-card.sev-high { border-left-color: var(--high); }
+  .entity-card.sev-med { border-left-color: var(--med); }
+  .entity-card.sev-low { border-left-color: var(--low); }
+  .entity-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .entity-card-name { font-weight: 700; font-size: 1.02em; }
+  .entity-card .indicator { margin-bottom: 10px; }
+  .source-health {
+    border: 1px solid var(--med);
+    border-radius: 4px;
+    padding: 8px 14px;
+    margin: 10px 0;
+    font-size: 0.9em;
+  }
+  .source-health .field { margin: 2px 0; }
+  .entity-filter {
+    display: block;
+    width: 100%;
+    max-width: 420px;
+    margin: 10px 0 16px;
+    padding: 7px 10px;
+    font-size: 0.95em;
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    background: var(--panel-bg);
+    color: var(--fg);
+  }
+  .tier-group { margin-bottom: 18px; }
+  .tier-group > summary {
+    cursor: pointer;
+    font-weight: 700;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--panel-border);
+    margin-bottom: 10px;
+  }
+  .tier-count { font-weight: 400; color: var(--muted); }
+  .flag {
+    font-size: 0.78em;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .flag-irrelevant { background: var(--med); color: #1a1a1a; }
+  .flag-cached { background: var(--panel-border); color: var(--muted); font-weight: 400; }
+   
+  .tabs {
+    display: flex; flex-wrap: wrap; gap: 2px;
+    border-bottom: 2px solid var(--panel-border);
+    margin: 1.4em 0 1.2em;
+  }
+  .tab {
+    appearance: none; border: none; background: none; cursor: pointer;
+    font: inherit; font-size: 0.94em; color: var(--muted);
+    padding: 8px 14px; border-bottom: 2px solid transparent; margin-bottom: -2px;
+    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .tab:hover:not(:disabled) { color: var(--fg); }
+  .tab.is-active { color: var(--fg); font-weight: 600; border-bottom-color: var(--fg); }
+  .tab:focus-visible { outline: 2px solid var(--med); outline-offset: -2px; }
+  .tab:disabled { opacity: 0.4; cursor: default; }
+  .tab-count {
+    font-size: 0.82em; font-weight: 600; font-variant-numeric: tabular-nums;
+    background: var(--panel-border); color: var(--muted);
+    border-radius: 9px; padding: 0 7px;
+  }
+  .tab-panel > h2:first-child { margin-top: 0; }
+   
+  .js-tabs .tab-panel { display: none; }
+  .js-tabs .tab-panel.is-active { display: block; }
+  .graph-frame {
+    border: 1px solid var(--panel-border); border-radius: 8px;
+    overflow: hidden; height: 70vh; min-height: 420px;
+  }
+  .graph-embed { width: 100%; height: 100%; border: 0; display: block; }
+   
+  @media print {
+    .tabs, .entity-filter { display: none !important; }
+    .js-tabs .tab-panel { display: block !important; }
+    .tab-panel { break-inside: auto; }
+    .graph-frame { display: none !important; }
+  }
+  .coverage-table { border-collapse: collapse; width: 100%; margin-bottom: 1.2em; }
+  .coverage-table th, .coverage-table td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--panel-border); }
+  .coverage-table th { font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+  .coverage-table td.num { font-variant-numeric: tabular-nums; }
+  .coverage-clean { color: var(--low); font-weight: 600; }
+  .coverage-hit { color: var(--high); font-weight: 600; }
+   
+  .indicator-reviewed { opacity: 0.62; }
+  .indicator-reviewed summary { cursor: pointer; }
+  .indicator-reviewed[open] { opacity: 0.85; }
+   
+  .timeline-entry {
+    border-left: 3px solid var(--panel-border);
+    padding: 6px 0 6px 12px;
+    margin-bottom: 10px;
+  }
+  .timeline-entry.sev-high { border-left-color: var(--high); }
+  .timeline-entry.sev-med { border-left-color: var(--med); }
+  .timeline-entry.sev-low { border-left-color: var(--low); }
+  .timeline-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .timeline-date { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .timeline-code { color: var(--muted); font-size: 0.9em; }
+  .reviewed-tag {
+    font-size: 0.78em;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+    background: var(--panel-border);
+    color: var(--muted);
+  }
+  .dup-note {
+    font-size: 0.88em;
+    color: var(--muted);
+    border-top: 1px dashed var(--panel-border);
+    padding-top: 6px;
+    margin: 6px 0 10px;
+  }
+  .dup-note.dup-likely { color: var(--med); font-weight: 600; }
+  .person-card {
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 8px 14px;
+    margin-bottom: 8px;
+    background: var(--panel-bg);
+  }
+  .person-name { font-weight: 700; }
+  ul.plain { list-style: none; padding-left: 0; }
+  ul.plain li { padding: 3px 0; }
+  .corroboration {
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 8px 14px;
+    margin-bottom: 8px;
+    background: var(--panel-bg);
+  }
+  .notes li, .diff-new li { color: var(--muted); }
+  .disclaimer {
+    margin-top: 3em;
+    padding-top: 1em;
+    border-top: 1px solid var(--panel-border);
+    font-size: 0.85em;
+    color: var(--muted);
+  }
+  .diff-score { font-weight: 600; }
+</style>
+<script>
+
+
+
+
+
+
+function filterEntityCards(query) {
+  var q = query.trim().toLowerCase();
+  var groups = document.querySelectorAll('.tier-group');
+  var totalVisible = 0;
+  groups.forEach(function (group) {
+    var cards = group.querySelectorAll('.entity-card');
+    var visibleInGroup = 0;
+    cards.forEach(function (card) {
+      var match = q === '' || card.textContent.toLowerCase().indexOf(q) !== -1;
+      card.style.display = match ? '' : 'none';
+      if (match) visibleInGroup++;
+    });
+    group.style.display = visibleInGroup > 0 ? '' : 'none';
+    if (q !== '' && visibleInGroup > 0) group.open = true;
+    totalVisible += visibleInGroup;
+  });
+  var empty = document.getElementById('entity-filter-empty');
+  if (empty) empty.style.display = (q !== '' && totalVisible === 0) ? '' : 'none';
+}
+
+
+
+
+
+
+
+
+
+
+function initReportTabs() {
+  var root = document.querySelector('.tabs');
+  if (!root) return;
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  var panels = Array.prototype.slice.call(document.querySelectorAll('.tab-panel'));
+  if (!tabs.length || !panels.length) return;
+  document.body.classList.add('js-tabs');
+
+  function panelFor(name) {
+    for (var i = 0; i < panels.length; i++) {
+      if (panels[i].getAttribute('data-panel') === name) return panels[i];
+    }
+    return null;
+  }
+
+  
+  
+  
+  
+  
+  function hydrateGraph(panel) {
+    var frame = panel.querySelector('.graph-embed[data-graphdoc]');
+    if (!frame) return;
+    frame.srcdoc = frame.getAttribute('data-graphdoc');
+    frame.removeAttribute('data-graphdoc');
+  }
+
+  function activate(name, updateHash) {
+    var panel = panelFor(name);
+    if (!panel) return false;
+    tabs.forEach(function (t) {
+      var on = t.getAttribute('data-tab') === name;
+      t.classList.toggle('is-active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach(function (pnl) {
+      pnl.classList.toggle('is-active', pnl === panel);
+    });
+    hydrateGraph(panel);
+    if (updateHash && history.replaceState) {
+      history.replaceState(null, '', '#' + name);
+    }
+    return true;
+  }
+
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      if (!t.disabled) activate(t.getAttribute('data-tab'), true);
+    });
+  });
+
+  window.addEventListener('hashchange', function () {
+    activate(location.hash.replace(/^#/, ''), false);
+  });
+
+  
+  
+  if (!activate(location.hash.replace(/^#/, ''), false)) {
+    activate('overview', false);
+  }
+}
+
+
+
+
+initReportTabs();
+
+
+
+
+
+function filterAllTabs(query) {
+  filterEntityCards(query);
+  var q = query.trim().toLowerCase();
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  var counted = false;
+  tabs.forEach(function (t) {
+    var name = t.getAttribute('data-tab');
+    var panel = document.querySelector('.tab-panel[data-panel="' + name + '"]');
+    if (!panel) return;
+    var hit = q !== '' && !t.disabled && panel.textContent.toLowerCase().indexOf(q) !== -1;
+    t.classList.toggle('has-match', hit);
+    if (hit && !counted && !t.classList.contains('is-active')) {
+      counted = true;
+      t.click();
+    }
+  });
+}
+</script>
+</head>
+<body>
+
+<h1>Risk assessment for &#34;Alpha&#34;</h1>
+<div class="meta">Generated <TIMESTAMP> &middot; 2 entities found</div>
+
+<nav class="tabs" role="tablist" aria-label="Report sections">
+  <button class="tab is-active" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+  <button class="tab" role="tab" data-tab="findings" aria-selected="false">Findings <span class="tab-count">2</span></button>
+  <button class="tab" role="tab" data-tab="network" aria-selected="false">Network <span class="tab-count">2</span></button>
+  <button class="tab" role="tab" data-tab="timeline" aria-selected="false">Timeline <span class="tab-count">1</span></button>
+  <button class="tab" role="tab" data-tab="people" aria-selected="false">People <span class="tab-count">1</span></button>
+  <button class="tab" role="tab" data-tab="entities" aria-selected="false">Entities <span class="tab-count">2</span></button>
+  <button class="tab" role="tab" data-tab="methodology" aria-selected="false">Methodology</button>
+  <button class="tab" role="tab" data-tab="diff" aria-selected="false">Diff</button>
+</nav>
+
+<section class="tab-panel" data-panel="overview" role="tabpanel">
+
+
+<p class="meta">1 indicator(s) marked reviewed (--reviewed-file) -- still counted in the score below in full, just dimmed and collapsed so they stop competing for attention on every re-run.</p>
+
+
+<div class="score-line">
+  Risk score: <strong>11</strong>
+  &nbsp;<span class="badge sev-med">MEDIUM</span>
+  <div class="meta">shared_person indicator at weight 3</div>
+</div>
+
+
+<h2>Corroborated pairs</h2>
+<p class="meta">Matched on 2+ independent kinds of evidence -- stronger than any single indicator above.</p>
+
+<div class="corroboration">
+  <div>companieshouse: Alpha Ltd (1) &harr; edgar: Alpha Corp (2)</div>
+  <div class="field">matched on: shared_address, shared_person</div>
+</div>
+
+
+</section>
+
+<section class="tab-panel" data-panel="findings" role="tabpanel">
+<h2>Findings by entity</h2>
+
+<p class="meta">Every entity named by at least one indicator, grouped by severity tier and, within each tier, sorted by that entity's own total weight -- so everything found about one entity reads as a single card, and the tail of single-signal noise stays out of the way until you go looking for it.</p>
+<input type="search" class="entity-filter" placeholder="Filter by name or evidence&hellip;" oninput="filterAllTabs(this.value)" aria-label="Filter entity cards">
+
+<details class="tier-group" open>
+  <summary>Confirmed facts <span class="tier-count">(1)</span></summary>
+  
+  
+  
+  <div class="entity-card sev-high">
+    <div class="entity-card-head">
+      <span class="entity-card-name">companieshouse: Alpha Ltd (1)</span>
+      
+      <span class="flag flag-cached" title="This entity was reused from --cache-ttl's on-disk cache rather than fetched live this run -- everything else in this report reflects the live state as of the report's own generated-at time above, but this one entity's data is only as fresh as its own cache timestamp.">(cached, verified 2026-08-01 12:00 UTC)</span>
+      <span class="weight-tag sev-high">+11</span>
+    </div>
+    
+    
+    <div class="field dup-note dup-likely">Likely the same entity as: edgar: Alpha Corp (2) &mdash; same normalized name AND a shared address or person; verify before treating as one, sources are shown separately on purpose.</div>
+    
+    
+    
+    <div class="indicator sev-high">
+      <span class="weight-tag sev-high">+5</span>
+      <div class="desc">Name matched a US restricted-party list</div>
+      
+      
+      <div class="field">Evidence: ALPHA LTD -- OFAC SDN</div>
+    </div>
+    
+    
+    
+    <div class="indicator sev-med">
+      <span class="weight-tag sev-med">+3</span>
+      <div class="desc">Same officer at both</div>
+      
+      <div class="field">Also linked to: edgar: Alpha Corp (2)</div>
+      <div class="field">Evidence: Jane Doe</div>
+    </div>
+    
+    
+    
+    <div class="indicator sev-low">
+      <span class="weight-tag sev-low">+2</span>
+      <div class="desc">Same registered address</div>
+      
+      <div class="field">Also linked to: edgar: Alpha Corp (2)</div>
+      <div class="field">Evidence: 1 Main Street</div>
+    </div>
+    
+    
+    
+    <details class="indicator indicator-reviewed sev-low">
+      <summary><span class="weight-tag sev-low">+1</span> <span class="reviewed-tag" title="Marked reviewed via --reviewed-file: you've already looked at this one. It still counts toward the score in full -- unlike --exclude, which removes an indicator from the score entirely -- it's just collapsed here so it stops competing for attention on every re-run.">reviewed</span> Formed together</summary>
+      
+      
+      <div class="field">Evidence: span</div>
+    </details>
+    
+    
+  </div>
+  
+</details>
+
+<details class="tier-group" open>
+  <summary>Corroborated pairs <span class="tier-count">(1)</span></summary>
+  
+  
+  
+  <div class="entity-card sev-high">
+    <div class="entity-card-head">
+      <span class="entity-card-name">edgar: Alpha Corp (2)</span>
+      
+      
+      <span class="weight-tag sev-high">+5</span>
+    </div>
+    
+    
+    <div class="field dup-note dup-likely">Likely the same entity as: companieshouse: Alpha Ltd (1) &mdash; same normalized name AND a shared address or person; verify before treating as one, sources are shown separately on purpose.</div>
+    
+    
+    
+    <div class="indicator sev-med">
+      <span class="weight-tag sev-med">+3</span>
+      <div class="desc">Same officer at both</div>
+      
+      <div class="field">Also linked to: companieshouse: Alpha Ltd (1)</div>
+      <div class="field">Evidence: Jane Doe</div>
+    </div>
+    
+    
+    
+    <div class="indicator sev-low">
+      <span class="weight-tag sev-low">+2</span>
+      <div class="desc">Same registered address</div>
+      
+      <div class="field">Also linked to: companieshouse: Alpha Ltd (1)</div>
+      <div class="field">Evidence: 1 Main Street</div>
+    </div>
+    
+    
+  </div>
+  
+</details>
+
+<p class="meta entity-filter-empty" id="entity-filter-empty" style="display:none">No entities match that filter.</p>
+
+</section>
+
+<section class="tab-panel" data-panel="network" role="tabpanel">
+<h2>Network</h2>
+
+<p class="meta">Every entity and the indicators connecting them, as a force-directed graph &mdash; drag nodes to rearrange, click one to highlight its connections, scroll to zoom. Node color is the source; a red outline marks a high-weight lead. This is the same viewer <code>--html</code> writes to a standalone file.</p>
+<div class="graph-frame">
+  <iframe class="graph-embed" title="Entity relationship graph" data-graphdoc="&lt;!DOCTYPE html&gt;
+&lt;html lang=&#34;en&#34;&gt;
+&lt;head&gt;
+&lt;meta charset=&#34;utf-8&#34;&gt;
+&lt;title&gt;paper-trail graph&lt;/title&gt;
+&lt;meta name=&#34;viewport&#34; content=&#34;width=device-width, initial-scale=1&#34;&gt;
+&lt;style&gt;
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --panel-bg: #f5f5f5;
+    --panel-border: #dddddd;
+    --edge: #999999;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121212;
+      --fg: #e8e8e8;
+      --muted: #999999;
+      --panel-bg: #1e1e1e;
+      --panel-border: #333333;
+      --edge: #666666;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, &#34;Segoe UI&#34;, sans-serif; }
+  svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  svg.panning { cursor: grabbing; }
+  .node circle { stroke: var(--bg); stroke-width: 1.5px; cursor: pointer; }
+  .node circle.high-weight { stroke: #e15759; stroke-width: 3px; }
+  .node text { font-size: 10px; fill: var(--fg); pointer-events: none; }
+  .edge { stroke: var(--edge); fill: none; }
+  .node.dim circle, .node.dim text { opacity: 0.15; }
+  .edge.dim { opacity: 0.08; }
+  .edge.lit { stroke: #e67e22; }
+  #panel {
+    position: fixed; top: 12px; right: 12px; max-width: 320px;
+    background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 8px;
+    padding: 12px 14px; font-size: 13px; line-height: 1.5;
+  }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; }
+  #panel .hint { color: var(--muted); font-size: 12px; }
+  #detail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--panel-border); display: none; }
+  #detail.show { display: block; }
+  #detail .row { margin: 2px 0; word-break: break-word; }
+  #legend { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--panel-border); }
+  #legend .item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;svg id=&#34;graph&#34;&gt;&lt;/svg&gt;
+&lt;div id=&#34;panel&#34;&gt;
+  &lt;h1&gt;paper-trail graph&lt;/h1&gt;
+  &lt;div class=&#34;hint&#34;&gt;Drag nodes to rearrange. Click a node to highlight its connections. Scroll to zoom, drag background to pan.&lt;/div&gt;
+  &lt;div id=&#34;legend&#34;&gt;&lt;/div&gt;
+  &lt;div id=&#34;detail&#34;&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;script&gt;
+const graphData = {&#34;nodes&#34;:[{&#34;id&#34;:&#34;companieshouse:1&#34;,&#34;label&#34;:&#34;Alpha Ltd&#34;,&#34;node_type&#34;:&#34;companieshouse&#34;,&#34;maxWeight&#34;:5},{&#34;id&#34;:&#34;edgar:2&#34;,&#34;label&#34;:&#34;Alpha Corp&#34;,&#34;node_type&#34;:&#34;edgar&#34;,&#34;maxWeight&#34;:3}],&#34;edges&#34;:[{&#34;source&#34;:&#34;companieshouse:1&#34;,&#34;target&#34;:&#34;edgar:2&#34;,&#34;relationship_type&#34;:&#34;shared_person&#34;,&#34;evidence&#34;:&#34;Jane Doe&#34;,&#34;weight&#34;:3},{&#34;source&#34;:&#34;companieshouse:1&#34;,&#34;target&#34;:&#34;edgar:2&#34;,&#34;relationship_type&#34;:&#34;shared_address&#34;,&#34;evidence&#34;:&#34;1 Main Street&#34;,&#34;weight&#34;:2}]};
+
+const svg = document.getElementById(&#39;graph&#39;);
+const NS = &#39;http://www.w3.org/2000/svg&#39;;
+let width = window.innerWidth, height = window.innerHeight;
+
+const nodes = graphData.nodes.map((n, i) =&gt; ({
+  ...n,
+  type: n.node_type, // the exported JSON field is &#34;node_type&#34;; normalize once here
+  maxWeight: n.maxWeight || 0,
+  x: width / 2 &#43; Math.cos(i) * 100 &#43; (Math.random() - 0.5) * 50,
+  y: height / 2 &#43; Math.sin(i) * 100 &#43; (Math.random() - 0.5) * 50,
+  vx: 0, vy: 0,
+}));
+const nodeById = new Map(nodes.map(n =&gt; [n.id, n]));
+const edges = graphData.edges
+  .map(e =&gt; ({ ...e, s: nodeById.get(e.source), t: nodeById.get(e.target) }))
+  .filter(e =&gt; e.s &amp;&amp; e.t);
+
+// A handful of distinct colors, assigned per node_type in the order
+// types are first seen -- deterministic across a given graph, not
+// tied to any particular source name.
+const PALETTE = [&#39;#4e79a7&#39;, &#39;#f28e2b&#39;, &#39;#e15759&#39;, &#39;#76b7b2&#39;, &#39;#59a14f&#39;, &#39;#edc948&#39;, &#39;#b07aa1&#39;, &#39;#ff9da7&#39;, &#39;#9c755f&#39;];
+const typeColor = new Map();
+function colorFor(type) {
+  const key = type || &#39;unknown&#39;;
+  if (!typeColor.has(key)) typeColor.set(key, PALETTE[typeColor.size % PALETTE.length]);
+  return typeColor.get(key);
+}
+nodes.forEach(n =&gt; colorFor(n.type));
+
+const legend = document.getElementById(&#39;legend&#39;);
+for (const [type, color] of typeColor) {
+  const item = document.createElement(&#39;div&#39;);
+  item.className = &#39;item&#39;;
+  item.innerHTML = &#39;&lt;span class=&#34;swatch&#34; style=&#34;background:&#39; &#43; color &#43; &#39;&#34;&gt;&lt;/span&gt;&#39; &#43; type;
+  legend.appendChild(item);
+}
+// Only shown when this graph actually carries indicator weights (i.e.
+// it came from risk --graph/--html, not a plain lookup/graph export,
+// which never sets maxWeight) -- otherwise the note would be
+// meaningless noise.
+if (nodes.some(n =&gt; n.maxWeight &gt; 0)) {
+  const note = document.createElement(&#39;div&#39;);
+  note.className = &#39;hint&#39;;
+  note.style.marginTop = &#39;6px&#39;;
+  note.textContent = &#39;Larger node = higher-weight indicator involved; red outline = a high-weight one (&gt;=5).&#39;;
+  legend.appendChild(note);
+}
+
+// -- physics: simple Coulomb repulsion &#43; spring edges &#43; centering,
+// damped each tick, no external library. CENTER_K is deliberately
+// strong relative to REPULSION -- confirmed live that a weaker value
+// let disconnected nodes (no edges at all, so nothing but repulsion
+// and centering act on them) drift indefinitely off toward a viewport
+// edge instead of settling near the rest of the graph.
+const REPULSION = 1400;
+const EDGE_LENGTH = 90;
+const SPRING_K = 0.02;
+const CENTER_K = 0.04;
+const DAMPING = 0.85;
+
+// step advances the physics by one increment -- pure data update, no
+// drawing, so it can also be run in a tight synchronous loop to
+// pre-settle the layout (see the bottom of this script).
+function step() {
+  for (let i = 0; i &lt; nodes.length; i&#43;&#43;) {
+    for (let j = i &#43; 1; j &lt; nodes.length; j&#43;&#43;) {
+      const a = nodes[i], b = nodes[j];
+      let dx = a.x - b.x, dy = a.y - b.y;
+      let distSq = dx * dx &#43; dy * dy || 1;
+      let dist = Math.sqrt(distSq);
+      let force = REPULSION / distSq;
+      let fx = (dx / dist) * force, fy = (dy / dist) * force;
+      a.vx &#43;= fx; a.vy &#43;= fy;
+      b.vx -= fx; b.vy -= fy;
+    }
+  }
+  for (const e of edges) {
+    let dx = e.t.x - e.s.x, dy = e.t.y - e.s.y;
+    let dist = Math.sqrt(dx * dx &#43; dy * dy) || 1;
+    let force = (dist - EDGE_LENGTH) * SPRING_K;
+    let fx = (dx / dist) * force, fy = (dy / dist) * force;
+    e.s.vx &#43;= fx; e.s.vy &#43;= fy;
+    e.t.vx -= fx; e.t.vy -= fy;
+  }
+  for (const n of nodes) {
+    n.vx &#43;= (width / 2 - n.x) * CENTER_K;
+    n.vy &#43;= (height / 2 - n.y) * CENTER_K;
+  }
+  for (const n of nodes) {
+    if (n === dragging) continue;
+    n.vx *= DAMPING; n.vy *= DAMPING;
+    n.x &#43;= n.vx; n.y &#43;= n.vy;
+  }
+}
+
+// -- rendering
+let view = { x: 0, y: 0, scale: 1 };
+const root = document.createElementNS(NS, &#39;g&#39;);
+svg.appendChild(root);
+
+const edgeEls = edges.map(e =&gt; {
+  const line = document.createElementNS(NS, &#39;line&#39;);
+  line.setAttribute(&#39;class&#39;, &#39;edge&#39;);
+  line.setAttribute(&#39;stroke-width&#39;, Math.max(1, e.weight || 1));
+  const title = document.createElementNS(NS, &#39;title&#39;);
+  title.textContent = (e.relationship_type || &#39;&#39;) &#43; (e.evidence ? (&#39;: &#39; &#43; e.evidence) : &#39;&#39;);
+  line.appendChild(title);
+  root.appendChild(line);
+  return line;
+});
+
+// radiusFor sizes a node by the highest-weight indicator it&#39;s involved
+// in (see Node.MaxWeight) -- capped so a single very high weight
+// doesn&#39;t dominate the layout visually. Purely cosmetic: it doesn&#39;t
+// feed the physics simulation above, which sizes forces off fixed
+// constants regardless of node radius.
+function radiusFor(n) {
+  return 7 &#43; Math.min(n.maxWeight || 0, 8) * 1.5;
+}
+
+const nodeEls = nodes.map(n =&gt; {
+  const g = document.createElementNS(NS, &#39;g&#39;);
+  g.setAttribute(&#39;class&#39;, &#39;node&#39;);
+  const r = radiusFor(n);
+  const circle = document.createElementNS(NS, &#39;circle&#39;);
+  circle.setAttribute(&#39;r&#39;, r);
+  circle.setAttribute(&#39;fill&#39;, colorFor(n.type));
+  // High-weight threshold matches this project&#39;s own &#34;HIGH weight&#34;
+  // convention (internal/risk&#39;s confidenceBand: weight &gt;= 5 alone is
+  // enough to push confidence to HIGH) -- a distinct outline so the
+  // node stands out regardless of its type color.
+  if (n.maxWeight &gt;= 5) circle.classList.add(&#39;high-weight&#39;);
+  const text = document.createElementNS(NS, &#39;text&#39;);
+  text.setAttribute(&#39;x&#39;, r &#43; 3);
+  text.setAttribute(&#39;y&#39;, 4);
+  text.textContent = n.label;
+  const title = document.createElementNS(NS, &#39;title&#39;);
+  title.textContent = n.label &#43; &#39; (&#39; &#43; n.type &#43; &#39;)&#39; &#43; (n.maxWeight ? &#39; -- highest indicator weight involved: &#39; &#43; n.maxWeight : &#39;&#39;);
+  g.appendChild(circle);
+  g.appendChild(text);
+  g.appendChild(title);
+  root.appendChild(g);
+  makeDraggable(g, n);
+  g.addEventListener(&#39;click&#39;, (ev) =&gt; { ev.stopPropagation(); selectNode(n); });
+  return g;
+});
+
+function draw() {
+  edgeEls.forEach((el, i) =&gt; {
+    const e = edges[i];
+    el.setAttribute(&#39;x1&#39;, e.s.x); el.setAttribute(&#39;y1&#39;, e.s.y);
+    el.setAttribute(&#39;x2&#39;, e.t.x); el.setAttribute(&#39;y2&#39;, e.t.y);
+  });
+  nodeEls.forEach((el, i) =&gt; {
+    el.setAttribute(&#39;transform&#39;, &#39;translate(&#39; &#43; nodes[i].x &#43; &#39;,&#39; &#43; nodes[i].y &#43; &#39;)&#39;);
+  });
+  root.setAttribute(&#39;transform&#39;, &#39;translate(&#39; &#43; view.x &#43; &#39;,&#39; &#43; view.y &#43; &#39;) scale(&#39; &#43; view.scale &#43; &#39;)&#39;);
+}
+
+// -- selection / highlighting
+let selected = null;
+function selectNode(n) {
+  selected = selected === n ? null : n;
+  const connected = new Set();
+  if (selected) {
+    connected.add(selected);
+    edges.forEach(e =&gt; { if (e.s === selected) connected.add(e.t); if (e.t === selected) connected.add(e.s); });
+  }
+  nodeEls.forEach((el, i) =&gt; el.classList.toggle(&#39;dim&#39;, selected != null &amp;&amp; !connected.has(nodes[i])));
+  edgeEls.forEach((el, i) =&gt; {
+    const e = edges[i];
+    const lit = selected != null &amp;&amp; (e.s === selected || e.t === selected);
+    el.classList.toggle(&#39;lit&#39;, lit);
+    el.classList.toggle(&#39;dim&#39;, selected != null &amp;&amp; !lit);
+  });
+  const detail = document.getElementById(&#39;detail&#39;);
+  if (!selected) { detail.classList.remove(&#39;show&#39;); detail.innerHTML = &#39;&#39;; return; }
+  const rows = [
+    &#39;&lt;div class=&#34;row&#34;&gt;&lt;b&gt;&#39; &#43; selected.label &#43; &#39;&lt;/b&gt;&lt;/div&gt;&#39;,
+    &#39;&lt;div class=&#34;row&#34;&gt;source: &#39; &#43; selected.type &#43; &#39;&lt;/div&gt;&#39;,
+    &#39;&lt;div class=&#34;row&#34;&gt;id: &#39; &#43; selected.id &#43; &#39;&lt;/div&gt;&#39;,
+  ];
+  edges.forEach(e =&gt; {
+    if (e.s !== selected &amp;&amp; e.t !== selected) return;
+    const other = e.s === selected ? e.t : e.s;
+    rows.push(&#39;&lt;div class=&#34;row&#34;&gt;&amp;rarr; &#39; &#43; other.label &#43; &#39; &lt;i&gt;(&#39; &#43; e.relationship_type &#43; &#39;)&lt;/i&gt;&lt;/div&gt;&#39;);
+  });
+  detail.innerHTML = rows.join(&#39;&#39;);
+  detail.classList.add(&#39;show&#39;);
+}
+svg.addEventListener(&#39;click&#39;, () =&gt; selectNode(null));
+
+// -- drag to move a node
+let dragging = null;
+function makeDraggable(el, n) {
+  el.addEventListener(&#39;mousedown&#39;, (ev) =&gt; {
+    ev.stopPropagation();
+    dragging = n;
+  });
+}
+window.addEventListener(&#39;mousemove&#39;, (ev) =&gt; {
+  if (dragging) {
+    dragging.x = (ev.clientX - view.x) / view.scale;
+    dragging.y = (ev.clientY - view.y) / view.scale;
+    dragging.vx = 0; dragging.vy = 0;
+    // The layout is otherwise static (see the one-shot settle at the
+    // bottom of this script, and why) -- a short burst here lets the
+    // rest of the graph gently react to the node being moved, without
+    // running physics continuously and drifting on its own.
+    for (let i = 0; i &lt; 15; i&#43;&#43;) step();
+    draw();
+  } else if (panning) {
+    view.x = panStart.vx &#43; (ev.clientX - panStart.x);
+    view.y = panStart.vy &#43; (ev.clientY - panStart.y);
+    draw();
+  }
+});
+window.addEventListener(&#39;mouseup&#39;, () =&gt; { dragging = null; panning = false; svg.classList.remove(&#39;panning&#39;); });
+
+// -- pan background, zoom with the wheel
+let panning = false, panStart = { x: 0, y: 0, vx: 0, vy: 0 };
+svg.addEventListener(&#39;mousedown&#39;, (ev) =&gt; {
+  panning = true;
+  panStart = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y };
+  svg.classList.add(&#39;panning&#39;);
+});
+svg.addEventListener(&#39;wheel&#39;, (ev) =&gt; {
+  ev.preventDefault();
+  const factor = ev.deltaY &lt; 0 ? 1.1 : 0.9;
+  view.scale = Math.max(0.1, Math.min(4, view.scale * factor));
+  draw();
+}, { passive: false });
+
+window.addEventListener(&#39;resize&#39;, () =&gt; { width = window.innerWidth; height = window.innerHeight; draw(); });
+
+// The layout settles once -- it does not keep animating in the
+// background afterward. Confirmed live this was the right call:
+// relying on requestAnimationFrame for the initial settle leaves nodes
+// stuck near their random starting positions if the tab is
+// backgrounded (rAF gets throttled/paused), and even when rAF does run
+// continuously, a springy layout like this one doesn&#39;t fully damp out
+// -- it keeps visibly drifting indefinitely instead of coming to rest,
+// which makes nodes a moving target to click. Dragging still feels
+// alive: it reruns a short burst of this same physics around the node
+// being moved (see the mousemove handler above), it just doesn&#39;t run
+// unprompted.
+function settle() {
+  // Re-read the viewport size and re-anchor every node&#39;s starting
+  // position around it, rather than trusting whatever width/height
+  // this script captured when it first ran -- confirmed live that in
+  // at least one embedded-preview context, window.innerWidth/
+  // innerHeight reports a stale (near-zero) size at that point, before
+  // the page has actually finished sizing itself, and using it centers
+  // the whole layout on the wrong &#34;middle&#34; and leaves it clipped in a
+  // corner. A plain browser tab has the correct size from the start,
+  // so this is a no-op cost there.
+  width = window.innerWidth; height = window.innerHeight;
+  nodes.forEach((n, i) =&gt; {
+    n.x = width / 2 &#43; Math.cos(i) * 100 &#43; (Math.random() - 0.5) * 50;
+    n.y = height / 2 &#43; Math.sin(i) * 100 &#43; (Math.random() - 0.5) * 50;
+    n.vx = 0; n.vy = 0;
+  });
+  for (let i = 0; i &lt; 300; i&#43;&#43;) step();
+
+  // Force-align the settled layout&#39;s centroid to the viewport center
+  // as an explicit last step, rather than trusting the centering force
+  // alone to land exactly there -- belt-and-suspenders on top of the
+  // re-anchor above.
+  let cx = 0, cy = 0;
+  for (const n of nodes) { cx &#43;= n.x; cy &#43;= n.y; }
+  cx /= nodes.length; cy /= nodes.length;
+  const dx = width / 2 - cx, dy = height / 2 - cy;
+  for (const n of nodes) { n.x &#43;= dx; n.y &#43;= dy; }
+
+  draw();
+}
+
+// Deferred one frame past the window&#39;s load event -- in that same
+// embedded-preview context, even a load-event handler alone still saw
+// a stale viewport size; one more animation frame after it was
+// consistently enough for the surrounding page to finish sizing the
+// preview area first.
+window.addEventListener(&#39;load&#39;, () =&gt; requestAnimationFrame(settle));
+&lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+" sandbox="allow-scripts"></iframe>
+</div>
+<noscript><p class="meta">The interactive graph needs JavaScript. Every relationship it draws is also listed as an indicator under Findings, and <code>--html</code> writes the same graph to a standalone file.</p></noscript>
+
+</section>
+
+<section class="tab-panel" data-panel="timeline" role="tabpanel">
+
+<h2>Timeline</h2>
+<p class="meta">Every indicator above that carries a specific date, in chronological order &mdash; the one axis the by-entity and by-person views can't show. Nothing here is a new finding: each entry appears above too, just reordered by when it happened. Deliberately partial &mdash; only some indicator types carry a date at all today, and an indicator without one is left out entirely rather than shown with a guessed date, so absence from this list says nothing about an indicator's importance.</p>
+
+<div class="timeline-entry sev-low">
+  <div class="timeline-head">
+    <span class="timeline-date">2020-01-10</span>
+    <span class="weight-tag sev-low">+1</span>
+    <span class="timeline-code">formation_cluster</span>
+  </div>
+  <div class="field">companieshouse: Alpha Ltd (1)</div>
+  <div class="field">Evidence: span</div>
+</div>
+
+
+</section>
+
+<section class="tab-panel" data-panel="people" role="tabpanel">
+
+<h2>Findings by person</h2>
+<p class="meta">Officers, directors, or trustees named on 2 or more entities -- the same cross-entity trace this report's shared_person indicator already flags, laid out per person instead of per pair.</p>
+
+<div class="person-card">
+  <div class="person-name">Jane Doe</div>
+  <div class="field">Linked to 2 entities: companieshouse: Alpha Ltd (1); edgar: Alpha Corp (2)</div>
+</div>
+
+
+</section>
+
+<section class="tab-panel" data-panel="entities" role="tabpanel">
+<h2>Entities</h2>
+
+<ul class="plain">
+<li>companieshouse: Alpha Ltd (1)</li>
+<li>edgar: Alpha Corp (2)</li>
+
+</ul>
+
+</section>
+
+<section class="tab-panel" data-panel="methodology" role="tabpanel">
+
+<div class="source-health">
+  
+  <div class="field"><strong>Skipped</strong> (no API key configured -- routine, not an error): NZBN</div>
+</div>
+
+
+
+<h2>What was checked</h2>
+<p class="meta">Every adjudicated-list screen this scan ran, including the ones that came back clean &mdash; so a negative result is visible as a result, not as an absence you have to infer. Only sanctions, exclusion, disqualification, PEP, and offshore-leaks screens appear here: those are the checks where "not on this list" means something. Mention-style screens (news, filings, litigation dockets) are deliberately excluded, since "no article mentions this entity" is not exculpatory in any comparable way.</p>
+<table class="coverage-table">
+  <thead><tr><th>Screen</th><th>Names checked</th><th>Result</th></tr></thead>
+  <tbody>
+  
+    <tr>
+      <td>UK sanctions screen</td>
+      <td class="num">4</td>
+      <td><span class="coverage-clean">no matches</span></td>
+    </tr>
+  
+  </tbody>
+</table>
+
+
+
+<h2>Notes</h2>
+<ul class="plain notes">
+<li>GLEIF: no match for &#34;Alpha&#34;</li>
+
+</ul>
+
+</section>
+
+
+<section class="tab-panel" data-panel="diff" role="tabpanel">
+<h2>Diff against baseline.json</h2>
+<p class="diff-score">Score: 8 &rarr; 11 (+3)</p>
+<p>0 new entities:</p>
+<ul class="plain diff-new">
+
+</ul>
+<p>0 new indicator(s):</p>
+
+</section>
+
+
+<div class="disclaimer">
+  This is a lead-generation report, not a finding &mdash; verify every indicator by hand before drawing any conclusion. It is not a determination of money laundering, tax evasion, terrorism financing, or any other wrongdoing.
+</div>
+
+</body>
+</html>
+

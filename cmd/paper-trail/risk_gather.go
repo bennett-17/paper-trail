@@ -647,7 +647,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 			var currentOfficers []companieshouse.Officer
 			var activePSCs []companieshouse.PSC
 
-			if officers, err := chClient.GetOfficers(hit.CompanyNumber, limit); err != nil {
+			if officers, err := chClient.GetOfficers(hit.CompanyNumber, companyOfficerFetchLimit); err != nil {
 				note("%s (%s) officers: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
 				for _, o := range officers {
@@ -668,7 +668,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				}
 			}
 
-			if pscs, err := chClient.GetPersonsWithSignificantControl(hit.CompanyNumber, limit); err != nil {
+			if pscs, err := chClient.GetPersonsWithSignificantControl(hit.CompanyNumber, companyPSCFetchLimit); err != nil {
 				note("%s (%s) beneficial owners: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
 				for _, p := range pscs {
@@ -699,7 +699,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 			}
 
 			var outstandingCharges int
-			if charges, err := chClient.GetCharges(hit.CompanyNumber, limit); err != nil {
+			if charges, err := chClient.GetCharges(hit.CompanyNumber, companyChargeFetchLimit); err != nil {
 				note("%s (%s) charges: %v", hit.Name, hit.CompanyNumber, err)
 			} else {
 				for _, ch := range charges {
@@ -710,7 +710,7 @@ func gatherCompaniesHouseEntities(chClient *companieshouse.Client, queries []str
 				}
 			}
 			if outstandingCharges > 0 {
-				statements, err := chClient.GetPersonsWithSignificantControlStatements(hit.CompanyNumber, limit)
+				statements, err := chClient.GetPersonsWithSignificantControlStatements(hit.CompanyNumber, companyPSCStatementFetchLimit)
 				if err != nil {
 					note("%s (%s) PSC statements: %v", hit.Name, hit.CompanyNumber, err)
 				}
@@ -930,7 +930,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 			var activePSCs []companieshouse.PSC
 			var chargees []string
 			if chClient != nil && detail.CompaniesHouseNumber != "" {
-				if officers, err := chClient.GetOfficers(detail.CompaniesHouseNumber, limit); err != nil {
+				if officers, err := chClient.GetOfficers(detail.CompaniesHouseNumber, companyOfficerFetchLimit); err != nil {
 					chNote("%s (company %s): %v", detail.Name, detail.CompaniesHouseNumber, err)
 				} else {
 					for _, o := range officers {
@@ -945,7 +945,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				// necessarily a director, and vice versa -- so both
 				// get pulled in rather than one standing in for the
 				// other.
-				if pscs, err := chClient.GetPersonsWithSignificantControl(detail.CompaniesHouseNumber, limit); err != nil {
+				if pscs, err := chClient.GetPersonsWithSignificantControl(detail.CompaniesHouseNumber, companyPSCFetchLimit); err != nil {
 					chNote("%s (company %s) PSC: %v", detail.Name, detail.CompaniesHouseNumber, err)
 				} else {
 					for _, p := range pscs {
@@ -961,7 +961,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				// since a satisfied (paid-off) one no longer
 				// reflects a live relationship.
 				var outstandingCharges int
-				if charges, err := chClient.GetCharges(detail.CompaniesHouseNumber, limit); err != nil {
+				if charges, err := chClient.GetCharges(detail.CompaniesHouseNumber, companyChargeFetchLimit); err != nil {
 					chNote("%s (company %s) charges: %v", detail.Name, detail.CompaniesHouseNumber, err)
 				} else {
 					for _, ch := range charges {
@@ -987,7 +987,7 @@ func gatherUKCharityEntities(chClient *companieshouse.Client, queries []string, 
 				// can fire in -- avoids a wasted call for the
 				// common case of a company with neither.
 				if outstandingCharges > 0 {
-					statements, err := chClient.GetPersonsWithSignificantControlStatements(detail.CompaniesHouseNumber, limit)
+					statements, err := chClient.GetPersonsWithSignificantControlStatements(detail.CompaniesHouseNumber, companyPSCStatementFetchLimit)
 					if err != nil {
 						chNote("%s (company %s) PSC statements: %v", detail.Name, detail.CompaniesHouseNumber, err)
 					}
@@ -1484,7 +1484,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 		if i >= officerHop2MaxCompanies {
 			break
 		}
-		officers, err := chClient.GetOfficers(hop1.CompanyNumber, limit)
+		officers, err := chClient.GetOfficers(hop1.CompanyNumber, companyOfficerFetchLimit)
 		if err != nil {
 			note("%s (hop 2 officers): %v", hop1.CompanyName, err)
 			continue
@@ -1940,6 +1940,38 @@ func frequentRenaming(previousNames []companieshouse.PreviousName) string {
 // distribution.
 const appointmentBurstWindow = 7 * 24 * time.Hour
 const appointmentBurstThreshold = 6
+
+// Per-company record depths, deliberately separate from the scan's
+// --limit.
+//
+// --limit means "max candidates to pull per source, per query term": a
+// search-BREADTH control over how many companies a name search returns.
+// It was also being passed as the page size for a single company's
+// officer, PSC, charge and statement lists, which is DEPTH into one
+// record. Two unrelated knobs sharing one value.
+//
+// The effect was silent and backwards. Confirmed live on a real company
+// with 74 officers on the register (11 of them active): at the default
+// --limit=5 the tool fetched five. The officer list feeds nearly every
+// person-based signal here -- shared_person, the officer fan-out that
+// discovers connected companies at all, and the sanctions, PEP and
+// disqualified-director screens -- so lowering --limit to make a scan
+// faster quietly shrank the evidence base behind every one of them,
+// with nothing in the report saying so.
+//
+// 100 is chosen per endpoint because the officers endpoint returns a
+// full 74-officer register in one request at that page size (confirmed
+// live; unlike /appointments, it does not cap at 50). Depth beyond one
+// page is deliberately not pursued here: a company with more than 100
+// officers or charges is vanishingly rare, and the downstream cost of
+// each extra ACTIVE officer is real -- every one is screened against
+// several lists and fanned out.
+const (
+	companyOfficerFetchLimit      = 100
+	companyPSCFetchLimit          = 100
+	companyChargeFetchLimit       = 100
+	companyPSCStatementFetchLimit = 100
+)
 
 // officerAppointmentFetchLimit is how much of ONE officer's
 // register-wide appointment history to examine when looking for bursts.
