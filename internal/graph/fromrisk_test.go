@@ -117,3 +117,52 @@ func TestBuildFromRiskProducesMultipleEdgesForCorroboratedPair(t *testing.T) {
 		t.Errorf("edge relationship types = %v, want both shared_address and shared_person", codes)
 	}
 }
+
+// TestMaxWeightCountsSingleEntityIndicators guards a real defect: node
+// MaxWeight was derived only from edges, but edges exist only for
+// indicators naming 2+ entities, and EVERY high-weight indicator in
+// this project names exactly one (sanctions matches, exclusions,
+// disqualified_director, convergent_risk). The viewer's ">= 5 draws a
+// red outline" rule was therefore unreachable -- a sanctions-matched
+// company could not be made to stand out.
+func TestMaxWeightCountsSingleEntityIndicators(t *testing.T) {
+	entities := []risk.Entity{
+		risk.NewEntity("companieshouse", "1", "Alpha Ltd", nil, nil),
+		risk.NewEntity("companieshouse", "2", "Beta Ltd", nil, nil),
+	}
+	score := risk.Score{Indicators: []risk.Indicator{
+		// Single-entity, high weight: creates no edge.
+		{Code: "sanctions_match", Weight: 5, Entities: []string{"companieshouse: Alpha Ltd (1)"}},
+		// Multi-entity, lower weight: creates an edge.
+		{Code: "shared_person", Weight: 3, Entities: []string{
+			"companieshouse: Alpha Ltd (1)", "companieshouse: Beta Ltd (2)"}},
+	}}
+
+	g := BuildFromRisk(entities, score)
+	byID := map[string]Node{}
+	for _, n := range g.Nodes {
+		byID[n.ID] = n
+	}
+	if got := byID["companieshouse:1"].MaxWeight; got != 5 {
+		t.Errorf("Alpha MaxWeight = %d, want 5 from the single-entity sanctions match", got)
+	}
+	if got := byID["companieshouse:2"].MaxWeight; got != 3 {
+		t.Errorf("Beta MaxWeight = %d, want 3 from the shared_person edge", got)
+	}
+}
+
+// TestMaxWeightIgnoresLabelsWithNoNode: query pseudo-entities ("search
+// query: ...") name no real entity and must not crash or invent a node.
+func TestMaxWeightIgnoresLabelsWithNoNode(t *testing.T) {
+	entities := []risk.Entity{risk.NewEntity("edgar", "1", "Alpha Corp", nil, nil)}
+	score := risk.Score{Indicators: []risk.Indicator{
+		{Code: "sanctions_match", Weight: 5, Entities: []string{`search query: "Alpha"`}},
+	}}
+	g := BuildFromRisk(entities, score)
+	if len(g.Nodes) != 1 {
+		t.Fatalf("got %d nodes, want 1", len(g.Nodes))
+	}
+	if g.Nodes[0].MaxWeight != 0 {
+		t.Errorf("MaxWeight = %d, want 0 -- the indicator named a query, not this entity", g.Nodes[0].MaxWeight)
+	}
+}

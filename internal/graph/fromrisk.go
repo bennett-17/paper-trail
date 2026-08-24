@@ -61,16 +61,34 @@ func BuildFromRisk(entities []risk.Entity, score risk.Score) Graph {
 		}
 	}
 
-	// MaxWeight per node: the highest Weight among edges touching it,
-	// used by the HTML viewer to size/highlight nodes by priority (see
-	// Node.MaxWeight).
+	// MaxWeight per node: the highest Weight among ALL indicators naming
+	// that entity, not merely the edges touching it.
+	//
+	// Deriving it from edges alone was a real defect. An edge exists
+	// only for an indicator naming 2+ entities, but every high-weight
+	// indicator in this project names exactly ONE -- sanctions_match,
+	// uk_sanctions_match, un_sanctions_match, sam_exclusion,
+	// interpol_red_notice_match, roe_beneficial_owner_sanctioned (all
+	// 5), disqualified_director (6) and convergent_risk (up to 6). None
+	// of them creates an edge, so none of them ever reached MaxWeight,
+	// and the viewer's ">= 5 gets a red outline" rule was effectively
+	// unreachable: the single most important thing this tool can find
+	// about a company could not make its node stand out. Confirmed
+	// live on a real 16-node graph where the highest node weight was 3
+	// and no node was outlined.
+	//
+	// Counting every naming indicator fixes both cues the viewer draws
+	// from this field -- node size and the high-weight outline.
 	maxWeightByID := make(map[string]int, len(nodes))
-	for _, e := range edges {
-		if e.Weight > maxWeightByID[e.Source] {
-			maxWeightByID[e.Source] = e.Weight
-		}
-		if e.Weight > maxWeightByID[e.Target] {
-			maxWeightByID[e.Target] = e.Weight
+	for _, ind := range score.Indicators {
+		for _, label := range ind.Entities {
+			id, ok := idByLabel[label]
+			if !ok {
+				continue // a query pseudo-entity or an entity with no node
+			}
+			if ind.Weight > maxWeightByID[id] {
+				maxWeightByID[id] = ind.Weight
+			}
 		}
 	}
 	for i := range nodes {
