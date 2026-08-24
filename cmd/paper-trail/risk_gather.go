@@ -1427,7 +1427,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 		if o.OfficerID == "" {
 			continue // API didn't return a linkable ID for this officer (seen for some corporate officers)
 		}
-		appointments, totalAppointments, err := officerCache.getAppointments(chClient, o.OfficerID, limit)
+		appointments, totalAppointments, err := officerCache.getAppointments(chClient, o.OfficerID, officerAppointmentPageSize)
 		if err != nil {
 			note("%s appointments: %v", o.Name, err)
 			continue
@@ -1494,7 +1494,7 @@ func officerFanOut(chClient *companieshouse.Client, rootCompanyNumber string, cu
 				continue
 			}
 			hop2Officers[o2.OfficerID] = true
-			appointments2, _, err := officerCache.getAppointments(chClient, o2.OfficerID, limit)
+			appointments2, _, err := officerCache.getAppointments(chClient, o2.OfficerID, officerAppointmentPageSize)
 			if err != nil {
 				note("%s appointments (hop 2) for %s: %v", o2.Name, hop1.CompanyName, err)
 				continue
@@ -1908,6 +1908,30 @@ func frequentRenaming(previousNames []companieshouse.PreviousName) string {
 const appointmentBurstWindow = 7 * 24 * time.Hour
 const appointmentBurstThreshold = 3
 
+// officerAppointmentPageSize is how much of ONE officer's register-wide
+// appointment history to fetch when looking for bursts.
+//
+// This is deliberately NOT the scan's --limit. --limit means "max
+// candidates to pull per source, per query term" -- a search-BREADTH
+// control -- and it was being passed straight through as this page
+// size, which is a measure of DEPTH into a single officer's history.
+// Two unrelated knobs, conflated by accident. At the default --limit=5
+// that meant appointmentBurst and resignationBurst judged "3 or more
+// companies within a week" against just five appointments out of a
+// possible several hundred, so detecting a genuine burst was largely
+// accidental, and lowering --limit to speed a scan up silently blinded
+// both detectors.
+//
+// 50 is the Companies House ceiling for this endpoint, confirmed live:
+// requesting items_per_page=100 or 500 against a real 540-appointment
+// officer returns 50 either way. The client does not paginate, so 50
+// is the most one request can see, and burst detection remains a lower
+// bound for officers with longer histories -- stated here rather than
+// left for someone to rediscover.
+//
+// Costs nothing: five items or fifty is the same single GET.
+const officerAppointmentPageSize = 50
+
 // datedCompany is one (date, company) pair used by burstDescription --
 // shared by appointmentBurst (AppointedOn dates) and resignationBurst
 // (ResignedOn dates), since the clustering logic itself is identical,
@@ -1930,6 +1954,39 @@ type datedCompany struct {
 // threshold. The start date is the meaningful timeline anchor here:
 // it's when the cluster began, and the window's length is already
 // stated in the description itself.
+// largestBurst reports the biggest cluster of DISTINCT companies an
+// officer joined (or left) inside appointmentBurstWindow -- the raw
+// quantity appointmentBurstThreshold cuts, exposed so calibrate can
+// measure its distribution instead of the threshold being reasoned at.
+func largestBurst(dates []datedCompany) int {
+	sort.Slice(dates, func(i, j int) bool { return dates[i].when.Before(dates[j].when) })
+	best := 0
+	for i := range dates {
+		seen := map[string]bool{}
+		for j := i; j < len(dates) && dates[j].when.Sub(dates[i].when) <= appointmentBurstWindow; j++ {
+			seen[dates[j].number] = true
+		}
+		if len(seen) > best {
+			best = len(seen)
+		}
+	}
+	return best
+}
+
+// appointmentBurstSize is largestBurst over an officer's appointments,
+// for measurement only.
+func appointmentBurstSize(appointments []companieshouse.Appointment) int {
+	var dates []datedCompany
+	for _, a := range appointments {
+		t, err := time.Parse("2006-01-02", a.AppointedOn)
+		if err != nil {
+			continue
+		}
+		dates = append(dates, datedCompany{when: t, number: a.CompanyNumber, name: a.CompanyName})
+	}
+	return largestBurst(dates)
+}
+
 func burstDescription(dates []datedCompany, verb string) (desc, date string) {
 	sort.Slice(dates, func(i, j int) bool { return dates[i].when.Before(dates[j].when) })
 

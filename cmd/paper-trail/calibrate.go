@@ -48,7 +48,10 @@ type calibrationSample struct {
 	// (mailDropAddressThreshold); OfficerAppointments is each current
 	// officer's register-wide appointment count
 	// (massNomineeOfficerThreshold).
-	PostcodeDensity     int   `json:"postcodeDensity,omitempty"`
+	PostcodeDensity int `json:"postcodeDensity,omitempty"`
+	// BurstSizes is each officer's largest same-week appointment
+	// cluster -- what appointmentBurstThreshold cuts.
+	BurstSizes          []int `json:"burstSizes,omitempty"`
 	OfficerAppointments []int `json:"officerAppointments,omitempty"`
 }
 
@@ -163,16 +166,17 @@ func runCalibrate(args []string) {
 		// burst indicators are exactly the ones doing real work in
 		// shell-company detection, and their weights were pure guesswork
 		// until now.
-		var officerAppts []int
+		var officerAppts, burstSizes []int
 		for _, o := range officers {
 			if o.OfficerID == "" {
 				continue // corporate officers often carry no linkable ID
 			}
-			appts, total, err := chClient.GetOfficerAppointments(o.OfficerID, officerAppointmentSampleLimit)
+			appts, total, err := chClient.GetOfficerAppointments(o.OfficerID, officerAppointmentPageSize)
 			if err != nil {
 				continue
 			}
 			officerAppts = append(officerAppts, total)
+			burstSizes = append(burstSizes, appointmentBurstSize(appts))
 			extra = append(extra, officerAppointmentIndicators(o.Name, appts, total, entity.Label())...)
 		}
 		score := risk.Assess([]risk.Entity{entity}, extra)
@@ -189,7 +193,7 @@ func runCalibrate(args []string) {
 		sort.Strings(codes)
 		samples = append(samples, calibrationSample{
 			CompanyNumber: number, Name: entity.Name, Codes: codes,
-			PostcodeDensity: postcodeDensity, OfficerAppointments: officerAppts,
+			PostcodeDensity: postcodeDensity, OfficerAppointments: officerAppts, BurstSizes: burstSizes,
 		})
 	}
 	if !*quiet {
@@ -267,14 +271,6 @@ func calibrationEntity(c *companieshouse.Client, number string) (risk.Entity, co
 	e.DissolvedOn = company.DissolvedOn
 	return e, company, current, true
 }
-
-// officerAppointmentSampleLimit bounds the per-officer appointments
-// page during calibration. The register-wide TOTAL that
-// mass_nominee_officer keys on comes from the API's own total_results
-// and is unaffected by paging, so a small page is enough for it; the
-// burst checks see only this many appointments, which makes their
-// measured rates a floor rather than an exact figure.
-const officerAppointmentSampleLimit = 50
 
 func writeCalibrationTable(w *os.File, r CalibrationReport) {
 	fmt.Fprintf(w, "Indicator base rates over %d random companies (%d lookups failed)\n", r.Sampled, r.Failed)
